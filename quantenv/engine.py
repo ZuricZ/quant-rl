@@ -1,7 +1,5 @@
 """Runs agent-written signal code and scores it by rank IC."""
 
-from __future__ import annotations
-
 import multiprocessing as mp
 import random
 from typing import Any, Callable

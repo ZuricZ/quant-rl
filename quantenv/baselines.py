@@ -1,8 +1,6 @@
 """Scripted baselines. Each returns signal code and a claimed IC, the same
 submission an agent makes."""
 
-from __future__ import annotations
-
 from quantenv import engine
 from quantenv.generator import Dataset, GroundTruth
 

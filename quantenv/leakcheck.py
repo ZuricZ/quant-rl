@@ -6,8 +6,6 @@ changes, the signal used the leak. Comparing ranks rather than raw values
 ignores floating-point noise that cannot change the score.
 """
 
-from __future__ import annotations
-
 import polars as pl
 
 from quantenv import engine

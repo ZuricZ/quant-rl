@@ -8,8 +8,6 @@ numpy is used only to draw random numbers, which polars cannot do. All
 draws for a split come from one call; everything else is polars expressions.
 """
 
-from __future__ import annotations
-
 import dataclasses
 import datetime as dt
 import functools

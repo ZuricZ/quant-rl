@@ -5,8 +5,6 @@ enforced. The worker rebuilds its split from the seed, so hidden data exists
 only inside the scoring process.
 """
 
-from __future__ import annotations
-
 import dataclasses
 import math
 import time
@@ -47,7 +45,7 @@ class Score:
 
 def invalid_score(error: str) -> Score:
     """The score of a submission that cannot be evaluated."""
-    return Score(0.0, 0.0, math.nan, 0, 1, error)
+    return Score(0.0, 0.0, float("nan"), 0, 1, error)
 
 
 def score_submission(
