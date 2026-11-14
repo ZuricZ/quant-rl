@@ -102,6 +102,7 @@ quantenv/                 core package, no verifiers import
   sources/synthetic.py    the generator: seed -> Panel + ground truth
   alpha.py                Alpha base class; compile agent code into an Alpha subclass
   walkforward.py          features once, then fit/predict per block on a Panel
+  sandbox.py              runs agent code in a fresh, isolated process per pipeline run
   metrics.py              rank IC and other functions of (predictions, Panel)
   checks.py               truncation, column dependence, shifted IC; generic over Panel
   scoring.py              backtest and final score in an isolated process with time limits
@@ -109,10 +110,12 @@ quantenv/                 core package, no verifiers import
 environments/quant_research/
   taskset.py              verifiers taskset, reward, metrics, stop
   servers/research.py     toolset: describe, backtest, submit
+  grade.py                scores a submission on the hidden days, inside the runtime
+scripts/run_baselines.py  naive, oracle and leaky baselines on the eval tasks
 tests/
 ```
 
-The taskset is infinite, one seed per task. Seeds 0 to 29 are the eval split.
+The taskset is infinite, one dataset per task. Tasks 0 to 29 are the eval split. Task i uses the seed `dataset_seed(i, secret)` (Decision 6).
 
 ## Tests to write first
 
@@ -124,6 +127,7 @@ The taskset is infinite, one seed per task. Seeds 0 to 29 are the eval split.
 - `fit` never receives a row whose target is not yet realised.
 - An alpha that fits a linear model on the real features recovers about the oracle IC.
 - The same seed gives the same dataset and the same scores.
+- Agent code cannot carry state between pipeline runs, reach unrealised targets, or see the caller's environment (`tests/test_sandbox.py`).
 - The checks run on a hand-built panel with no generator involved.
 
 ## Runs and results
@@ -182,6 +186,22 @@ One plot: claim gap against backtests used.
    - **State.** Shared state is pulled before every tool call and pushed whole after it, so concurrent calls would overwrite each other. The toolset keeps its own record of the episode and copies it into the state at the end of every call.
    - **Scoring signals.** Metrics run before rewards. Both read one grader result, which is computed once and kept on `trace.info["score"]`. Metrics: `used_leak`, `lookahead`, `invalid`, `raw_ic` (the IC before checks zero it), `claim_gap`, `backtests_used`, and `shifted_ic_m1`, `shifted_ic_p1`, `shifted_ic_p2`. Reward: `true_ic`.
    - **Model-free check.** `Task.validate` grades the oracle alpha. `vf-validate` uses it for its gold check. This is the only place outside the generator and the results table that reads the ground truth.
+6. **Agent code runs in a sandbox, and dataset seeds come from a secret.** Decided 14 November 2026, after three exploits worked against the Day 5 build. Each one scored a hidden-period submission on seed 0:
+   - *Caching across check runs.* Every check reran the pipeline in the same process with the same class. A class-level cache filled in the base run returned the same predictions in the permuted run, so leak use went unflagged: reward 0.298, `used_leak = 0`.
+   - *Reading the target.* `walkforward` ran agent code in the process that held the whole panel, targets included. Agent code could reach `fwd_return` through the call stack or `gc`.
+   - *Rebuilding the data.* The generator is installed in the container and the seeds were 0 to 29. Code that matched the visible data against `generate(s)` for small `s` rebuilt the hidden periods: reward 1.0.
+
+   The fix:
+   - `walkforward` splits into a trusted driver and a session that runs the agent's steps. The driver owns the panel, chooses the blocks and validates every output. The session receives the observable columns, then each block's newly realised targets just before that block. It never holds a target that is not yet realised.
+   - `sandbox.Sandbox` runs each session, meaning one pipeline run, in a fresh interpreter. Requests go to the child pickled; only data frames come back, as Arrow IPC, never unpickled. The child starts with an empty environment and, when the caller is root, as a dedicated unprivileged user. After each session, every process of that user is killed and its files in the shared temporary directories are removed. The taskset uses `nobody`; the user must not run anything else.
+   - `scoring` runs the walk-forward and the checks in its trusted worker, and agent code only through the sandbox.
+   - `synthetic.dataset_seed(index, secret)` derives 128-bit seeds. The taskset's `secret` is random unless set. Runs that must share datasets, such as several models and the baselines (`run_baselines.py --secret`), must set the same one. The agent never sees the secret or the seed. The grader deletes its request file, which holds the seed, before any agent code runs.
+   - The toolset runs backtests one at a time, because each one ends by killing the sandbox user's processes.
+
+   Still open:
+   - Network access from agent code. Through an outside server, a run could leave state for the next one and defeat the checks the same way the cache did. Closing this needs the runtime's network policy, which would also cut off the tool server's own traffic.
+   - System V IPC, which the clean-up does not remove.
+   - Running the sandbox without root, where there is no user switch and none of the user-based protections apply.
 
 ## Open decisions
 
