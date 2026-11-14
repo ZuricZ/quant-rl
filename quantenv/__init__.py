@@ -1,1 +1,1 @@
-"""Simulated quant research datasets, signal scoring and leak checks."""
+"""Quant research environment core: panels, alphas, walk-forward, checks, scoring."""

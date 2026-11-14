@@ -17,8 +17,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from quantenv.panel import Panel, Schema
-from quantenv.scoring import EvalData
+from quantenv.panel import EvalData, Panel, Schema
 
 _START = dt.datetime(2000, 1, 3)
 _RETURN_VOL = 0.02

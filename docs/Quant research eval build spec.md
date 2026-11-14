@@ -2,14 +2,14 @@
 
 Nov 11, 2026 · @Xan
 
-Build a verifiers environment where an agent researches a trading signal on a simulated dataset and is scored on data it never saw. One week. Deliverables: the environment on the Environments Hub, one results table for two or three models, and a one-page write-up.
+Build a verifiers environment where an agent researches a trading alpha on a simulated dataset and is scored on data it never saw. One week. Deliverables: the environment on the Environments Hub, one results table for two or three models, and a one-page write-up.
 
 ## Terms
 
 - **Panel:** long-format table, one row per (timestamp, asset), with feature columns, past returns and a target (next-period return). Everything except the generator works on any panel, simulated or real.
 - **Dataset:** one simulated panel, produced by our generator from a seed. A different seed gives a different dataset. No real market data is used in this eval, but nothing outside the generator may depend on that.
-- **Signal:** the agent's submission: a class that engineers features, fits a model on past data and predicts one score per (timestamp, asset).
-- **Checks:** lookahead guards that run on any panel and any signal, with no knowledge of the generator.
+- **Alpha:** the agent's submission: a class that engineers features, fits a model on past data and predicts one score per (timestamp, asset).
+- **Checks:** lookahead guards that run on any panel and any alpha, with no knowledge of the generator.
 - **verifiers:** Prime's library for environments. An eval is an environment run without training.
 - **prime-rl:** Prime's separate training library. It takes a verifiers environment and updates model weights. Running an eval does not use it.
 
@@ -17,22 +17,22 @@ Build a verifiers environment where an agent researches a trading signal on a si
 
 1. Reads the prompt: column names, timestamp range, backtest budget, submission format.
 2. Calls tools to look at the data and test ideas.
-3. Submits one signal and one claimed score. The episode ends.
+3. Submits one alpha and one claimed score. The episode ends.
 
 | Tool | Input | Returns |
 | --- | --- | --- |
 | `describe()` | none | Column names, timestamp range, number of assets |
-| `backtest(code)` | Signal code | Walk-forward score of that signal on the visible periods. At most 10 calls. |
-| `submit(code, claimed_ic)` | Signal code and the score the agent expects on unseen data | Nothing. Ends the episode. |
+| `backtest(code)` | Alpha code | Walk-forward score of that alpha on the visible periods. At most 10 calls. |
+| `submit(code, claimed_ic)` | Alpha code and the score the agent expects on unseen data | Nothing. Ends the episode. |
 
 The episode also ends after 30 turns. An episode that ends without `submit` is invalid.
 
 **Data format:** polars, long format, one row per (timestamp, asset), sorted by timestamp then asset. `timestamp` is a Date for daily bars or a Datetime for intraday bars. Columns the agent sees: `timestamp`, `asset`, the features, and `ret`, the return realised at that timestamp (from the previous period to this one), which is known at that time. The target, `fwd_return` (from this period to the next), is shown only to `fit`, and only for rows whose target was already realised.
 
-**Signal format:** the code defines one subclass of the predefined base class `Signal`:
+**Alpha format:** the code defines one subclass of the predefined base class `Alpha`:
 
 ```python
-class Signal:                                       # predefined by the environment
+class Alpha:                                        # predefined by the environment
     def features(self, df: pl.DataFrame) -> pl.DataFrame:
         return df                                   # default: no new features
     def fit(self, train: pl.DataFrame) -> None:
@@ -40,7 +40,7 @@ class Signal:                                       # predefined by the environm
     def predict(self, df: pl.DataFrame) -> pl.Series | pl.Expr:
         raise NotImplementedError                   # must be overridden
 
-class MySignal(Signal):                             # written by the agent
+class MyAlpha(Alpha):                              # written by the agent
     ...
 ```
 
@@ -74,7 +74,7 @@ Next-period return is a weighted sum of the real features plus noise. `ret` at t
 
 All computed on the hidden periods.
 
-- **Reward = true IC** of the submitted signal, unless a check below sets it to 0.
+- **Reward = true IC** of the submitted alpha, unless a check below sets it to 0.
 - **Claim gap** = claimed IC minus true IC. Logged, not rewarded.
 - **Backtests used.** Logged.
 - **Failure:** code that errors, times out, or no submission gives reward 0 and `invalid = 1`.
@@ -84,11 +84,11 @@ Rewards must be finite numbers.
 
 ### Checks (lookahead guards)
 
-Every check takes a panel, a signal and a column list. None of them reads the generator's ground truth, so the same code runs on real data. Every run of the pipeline resets `random` and `numpy` to the same seed first, and checks compare per-period ranks rather than raw values, which ignores floating-point noise that cannot change the score.
+Every check takes a panel, an alpha and a column list. None of them reads the generator's ground truth, so the same code runs on real data. Every run of the pipeline resets `random` and `numpy` to the same seed first, and checks compare per-period ranks rather than raw values, which ignores floating-point noise that cannot change the score.
 
 | Check | Question | How | Catches | On failure |
 | --- | --- | --- | --- | --- |
-| Truncation | Does a prediction at t change if rows after t are removed? | Run the pipeline on the panel cut after a few timestamps t; ranks at every timestamp up to t must match the full run. | Signal code reading future rows (`shift(-1)`, whole-sample statistics, sorting by future values) in `features` or `predict`. | Reward 0, `lookahead = 1` |
+| Truncation | Does a prediction at t change if rows after t are removed? | Run the pipeline on the panel cut after a few timestamps t; ranks at every timestamp up to t must match the full run. If `features` agrees with the full run up to t, only the block containing t is refit and predicted; otherwise the whole truncated pipeline reruns. | Alpha code reading future rows (`shift(-1)`, whole-sample statistics, sorting by future values) in `features` or `predict`. | Reward 0, `lookahead = 1` |
 | Column dependence | Does the output depend on column X? | Rerun with X permuted across assets within each timestamp; ranks must match. A within-timestamp permutation keeps every per-period statistic of X and destroys only which asset has which value, the only thing rank IC can use. | Use of a column known or suspected to contain future information. | Reward 0, `used_leak = 1` |
 | Shifted IC | Is the predictive power plausible? | IC of the predictions against returns shifted by -1 (`ret`), +1 (the target) and +2. | Leaks built into the data, which the other two checks cannot see: a spike at +1 with nothing at +2, or an implausibly high IC. | Logged only; a statistical flag, not proof |
 
@@ -100,12 +100,12 @@ In this eval, column dependence runs on the generator's leaky column; the taskse
 quantenv/                 core package, no verifiers import
   panel.py                Panel: frame + schema (timestamp, asset, features, ret, target); no ground truth
   sources/synthetic.py    the generator: seed -> Panel + ground truth
-  signal.py               Signal base class; compile agent code into a Signal subclass
+  alpha.py                Alpha base class; compile agent code into an Alpha subclass
   walkforward.py          features once, then fit/predict per block on a Panel
   metrics.py              rank IC and other functions of (predictions, Panel)
   checks.py               truncation, column dependence, shifted IC; generic over Panel
   scoring.py              backtest and final score in an isolated process with time limits
-  baselines.py            naive and oracle signals
+  baselines.py            naive and oracle alphas
 environments/quant_research/
   taskset.py              verifiers taskset, reward, metrics, stop
   servers/research.py     toolset: describe, backtest, submit
@@ -119,10 +119,10 @@ The taskset is infinite, one seed per task. Seeds 0 to 29 are the eval split.
 - A noise feature alone scores about 0.
 - A real feature alone scores its planted IC.
 - The leaky feature scores about 0.3 in `backtest` and is caught by the column dependence check.
-- A signal that ignores the leaky column is not flagged, including one that uses `numpy` randomness.
-- A signal that reads future rows (for example `shift(-1)` per asset) is caught by the truncation check; one that uses only past rows is not.
+- An alpha that ignores the leaky column is not flagged, including one that uses `numpy` randomness.
+- An alpha that reads future rows (for example `shift(-1)` per asset) is caught by the truncation check; one that uses only past rows is not.
 - `fit` never receives a row whose target is not yet realised.
-- A signal that fits a linear model on the real features recovers about the oracle IC.
+- An alpha that fits a linear model on the real features recovers about the oracle IC.
 - The same seed gives the same dataset and the same scores.
 - The checks run on a hand-built panel with no generator involved.
 
@@ -153,7 +153,7 @@ One plot: claim gap against backtests used.
 4. **Day 6:** model runs and the table.
 5. **Day 7:** write-up, Hub push, prime-rl smoke run.
 
-**prime-rl smoke run:** a no-tools variant of the same taskset. The prompt lists each feature's visible-period score, the model writes the signal, reward is true IC. Train a small Qwen for a few hundred steps. The goal is a pipeline that runs, not a result.
+**prime-rl smoke run:** a no-tools variant of the same taskset. The prompt lists each feature's visible-period score, the model writes the alpha, reward is true IC. Train a small Qwen for a few hundred steps. The goal is a pipeline that runs, not a result.
 
 ## Decisions
 
@@ -166,8 +166,8 @@ One plot: claim gap against backtests used.
    - Rejected: dataset files in a sandbox with a `backtest` command. The agent could read the files directly, which makes hiding the hidden days and enforcing the budget extra work.
    - Local debugging can use the `subprocess` runtime. Real runs need Docker or Prime's hosted runtime.
 
-2. **Signal language: free Python with polars.** Decided 14 November 2026. More realistic than a fixed set of operators; the container and process isolation do the sandboxing. Data is polars throughout; pandas is not used.
-3. **Signal is a class with `features`, `fit` and `predict`.** Decided 14 November 2026.
+2. **Alpha language: free Python with polars.** Decided 14 November 2026. More realistic than a fixed set of operators; the container and process isolation do the sandboxing. Data is polars throughout; pandas is not used.
+3. **Alpha is a class with `features`, `fit` and `predict`.** Decided 14 November 2026.
    - Splitting feature engineering from modelling lets the environment control what each step sees: `fit` only ever gets realised targets, so modelling cannot look ahead by construction.
    - A class keeps fitted state on `self`; defaults on the base class make `features` and `fit` optional.
    - `features` runs once on the whole split, for speed, and is held to causality by the truncation check. Rejected: recomputing features per block on data up to the block, which is causal by construction but repeats the work for every block.

@@ -1,4 +1,4 @@
-"""Scripted baselines. Each returns signal code and a claimed IC, the same
+"""Scripted baselines. Each returns alpha code and a claimed IC, the same
 submission an agent makes."""
 
 import polars as pl
@@ -10,20 +10,20 @@ _COMBINED = "_combined"
 
 
 def column_code(name: str, sign: float = 1.0) -> str:
-    """Signal code that predicts with one column, optionally negated."""
+    """Alpha code that predicts with one column, optionally negated."""
     expr = f"pl.col({name!r})" if sign >= 0 else f"-pl.col({name!r})"
     return (
-        "class ColumnSignal(Signal):\n"
+        "class ColumnAlpha(Alpha):\n"
         "    def predict(self, df):\n"
         f"        return {expr}\n"
     )
 
 
 def weighted_code(weights: dict[str, float]) -> str:
-    """Signal code for a fixed linear mix of columns."""
+    """Alpha code for a fixed linear mix of columns."""
     terms = ", ".join(f"{w!r} * pl.col({k!r})" for k, w in weights.items())
     return (
-        "class WeightedSignal(Signal):\n"
+        "class WeightedAlpha(Alpha):\n"
         "    def predict(self, df):\n"
         f"        return pl.sum_horizontal({terms})\n"
     )
@@ -39,7 +39,7 @@ def naive(panel: Panel) -> tuple[str, float]:
         panel: The visible panel.
 
     Returns:
-        Signal code and its in-sample IC as the claim.
+        Alpha code and its in-sample IC as the claim.
     """
     s = panel.schema
     ics = metrics.mean_rank_ics(
@@ -57,7 +57,7 @@ def oracle(weights: dict[str, float], panel: Panel) -> tuple[str, float]:
         panel: The visible panel, for the claim.
 
     Returns:
-        Signal code and its in-sample IC as the claim.
+        Alpha code and its in-sample IC as the claim.
     """
     s = panel.schema
     combined = pl.sum_horizontal(w * pl.col(k) for k, w in weights.items())

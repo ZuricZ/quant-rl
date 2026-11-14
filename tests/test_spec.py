@@ -3,7 +3,8 @@
 import pytest
 
 from quantenv import baselines, checks, metrics, walkforward
-from quantenv.signal import compile_signal
+from quantenv.alpha import compile_alpha
+from quantenv.panel import between
 from quantenv.sources import synthetic
 
 WF = walkforward.WalkForward()
@@ -18,8 +19,10 @@ def data():
 def _ic(code: str, data) -> float:
     panel = data.panel
     s = panel.schema
-    predictions = walkforward.run(compile_signal(code), panel, WF)
-    frame = panel.frame.tail(predictions.len()).with_columns(predictions)
+    run = walkforward.run(compile_alpha(code), panel, WF)
+    frame = between(panel.frame, s.timestamp, run.start).with_columns(
+        run.predictions.get_column(walkforward.PREDICTION)
+    )
     return metrics.rank_ic(frame, walkforward.PREDICTION, s.target, s.timestamp)
 
 
@@ -38,7 +41,7 @@ def test_leaky_feature_scores_high_and_is_caught(data):
     assert leaky is not None
     code = baselines.column_code(leaky)
     assert _ic(code, data) == pytest.approx(0.3, abs=0.02)
-    assert checks.column_dependence(compile_signal(code), data.panel, [leaky], WF)
+    assert checks.column_dependence(compile_alpha(code), data.panel, [leaky], WF)
 
 
 def test_signal_ignoring_leak_is_not_flagged(data):
@@ -46,7 +49,7 @@ def test_signal_ignoring_leak_is_not_flagged(data):
     code = (
         "import random\n"
         "import numpy as np\n"
-        "class Jitter(Signal):\n"
+        "class Jitter(Alpha):\n"
         "    def features(self, df):\n"
         "        noise = np.random.normal(size=df.height) + random.random()\n"
         "        return df.with_columns(jitter=pl.Series(noise))\n"
@@ -55,28 +58,28 @@ def test_signal_ignoring_leak_is_not_flagged(data):
         "    def predict(self, df):\n"
         f"        return pl.col({real!r}) + self.scale * pl.col('jitter')\n"
     )
-    cls = compile_signal(code)
+    cls = compile_alpha(code)
     assert not checks.column_dependence(cls, data.panel, [data.truth.leaky], WF)
     assert not checks.truncation(cls, data.panel, WF)
 
 
 def test_reading_future_rows_is_caught_and_past_rows_are_not(data):
     template = (
-        "class Lagged(Signal):\n"
+        "class Lagged(Alpha):\n"
         "    def features(self, df):\n"
         "        return df.with_columns(x=pl.col('ret').shift({k}).over('asset'))\n"
         "    def predict(self, df):\n"
         "        return pl.col('x')\n"
     )
-    future = compile_signal(template.format(k=-1))
-    past = compile_signal(template.format(k=1))
+    future = compile_alpha(template.format(k=-1))
+    past = compile_alpha(template.format(k=1))
     assert checks.truncation(future, data.panel, WF)
     assert not checks.truncation(past, data.panel, WF)
 
 
 def test_fit_never_sees_unrealised_targets(data):
     code = (
-        "class Probe(Signal):\n"
+        "class Probe(Alpha):\n"
         "    def fit(self, train):\n"
         "        self.last = train['timestamp'].max()\n"
         "        assert train['fwd_return'].null_count() == 0\n"
@@ -84,14 +87,14 @@ def test_fit_never_sees_unrealised_targets(data):
         "        assert df['timestamp'].min() > self.last\n"
         "        return pl.col('ret')\n"
     )
-    walkforward.run(compile_signal(code), data.panel, WF)
+    walkforward.run(compile_alpha(code), data.panel, WF)
 
 
 def test_fitted_linear_model_recovers_oracle_ic(data):
     honest = [*data.truth.real, *data.truth.noise]
     code = (
         "import numpy as np\n"
-        "class Ols(Signal):\n"
+        "class Ols(Alpha):\n"
         f"    cols = {honest!r}\n"
         "    def fit(self, train):\n"
         "        x = train.select(self.cols).to_numpy()\n"

@@ -1,7 +1,8 @@
 """Long-format panels: one row per (timestamp, asset).
 
 Nothing here knows where the data came from. A panel from the simulator and
-one from real data look the same to the rest of the package.
+one from real data look the same to the rest of the package. Time slices are
+lazy timestamp filters, which polars runs fast on the sorted timestamp column.
 """
 
 import dataclasses
@@ -16,12 +17,12 @@ class Schema:
     """Column roles in a panel.
 
     Attributes:
-        features: Feature columns given to the signal.
+        features: Feature columns given to the alpha.
         timestamp: Time column, Date or Datetime. Rows are sorted by it.
         asset: Asset identifier column.
         ret: Return realised at the row's timestamp, from the previous period
-            to this one. Known at that time, so the signal sees it.
-        target: Return from this period to the next. Hidden from the signal
+            to this one. Known at that time, so the alpha sees it.
+        target: Return from this period to the next. Hidden from the alpha
             except as a training label for past rows.
     """
 
@@ -30,6 +31,32 @@ class Schema:
     asset: str = "asset"
     ret: str = "ret"
     target: str = "fwd_return"
+
+
+def between(
+    frame: pl.DataFrame, timestamp: str, start: Any = None, end: Any = None
+) -> pl.DataFrame:
+    """Rows with start <= timestamp < end; a missing bound is open.
+
+    Args:
+        frame: Frame sorted by `timestamp`.
+        timestamp: Time column.
+        start: Inclusive lower bound, or None.
+        end: Exclusive upper bound, or None.
+
+    Returns:
+        The matching rows.
+    """
+    ts = pl.col(timestamp)
+    if start is not None and end is not None:
+        condition = ts.is_between(start, end, closed="left")
+    elif start is not None:
+        condition = ts >= start
+    elif end is not None:
+        condition = ts < end
+    else:
+        return frame
+    return frame.lazy().filter(condition).collect()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -48,12 +75,16 @@ class Panel:
     schema: Schema
 
     def __post_init__(self) -> None:
-        if not self.frame.get_column(self.schema.timestamp).is_sorted():
+        ts = self.schema.timestamp
+        if not self.frame.get_column(ts).is_sorted():
             raise ValueError("panel must be sorted by timestamp")
+        # Mark the column sorted so timestamp filters take polars' fast path.
+        sorted_frame = self.frame.with_columns(pl.col(ts).set_sorted())
+        object.__setattr__(self, "frame", sorted_frame)
 
     @functools.cached_property
     def observable(self) -> pl.DataFrame:
-        """Everything except the target: what the signal sees. Zero-copy."""
+        """Everything except the target: what the alpha sees. Zero-copy."""
         return self.frame.drop(self.schema.target)
 
     @functools.cached_property
@@ -61,18 +92,27 @@ class Panel:
         """Distinct timestamps, ascending."""
         return self.frame.get_column(self.schema.timestamp).unique(maintain_order=True)
 
-    def row_offset(self, timestamp: Any) -> int:
-        """Index of the first row at or after `timestamp`."""
-        column = self.frame.get_column(self.schema.timestamp)
-        return column.search_sorted(timestamp, side="left")
-
-    def until(self, timestamp: Any) -> "Panel":
-        """The rows at or before `timestamp`, as a zero-copy slice."""
-        column = self.frame.get_column(self.schema.timestamp)
-        return Panel(
-            self.frame.head(column.search_sorted(timestamp, side="right")), self.schema
-        )
+    def until(self, cut: Any) -> "Panel":
+        """The rows at or before `cut`."""
+        ts = pl.col(self.schema.timestamp)
+        return Panel(self.frame.lazy().filter(ts <= cut).collect(), self.schema)
 
     def with_frame(self, frame: pl.DataFrame) -> "Panel":
         """The same schema over another frame."""
         return Panel(frame, self.schema)
+
+
+@dataclasses.dataclass(frozen=True)
+class EvalData:
+    """What to evaluate an alpha on.
+
+    Attributes:
+        panel: The data. Timestamps before `start` are used only for training.
+        start: First scored timestamp; None means after the walk-forward's
+            `min_train` periods.
+        suspects: Columns for the column dependence check.
+    """
+
+    panel: Panel
+    start: Any = None
+    suspects: tuple[str, ...] = ()

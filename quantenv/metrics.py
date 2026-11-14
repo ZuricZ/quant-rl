@@ -13,10 +13,10 @@ def mean_rank_ics(
     is finite.
 
     TODO: This estimate is biased towards 0. Revisit before trusting small
-    ICs or comparing signals with different coverage. Sources:
-      - Periods with no usable rows or a constant signal count as 0 and stay
-        in the denominator, so a signal that covers fewer periods is shrunk.
-      - Nulls are dropped per period, so a sparse signal is scored on fewer
+    ICs or comparing alphas with different coverage. Sources:
+      - Periods with no usable rows or constant predictions count as 0 and stay
+        in the denominator, so an alpha that covers fewer periods is shrunk.
+      - Nulls are dropped per period, so sparse predictions are scored on fewer
         assets, which gives noisier per-period correlations.
       - Spearman is about 3/pi (~0.955) of the Pearson correlation for
         Gaussian data; the generator corrects for this, real data will not.

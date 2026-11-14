@@ -1,7 +1,7 @@
 """Backtests and final scores, run in a separate process with time limits.
 
 Generic over the data: the caller passes a loader, a picklable callable that
-returns an EvalData. The worker process calls it, so the data, hidden periods
+returns a panel.EvalData. The worker process calls it, so the data, hidden periods
 included, exists only inside that process.
 """
 
@@ -14,31 +14,15 @@ from typing import Any, Callable
 import polars as pl
 
 from quantenv import checks, metrics, walkforward
-from quantenv.panel import Panel
-from quantenv.signal import SignalError, SignalTimeout, compile_signal
-from quantenv.walkforward import PREDICTION, WalkForward
+from quantenv.alpha import AlphaError, AlphaTimeout, compile_alpha
+from quantenv.panel import EvalData, Panel, between
+from quantenv.walkforward import PREDICTION, Run, WalkForward
 
 BACKTEST_TIME_LIMIT = 30.0
 SCORE_TIME_LIMIT = 60.0
-# Allowance on top of the signal limits for process start-up and loading the
+# Allowance on top of the alpha limits for process start-up and loading the
 # data, after which a hung worker is killed.
 STARTUP_ALLOWANCE = 60.0
-
-
-@dataclasses.dataclass(frozen=True)
-class EvalData:
-    """What to evaluate a signal on.
-
-    Attributes:
-        panel: The data. Rows before `start` are used only for training.
-        start: First scored timestamp; None means after `min_train`.
-        suspects: Columns for the column dependence check.
-    """
-
-    panel: Panel
-    start: Any = None
-    suspects: tuple[str, ...] = ()
-
 
 Loader = Callable[[], EvalData]
 
@@ -81,10 +65,10 @@ def backtest(
     wf: WalkForward = WalkForward(),
     time_limit: float = BACKTEST_TIME_LIMIT,
 ) -> float:
-    """Walk-forward rank IC of signal code.
+    """Walk-forward rank IC of alpha code.
 
     Args:
-        code: Signal code.
+        code: Alpha code.
         load: Picklable callable returning the data.
         wf: Walk-forward settings.
         time_limit: Limit in seconds for the pipeline run.
@@ -93,7 +77,7 @@ def backtest(
         The rank IC over the predicted periods.
 
     Raises:
-        SignalError: If the code fails or runs past the limit.
+        AlphaError: If the code fails or runs past the limit.
     """
     return run_isolated(
         _backtest_worker, (code, load, wf, time_limit), time_limit + STARTUP_ALLOWANCE
@@ -110,7 +94,7 @@ def score_submission(
     """Scores a submission and runs every check.
 
     Args:
-        code: Signal code.
+        code: Alpha code.
         claimed_ic: The IC the agent expects on unseen data.
         load: Picklable callable returning the data.
         wf: Walk-forward settings.
@@ -132,7 +116,7 @@ def score_submission(
             (code, load, wf, time_limit, runs),
             runs * time_limit + STARTUP_ALLOWANCE,
         )
-    except SignalError as e:
+    except AlphaError as e:
         return invalid_score(str(e))
     reward = 0.0 if used_leak or lookahead else true_ic
     return Score(
@@ -155,8 +139,8 @@ def run_isolated(target: Callable[..., Any], args: tuple, timeout: float) -> Any
         Whatever `target` returns.
 
     Raises:
-        SignalTimeout: If the process runs past `timeout`.
-        SignalError: If `target` raises, or the process dies.
+        AlphaTimeout: If the process runs past `timeout`.
+        AlphaError: If `target` raises, or the process dies.
     """
     ctx = mp.get_context("spawn")
     parent, child = ctx.Pipe(duplex=False)
@@ -165,24 +149,24 @@ def run_isolated(target: Callable[..., Any], args: tuple, timeout: float) -> Any
     child.close()
     try:
         if not parent.poll(timeout):
-            raise SignalTimeout(f"ran past {timeout:g} s")
+            raise AlphaTimeout(f"ran past {timeout:g} s")
         ok, payload = parent.recv()
     except EOFError as e:
-        raise SignalError("worker process died") from e
+        raise AlphaError("worker process died") from e
     finally:
         if proc.is_alive():
             proc.kill()
         proc.join()
         parent.close()
     if not ok:
-        raise SignalError(payload)
+        raise AlphaError(payload)
     return payload
 
 
 def _child(conn, target: Callable[..., Any], args: tuple) -> None:
     try:
         result = (True, target(*args))
-    except SignalError as e:
+    except AlphaError as e:
         result = (False, str(e))
     except Exception as e:
         result = (False, f"{type(e).__name__}: {e}")
@@ -193,14 +177,17 @@ def _child(conn, target: Callable[..., Any], args: tuple) -> None:
 def _within(started: float, limit: float, what: str) -> None:
     elapsed = time.perf_counter() - started
     if elapsed > limit:
-        raise SignalTimeout(f"{what} took {elapsed:.1f} s, limit {limit:g} s")
+        raise AlphaTimeout(f"{what} took {elapsed:.1f} s, limit {limit:g} s")
 
 
-def _ic(panel: Panel, predictions: pl.Series) -> float:
+def _ic(panel: Panel, run: Run) -> float:
     s = panel.schema
-    frame = panel.frame.select(s.timestamp, s.target).tail(predictions.len())
+    frame = between(panel.frame.select(s.timestamp, s.target), s.timestamp, run.start)
     return metrics.rank_ic(
-        frame.with_columns(predictions), PREDICTION, s.target, s.timestamp
+        frame.with_columns(run.predictions.get_column(PREDICTION)),
+        PREDICTION,
+        s.target,
+        s.timestamp,
     )
 
 
@@ -208,25 +195,25 @@ def _backtest_worker(
     code: str, load: Loader, wf: WalkForward, time_limit: float
 ) -> float:
     data = load()
-    cls = compile_signal(code)
+    cls = compile_alpha(code)
     started = time.perf_counter()
-    predictions = walkforward.run(cls, data.panel, wf, data.start)
-    _within(started, time_limit, "signal")
-    return _ic(data.panel, predictions)
+    run = walkforward.run(cls, data.panel, wf, data.start)
+    _within(started, time_limit, "alpha")
+    return _ic(data.panel, run)
 
 
 def _score_worker(
     code: str, load: Loader, wf: WalkForward, time_limit: float, runs: int
 ) -> tuple[float, bool, bool, dict[int, float]]:
     data = load()
-    cls = compile_signal(code)
+    cls = compile_alpha(code)
     panel, start = data.panel, data.start
     started = time.perf_counter()
     base = walkforward.run(cls, panel, wf, start)
-    _within(started, time_limit, "signal")
+    _within(started, time_limit, "alpha")
     used_leak = checks.column_dependence(
         cls, panel, list(data.suspects), wf, start, base
     )
     lookahead = checks.truncation(cls, panel, wf, start, base)
-    _within(started, runs * time_limit, "signal with checks")
+    _within(started, runs * time_limit, "alpha with checks")
     return _ic(panel, base), used_leak, lookahead, checks.shifted_ics(panel, base)

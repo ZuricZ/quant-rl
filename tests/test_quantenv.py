@@ -9,8 +9,8 @@ import polars as pl
 import pytest
 
 from quantenv import baselines, checks, metrics, scoring, walkforward
-from quantenv.panel import Panel, Schema
-from quantenv.signal import SignalError, compile_signal
+from quantenv.panel import Panel, Schema, between
+from quantenv.alpha import AlphaError, compile_alpha
 from quantenv.sources import synthetic
 
 SMALL = synthetic.Config(n_assets=50, n_visible=200, n_hidden=400)
@@ -23,13 +23,15 @@ def _seed_without_leak() -> int:
 
 
 def _predict_code(body: str) -> str:
-    return f"class S(Signal):\n    def predict(self, df):\n        return {body}\n"
+    return f"class S(Alpha):\n    def predict(self, df):\n        return {body}\n"
 
 
 def _ic(code: str, panel: Panel, wf: walkforward.WalkForward = WF) -> float:
     s = panel.schema
-    predictions = walkforward.run(compile_signal(code), panel, wf)
-    frame = panel.frame.tail(predictions.len()).with_columns(predictions)
+    run = walkforward.run(compile_alpha(code), panel, wf)
+    frame = between(panel.frame, s.timestamp, run.start).with_columns(
+        run.predictions.get_column(walkforward.PREDICTION)
+    )
     return metrics.rank_ic(frame, walkforward.PREDICTION, s.target, s.timestamp)
 
 
@@ -136,43 +138,43 @@ def test_series_and_expression_outputs_agree(data):
 @pytest.mark.parametrize(
     "code",
     [
-        "class S(Signal) pass",
+        "class S(Alpha) pass",
         "x = 1\n",
-        "class A(Signal):\n    pass\nclass B(Signal):\n    pass\n",
-        "class S(Signal):\n    pass\n",
+        "class A(Alpha):\n    pass\nclass B(Alpha):\n    pass\n",
+        "class S(Alpha):\n    pass\n",
         _predict_code("1 / 0"),
         _predict_code("pl.Series([0.0, 1.0, 2.0])"),
         _predict_code("[0.0] * df.height"),
         _predict_code("pl.Series(['a'] * df.height)"),
         _predict_code("pl.col('missing')"),
-        "class S(Signal):\n    def features(self, df):\n        return df.head(5)\n"
+        "class S(Alpha):\n    def features(self, df):\n        return df.head(5)\n"
         "    def predict(self, df):\n        return pl.col('f00')\n",
-        "class S(Signal):\n    def features(self, df):\n"
+        "class S(Alpha):\n    def features(self, df):\n"
         "        return df.sort('asset')\n"
         "    def predict(self, df):\n        return pl.col('f00')\n",
     ],
 )
 def test_bad_code_raises_signal_error(code, data):
-    with pytest.raises(SignalError):
+    with pytest.raises(AlphaError):
         _ic(code, data.panel)
 
 
 def test_fresh_instance_per_block(data):
     code = (
-        "class Counter(Signal):\n"
+        "class Counter(Alpha):\n"
         "    def fit(self, train):\n"
         "        self.n = getattr(self, 'n', 0) + 1\n"
         "    def predict(self, df):\n"
         "        assert self.n == 1\n"
         "        return pl.col('f00')\n"
     )
-    walkforward.run(compile_signal(code), data.panel, WF)
+    walkforward.run(compile_alpha(code), data.panel, WF)
 
 
 def test_signal_cannot_modify_the_panel(data):
     before = data.panel.frame.clone()
     code = (
-        "class S(Signal):\n"
+        "class S(Alpha):\n"
         "    def features(self, df):\n"
         "        df[0, 'f00'] = 99.0\n"
         "        return df\n"
@@ -180,14 +182,14 @@ def test_signal_cannot_modify_the_panel(data):
         "        df[0, 'f01'] = 99.0\n"
         "        return pl.col('f00')\n"
     )
-    walkforward.run(compile_signal(code), data.panel, WF)
+    walkforward.run(compile_alpha(code), data.panel, WF)
     assert data.panel.frame.equals(before)
 
 
 def test_min_train_must_leave_periods_to_predict(data):
     with pytest.raises(ValueError):
         walkforward.run(
-            compile_signal(_predict_code("pl.col('f00')")),
+            compile_alpha(_predict_code("pl.col('f00')")),
             data.panel,
             walkforward.WalkForward(min_train=10_000),
         )
@@ -219,9 +221,9 @@ def plain_panel():
 
 def test_checks_work_on_a_plain_panel(plain_panel):
     wf = walkforward.WalkForward(refit_every=20, min_train=20)
-    honest = compile_signal(_predict_code("pl.col('x')"))
-    peeking = compile_signal(_predict_code("pl.col('peek')"))
-    future = compile_signal(_predict_code("pl.col('x').shift(-1).over('id')"))
+    honest = compile_alpha(_predict_code("pl.col('x')"))
+    peeking = compile_alpha(_predict_code("pl.col('peek')"))
+    future = compile_alpha(_predict_code("pl.col('x').shift(-1).over('id')"))
 
     assert not checks.column_dependence(honest, plain_panel, ["peek"], wf)
     assert not checks.truncation(honest, plain_panel, wf)
@@ -247,22 +249,22 @@ def test_shuffle_keeps_each_periods_values(data):
 def test_tiny_leak_weight_is_caught(data):
     real, leaky = data.truth.real[0], data.truth.leaky
     code = _predict_code(f"pl.col({real!r}) + 1e-6 * pl.col({leaky!r})")
-    assert checks.column_dependence(compile_signal(code), data.panel, [leaky], WF)
+    assert checks.column_dependence(compile_alpha(code), data.panel, [leaky], WF)
 
 
 def test_whole_sample_normalisation_is_lookahead(data):
     code = (
-        "class S(Signal):\n"
+        "class S(Alpha):\n"
         "    def features(self, df):\n"
         "        return df.with_columns(z=pl.col('ret') - pl.col('ret').mean())\n"
         "    def predict(self, df):\n"
         "        return pl.col('z') * pl.col('f00')\n"
     )
-    assert checks.truncation(compile_signal(code), data.panel, WF)
+    assert checks.truncation(compile_alpha(code), data.panel, WF)
 
 
 def test_no_suspects_means_no_dependence_flag(data):
-    cls = compile_signal(baselines.column_code(data.truth.leaky))
+    cls = compile_alpha(baselines.column_code(data.truth.leaky))
     assert not checks.column_dependence(cls, data.panel, [], WF)
 
 
@@ -294,7 +296,7 @@ def test_score_leaky_submission_gets_zero_reward():
 
 def test_score_lookahead_submission_gets_zero_reward():
     code = (
-        "class S(Signal):\n"
+        "class S(Alpha):\n"
         "    def features(self, df):\n"
         "        return df.with_columns(x=pl.col('ret').shift(-1).over('asset'))\n"
         "    def predict(self, df):\n"
@@ -318,7 +320,7 @@ def test_score_oracle_submission_gets_its_ic():
     ("code", "claimed"),
     [
         (
-            "class S(Signal):\n    def predict(self, df):\n        raise ValueError\n",
+            "class S(Alpha):\n    def predict(self, df):\n        raise ValueError\n",
             0.1,
         ),
         (_predict_code("pl.col('f00')"), float("nan")),
@@ -333,7 +335,7 @@ def test_invalid_submissions(code, claimed):
 def test_slow_signal_times_out():
     code = (
         "import time\n"
-        "class S(Signal):\n"
+        "class S(Alpha):\n"
         "    def features(self, df):\n"
         "        time.sleep(3)\n"
         "        return df\n"
@@ -346,7 +348,7 @@ def test_slow_signal_times_out():
 
 def test_hung_signal_is_killed(monkeypatch):
     monkeypatch.setattr(scoring, "STARTUP_ALLOWANCE", 5.0)
-    code = "class S(Signal):\n    def predict(self, df):\n        while True:\n            pass\n"
+    code = "class S(Alpha):\n    def predict(self, df):\n        while True:\n            pass\n"
     s = scoring.score_submission(code, 0.1, _hidden(), SMALL_WF, time_limit=0.5)
     assert s.invalid == 1 and "ran past" in s.error
 
