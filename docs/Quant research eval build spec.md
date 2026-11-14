@@ -24,7 +24,7 @@ Build a verifiers environment where an agent researches a trading signal on a si
 
 The episode also ends after 30 turns. An episode that ends without `submit` is invalid.
 
-**Signal format:** `def signal(df) -> pd.Series`. `df` is indexed by (date, asset) and holds the feature columns only. The function returns one score per row. The environment computes next-day returns itself; the agent never sees them.
+**Signal format:** `def signal(df: pl.DataFrame) -> pl.Series | pl.Expr` (polars). `df` has columns `timestamp`, `asset` and the features, one row per (timestamp, asset), sorted by timestamp then asset. `timestamp` is a Date for daily bars or a Datetime for intraday bars. The function returns one score per row in row order, as a Series or as an expression evaluated on `df`. The environment computes next-period returns itself; the agent never sees them.
 
 **Score:** mean daily rank correlation between the signal and next-day returns (rank IC). One metric everywhere.
 

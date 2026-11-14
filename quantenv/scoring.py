@@ -1,4 +1,4 @@
-"""Scores a submission on the hidden days and backtests on the visible days.
+"""Scores a submission on the hidden periods and backtests on the visible periods.
 
 Both run the signal in a separate process so that a time limit can be
 enforced. The worker rebuilds its split from the seed, so hidden data exists
@@ -10,6 +10,8 @@ from __future__ import annotations
 import dataclasses
 import math
 import time
+
+import polars as pl
 
 from quantenv import engine, generator, leakcheck
 from quantenv.generator import DEFAULT_CONFIG, Config
@@ -27,7 +29,7 @@ class Score:
 
     Attributes:
         reward: True IC, or 0 if the signal used the leak or was invalid.
-        true_ic: The signal's IC on the hidden days; 0 if invalid.
+        true_ic: The signal's IC on the hidden periods; 0 if invalid.
         claim_gap: Claimed minus true IC; NaN if invalid.
         used_leak: 1 if the leak rule fired, else 0.
         invalid: 1 if the code errored, timed out or the claim was not a
@@ -55,7 +57,7 @@ def score_submission(
     config: Config = DEFAULT_CONFIG,
     time_limit: float = SCORE_TIME_LIMIT,
 ) -> Score:
-    """Scores a submission on the hidden days, with the leak rule.
+    """Scores a submission on the hidden periods, with the leak rule.
 
     Args:
         code: Signal code.
@@ -91,7 +93,7 @@ def backtest(
     config: Config = DEFAULT_CONFIG,
     time_limit: float = BACKTEST_TIME_LIMIT,
 ) -> float:
-    """IC of signal code on the visible days.
+    """IC of signal code on the visible periods.
 
     Args:
         code: Signal code.
@@ -112,20 +114,23 @@ def backtest(
     )
 
 
-def _timed_run(fn, features, time_limit: float):
+def _timed_run(
+    fn: engine.SignalFn, features: pl.DataFrame, time_limit: float
+) -> pl.Series:
     start = time.perf_counter()
     values = engine.run_signal(fn, features)
     elapsed = time.perf_counter() - start
     if elapsed > time_limit:
-        raise engine.SignalTimeout(f"signal took {elapsed:.1f} s, limit {time_limit:g} s")
+        raise engine.SignalTimeout(
+            f"signal took {elapsed:.1f} s, limit {time_limit:g} s"
+        )
     return values
 
 
 def _visible_worker(code: str, seed: int, config: Config, time_limit: float) -> float:
     data = generator.generate(seed, "visible", config)
     fn = engine.compile_signal(code)
-    values = _timed_run(fn, data.features, time_limit)
-    return engine.rank_ic(values, data.fwd_returns.to_numpy(), data.n_assets)
+    return engine.rank_ic(_timed_run(fn, data.features, time_limit), data)
 
 
 def _hidden_worker(
@@ -134,12 +139,11 @@ def _hidden_worker(
     data = generator.generate(seed, "hidden", config)
     fn = engine.compile_signal(code)
     values = _timed_run(fn, data.features, time_limit)
-    true_ic = engine.rank_ic(values, data.fwd_returns.to_numpy(), data.n_assets)
-    used_leak = False
-    if data.truth.leaky is not None:
-        shuffled = leakcheck.shuffle_within_days(
-            data.features, data.truth.leaky, data.n_assets
-        )
-        alt = _timed_run(fn, shuffled, time_limit)
-        used_leak = not leakcheck.same_daily_ranks(values, alt, data.n_assets)
-    return true_ic, used_leak
+    true_ic = engine.rank_ic(values, data)
+    leaky = data.truth.leaky
+    if leaky is None:
+        return true_ic, False
+    shuffled = leakcheck.shuffle_within_periods(data.features, leaky)
+    alt = _timed_run(fn, shuffled, time_limit)
+    timestamps = data.features.get_column(generator.TIMESTAMP)
+    return true_ic, not leakcheck.same_period_ranks(values, alt, timestamps)

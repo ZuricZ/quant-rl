@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import random
-import warnings
 from typing import Any, Callable
 
 import numpy as np
-import pandas as pd
+import polars as pl
 
-from quantenv.generator import Dataset
+from quantenv.generator import ASSET, FWD_RETURN, TIMESTAMP, Dataset
 
-SignalFn = Callable[[pd.DataFrame], Any]
+SignalFn = Callable[[pl.DataFrame], Any]
 
+SIGNAL = "signal"
 RUN_SEED = 0
 
 
@@ -29,8 +29,8 @@ def compile_signal(code: str) -> SignalFn:
     """Executes signal code and returns its `signal` function.
 
     Args:
-        code: Python source defining `def signal(df) -> pd.Series`. `np` and
-            `pd` are predefined.
+        code: Python source defining `def signal(df) -> pl.Series | pl.Expr`.
+            `pl` is predefined.
 
     Returns:
         The `signal` function.
@@ -38,111 +38,110 @@ def compile_signal(code: str) -> SignalFn:
     Raises:
         SignalError: If the code fails to run or defines no callable `signal`.
     """
-    namespace: dict[str, Any] = {"np": np, "pd": pd, "__name__": "signal_code"}
+    namespace: dict[str, Any] = {"pl": pl, "__name__": "signal_code"}
     try:
         exec(compile(code, "<signal>", "exec"), namespace)
     except Exception as e:
         raise SignalError(f"code failed to run: {e!r}") from e
-    fn = namespace.get("signal")
+    fn = namespace.get(SIGNAL)
     if not callable(fn):
         raise SignalError("code does not define a callable `signal`")
     return fn
 
 
-def run_signal(fn: SignalFn, features: pd.DataFrame) -> np.ndarray:
-    """Calls a signal on a copy of the features with fixed random seeds.
+def run_signal(fn: SignalFn, features: pl.DataFrame) -> pl.Series:
+    """Calls a signal with fixed random seeds and validates its output.
+
+    The signal may return a Series with one value per row, in row order, or
+    an expression, which is evaluated on `features` (scalars broadcast).
 
     Args:
         fn: The signal function.
-        features: Feature columns indexed by (date, asset).
+        features: Columns timestamp, asset and the features.
 
     Returns:
-        One float per row of `features`, in its order. Missing and infinite
-        values are NaN.
+        Float64 Series named "signal", one value per row; NaN and infinite
+        values become null.
 
     Raises:
-        SignalError: If the signal raises or returns the wrong shape or type.
+        SignalError: If the signal raises or returns the wrong type or length.
     """
+    # Two separate global RNGs that agent code may draw from: the stdlib's and
+    # numpy's. The leak rule needs both identical across its two runs.
     random.seed(RUN_SEED)
     np.random.seed(RUN_SEED)
     try:
-        out = fn(features.copy())
+        # clone() is shallow: it only stops `df[...] = ...` in the signal
+        # from replacing columns of the shared frame.
+        out = fn(features.clone())
+        if isinstance(out, pl.Expr):
+            out = features.with_columns(out.alias(SIGNAL)).get_column(SIGNAL)
+        if not isinstance(out, pl.Series):
+            raise SignalError(
+                f"signal must return pl.Series or pl.Expr, got {type(out).__name__}"
+            )
+        if out.len() != features.height:
+            raise SignalError(
+                f"signal must return one value per row ({features.height}), "
+                f"got {out.len()}"
+            )
+        out = out.cast(pl.Float64)
+    except SignalError:
+        raise
     except Exception as e:
-        raise SignalError(f"signal raised: {e!r}") from e
-
-    if isinstance(out, pd.DataFrame) and out.shape[1] == 1:
-        out = out.iloc[:, 0]
-    if isinstance(out, pd.Series):
-        if not out.index.equals(features.index):
-            if not out.index.is_unique:
-                raise SignalError("signal output has a duplicated index")
-            out = out.reindex(features.index)
-        values = out.to_numpy()
-    else:
-        values = np.asarray(out)
-    if values.ndim != 1 or len(values) != len(features):
-        raise SignalError(
-            f"signal must return one value per row ({len(features)}), "
-            f"got shape {values.shape}"
-        )
-    try:
-        values = values.astype(np.float64)
-    except (TypeError, ValueError) as e:
-        raise SignalError(f"signal output is not numeric: {e}") from e
-    values[~np.isfinite(values)] = np.nan
-    return values
+        raise SignalError(f"signal failed: {e!r}") from e
+    return pl.select(pl.when(out.is_finite()).then(out).alias(SIGNAL)).to_series()
 
 
-def daily_ranks(values: np.ndarray, n_assets: int) -> np.ndarray:
-    """Ranks each day's values across assets; NaN stays NaN.
+def rank_ic(signal: pl.Series, data: Dataset) -> float:
+    """Mean per-period Spearman correlation between a signal and next-period returns.
+
+    Null rows are dropped period by period. A period with no usable rows or a constant
+    signal counts as IC 0, so the result is always finite.
 
     Args:
-        values: One value per row, rows ordered by (date, asset).
-        n_assets: Assets per day.
+        signal: Output of `run_signal` on `data.features`.
+        data: The dataset split.
 
     Returns:
-        Array of shape (days, assets) with average ranks.
+        The mean per-period rank IC.
     """
-    return pd.DataFrame(values.reshape(-1, n_assets)).rank(axis=1).to_numpy()
+    return (
+        data.frame.select(TIMESTAMP, FWD_RETURN)
+        .with_columns(signal.alias(SIGNAL))
+        .lazy()
+        .drop_nulls(SIGNAL)
+        .group_by(TIMESTAMP)
+        .agg(ic=pl.corr(SIGNAL, FWD_RETURN, method="spearman"))
+        .select(pl.col("ic").fill_nan(0.0).sum() / data.n_periods)
+        .collect()
+        .item()
+    )
 
 
-def rank_ic(values: np.ndarray, fwd_returns: np.ndarray, n_assets: int) -> float:
-    """Mean daily Spearman correlation between a signal and next-day returns.
-
-    Rows where either input is NaN are dropped day by day. A day with fewer
-    than two usable rows or a constant signal counts as IC 0, so the result is
-    always finite.
+def feature_ics(data: Dataset) -> dict[str, float]:
+    """Rank IC of every feature column, in one pass.
 
     Args:
-        values: Signal values, rows ordered by (date, asset).
-        fwd_returns: Next-day returns on the same rows.
-        n_assets: Assets per day.
+        data: The dataset split.
 
     Returns:
-        The mean daily rank IC.
+        Feature name to rank IC.
     """
-    s = values.reshape(-1, n_assets).copy()
-    r = np.asarray(fwd_returns, dtype=np.float64).reshape(-1, n_assets).copy()
-    mask = np.isnan(s) | np.isnan(r)
-    s[mask] = np.nan
-    r[mask] = np.nan
-    rs = pd.DataFrame(s).rank(axis=1).to_numpy()
-    rr = pd.DataFrame(r).rank(axis=1).to_numpy()
-    with np.errstate(invalid="ignore", divide="ignore"), warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)  # All-NaN days.
-        rs = rs - np.nanmean(rs, axis=1, keepdims=True)
-        rr = rr - np.nanmean(rr, axis=1, keepdims=True)
-        cov = np.nansum(rs * rr, axis=1)
-        var = np.sqrt(np.nansum(rs**2, axis=1) * np.nansum(rr**2, axis=1))
-        ic = cov / var
-    ic[~np.isfinite(ic)] = 0.0
-    return float(ic.mean())
+    names = data.features.drop(TIMESTAMP, ASSET).columns
+    row = (
+        data.frame.lazy()
+        .group_by(TIMESTAMP)
+        .agg(pl.corr(n, FWD_RETURN, method="spearman") for n in names)
+        .select(pl.col(names).fill_nan(0.0).mean())
+        .collect()
+    )
+    return row.row(0, named=True)
 
 
 def score(fn: SignalFn, data: Dataset) -> float:
     """Rank IC of a signal function on a dataset split."""
-    values = run_signal(fn, data.features)
-    return rank_ic(values, data.fwd_returns.to_numpy(), data.n_assets)
+    return rank_ic(run_signal(fn, data.features), data)
 
 
 def score_code(code: str, data: Dataset) -> float:
@@ -150,9 +149,7 @@ def score_code(code: str, data: Dataset) -> float:
     return score(compile_signal(code), data)
 
 
-def run_isolated(
-    target: Callable[..., Any], args: tuple, timeout: float
-) -> Any:
+def run_isolated(target: Callable[..., Any], args: tuple, timeout: float) -> Any:
     """Runs a function in a fresh process and returns its result.
 
     The process is killed if it runs past `timeout`. `target` must be a
@@ -168,7 +165,7 @@ def run_isolated(
 
     Raises:
         SignalTimeout: If the process runs past `timeout`.
-        SignalError: If `target` raises SignalError, or the process dies.
+        SignalError: If `target` raises, or the process dies.
     """
     ctx = mp.get_context("spawn")
     parent, child = ctx.Pipe(duplex=False)

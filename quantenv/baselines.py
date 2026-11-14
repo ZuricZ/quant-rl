@@ -9,7 +9,7 @@ from quantenv.generator import Dataset, GroundTruth
 
 def column_code(name: str, sign: float = 1.0) -> str:
     """Signal code that returns one feature column, optionally negated."""
-    expr = f"df[{name!r}]" if sign >= 0 else f"-df[{name!r}]"
+    expr = f"pl.col({name!r})" if sign >= 0 else f"-pl.col({name!r})"
     return f"def signal(df):\n    return {expr}\n"
 
 
@@ -25,18 +25,15 @@ def naive(visible: Dataset) -> tuple[str, float]:
     Returns:
         Signal code and its visible-period IC as the claim.
     """
-    ics = {
-        name: engine.score_code(column_code(name), visible)
-        for name in visible.features.columns
-    }
+    ics = engine.feature_ics(visible)
     best = max(ics, key=lambda k: abs(ics[k]))
     return column_code(best, ics[best]), abs(ics[best])
 
 
 def oracle_code(truth: GroundTruth) -> str:
     """Signal code for the optimal linear mix of the real features."""
-    terms = " + ".join(f"{w!r} * df[{k!r}]" for k, w in truth.weights.items())
-    return f"def signal(df):\n    return {terms}\n"
+    terms = ", ".join(f"{w!r} * pl.col({k!r})" for k, w in truth.weights.items())
+    return f"def signal(df):\n    return pl.sum_horizontal({terms})\n"
 
 
 def oracle(visible: Dataset) -> tuple[str, float]:
