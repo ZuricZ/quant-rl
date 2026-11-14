@@ -2,26 +2,23 @@
 
 A seed fixes everything: which feature names are real, noise or leaky, the
 planted ICs, and the data itself. The visible and hidden periods come from
-independent random streams, so either can be built without the other.
+independent random streams, so the visible panel can be built without ever
+drawing the hidden one.
 
 numpy is used only to draw random numbers, which polars cannot do. All
-draws for a split come from one call; everything else is polars expressions.
+draws for a part come from one call; everything else is polars expressions.
 """
 
 import dataclasses
 import datetime as dt
-import functools
 import math
-from typing import Literal
+from typing import Any
 
 import numpy as np
 import polars as pl
 
-Split = Literal["visible", "hidden"]
-
-TIMESTAMP = "timestamp"
-ASSET = "asset"
-FWD_RETURN = "fwd_return"
+from quantenv.panel import Panel, Schema
+from quantenv.scoring import EvalData
 
 _START = dt.datetime(2000, 1, 3)
 _RETURN_VOL = 0.02
@@ -36,7 +33,7 @@ class Config:
     Attributes:
         n_assets: Assets per period.
         n_visible: Periods the agent can backtest on.
-        n_hidden: Periods used only for scoring.
+        n_hidden: Periods used only for scoring, directly after the visible.
         bar: Length of an intraday period. None gives daily periods on
             business days with a Date timestamp; a timedelta gives
             back-to-back periods of that length with a Datetime timestamp.
@@ -64,13 +61,17 @@ class Config:
     def feature_names(self) -> list[str]:
         return [f"f{i:02d}" for i in range(self.n_features)]
 
+    @property
+    def schema(self) -> Schema:
+        return Schema(features=tuple(self.feature_names))
+
 
 DEFAULT_CONFIG = Config()
 
 
 @dataclasses.dataclass(frozen=True)
 class GroundTruth:
-    """The role of every feature for one seed.
+    """The role of every feature for one seed. Only the simulator has this.
 
     Attributes:
         real: Real feature names, sorted.
@@ -89,31 +90,21 @@ class GroundTruth:
 
 
 @dataclasses.dataclass(frozen=True)
-class Dataset:
-    """One split of one seed.
+class Synthetic:
+    """A simulated panel with its ground truth.
 
     Attributes:
         seed: The seed it was built from.
-        split: "visible" or "hidden".
-        frame: Columns timestamp, asset, the features and fwd_return
-            (next-period return), one row per (timestamp, asset), sorted by
-            timestamp then asset.
+        panel: The data. Visible periods, then hidden ones if requested.
         truth: Ground truth for the seed.
-        n_periods: Periods in the split.
-        n_assets: Assets per period.
+        hidden_start: First hidden timestamp, or None if the panel holds only
+            the visible periods.
     """
 
     seed: int
-    split: Split
-    frame: pl.DataFrame
+    panel: Panel
     truth: GroundTruth
-    n_periods: int
-    n_assets: int
-
-    @functools.cached_property
-    def features(self) -> pl.DataFrame:
-        """The frame without fwd_return: what a signal sees. Zero-copy."""
-        return self.frame.drop(FWD_RETURN)
+    hidden_start: Any = None
 
 
 def spearman_to_pearson(rho_s: float) -> float:
@@ -153,40 +144,65 @@ def ground_truth(seed: int, config: Config = DEFAULT_CONFIG) -> GroundTruth:
 
 
 def generate(
-    seed: int, split: Split = "visible", config: Config = DEFAULT_CONFIG
-) -> Dataset:
-    """Builds one split of the dataset for a seed.
+    seed: int, config: Config = DEFAULT_CONFIG, hidden: bool = False
+) -> Synthetic:
+    """Builds the panel for a seed.
 
     Features are independent standard normals. The standardized next-period
     return is a weighted sum of the real features plus noise, scaled to a
     volatility of 2% per period. The leaky feature is the standardized return
-    plus enough noise to give it the configured rank IC.
+    plus enough noise to give it the configured rank IC. `ret` at t is the
+    same asset's target at the previous timestamp.
 
     Args:
         seed: Non-negative integer seed.
-        split: "visible" for the agent's periods, "hidden" for scoring.
         config: Generator parameters.
+        hidden: Whether to append the hidden periods after the visible ones.
 
     Returns:
-        The requested split.
-
-    Raises:
-        ValueError: If split is not "visible" or "hidden".
+        The panel and its ground truth.
     """
-    if split not in ("visible", "hidden"):
-        raise ValueError(f"unknown split: {split!r}")
     truth = ground_truth(seed, config)
-    visible = split == "visible"
-    n_periods = config.n_visible if visible else config.n_hidden
-    offset = 0 if visible else config.n_visible
-    names = config.feature_names
+    streams = _streams(seed)
+    parts = [_part(streams[1], config, truth, 0, config.n_visible)]
+    if hidden:
+        parts.append(
+            _part(streams[2], config, truth, config.n_visible, config.n_hidden)
+        )
+    schema = config.schema
+    frame = (
+        pl.concat(parts, rechunk=False)
+        .lazy()
+        .with_columns(
+            pl.col(schema.timestamp).set_sorted(),
+            # Rows are timestamp-major with every asset in every period, so
+            # the previous period's row is exactly n_assets rows back.
+            pl.col(schema.target).shift(config.n_assets).alias(schema.ret),
+        )
+        .select(
+            schema.timestamp, schema.asset, *schema.features, schema.ret, schema.target
+        )
+        .collect()
+    )
+    panel = Panel(frame, schema)
+    hidden_start = panel.timestamps[config.n_visible] if hidden else None
+    return Synthetic(seed, panel, truth, hidden_start)
 
+
+def _part(
+    stream: np.random.SeedSequence,
+    config: Config,
+    truth: GroundTruth,
+    offset: int,
+    n_periods: int,
+) -> pl.DataFrame:
+    """One contiguous run of periods: keys, features and target."""
+    schema = config.schema
     # Every draw in one call, one contiguous row per column.
-    rng = np.random.default_rng(_streams(seed)[1 if visible else 2])
-    draws = rng.standard_normal(
+    draws = np.random.default_rng(stream).standard_normal(
         (config.n_features + 2, n_periods * config.n_assets), dtype=np.float32
     )
-    columns = [*names, _RETURN_NOISE, _LEAK_NOISE]
+    columns = [*schema.features, _RETURN_NOISE, _LEAK_NOISE]
 
     weights = truth.weights
     z = pl.sum_horizontal(
@@ -200,19 +216,19 @@ def generate(
         noise = math.sqrt(1.0 / r**2 - 1.0) * pl.col(_LEAK_NOISE)
         leak = [(r * (z + noise)).alias(truth.leaky)]
 
-    frame = (
+    return (
         _keys(config, offset, n_periods)
         .hstack(pl.from_numpy(draws, schema=columns, orient="col"))
         .lazy()
-        .with_columns(*leak, (_RETURN_VOL * z).alias(FWD_RETURN))
+        .with_columns(*leak, (_RETURN_VOL * z).alias(schema.target))
         .drop(_RETURN_NOISE, _LEAK_NOISE)
         .collect()
     )
-    return Dataset(seed, split, frame, truth, n_periods, config.n_assets)
 
 
 def _keys(config: Config, offset: int, n_periods: int) -> pl.DataFrame:
     """The (timestamp, asset) columns, timestamp-major and sorted."""
+    schema = config.schema
     period = pl.int_range(offset, offset + n_periods)
     if config.bar is None:
         stamp = pl.lit(_START.date()).dt.add_business_days(period)
@@ -220,12 +236,10 @@ def _keys(config: Config, offset: int, n_periods: int) -> pl.DataFrame:
         stamp = pl.lit(_START) + period * pl.lit(config.bar)
     asset_names = [f"A{i:03d}" for i in range(config.n_assets)]
     assets = pl.DataFrame(
-        {ASSET: pl.Series(asset_names, dtype=pl.Enum(asset_names))}
+        {schema.asset: pl.Series(asset_names, dtype=pl.Enum(asset_names))}
     )
-    return (
-        pl.select(stamp.alias(TIMESTAMP))
-        .join(assets, how="cross", maintain_order="left_right")
-        .with_columns(pl.col(TIMESTAMP).set_sorted())
+    return pl.select(stamp.alias(schema.timestamp)).join(
+        assets, how="cross", maintain_order="left_right"
     )
 
 
@@ -234,3 +248,33 @@ def _streams(seed: int) -> list[np.random.SeedSequence]:
     if seed < 0:
         raise ValueError(f"seed must be non-negative, got {seed}")
     return np.random.SeedSequence(seed).spawn(3)
+
+
+def visible_data(seed: int, config: Config = DEFAULT_CONFIG) -> EvalData:
+    """Backtest data: the visible periods only.
+
+    Args:
+        seed: Dataset seed.
+        config: Generator parameters.
+
+    Returns:
+        The visible panel, scored after the walk-forward warm-up.
+    """
+    return EvalData(generate(seed, config).panel)
+
+
+def hidden_data(seed: int, config: Config = DEFAULT_CONFIG) -> EvalData:
+    """Scoring data: visible then hidden periods, scored on the hidden ones.
+
+    The leaky column, if any, is the suspect for the column dependence check.
+
+    Args:
+        seed: Dataset seed.
+        config: Generator parameters.
+
+    Returns:
+        The full panel, the first hidden timestamp and the suspect columns.
+    """
+    syn = generate(seed, config, hidden=True)
+    suspects = () if syn.truth.leaky is None else (syn.truth.leaky,)
+    return EvalData(syn.panel, syn.hidden_start, suspects)
