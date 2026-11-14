@@ -92,10 +92,23 @@ def run_signal(fn: SignalFn, features: pl.DataFrame) -> pl.Series:
 
 
 def rank_ic(signal: pl.Series, data: Dataset) -> float:
-    """Mean per-period Spearman correlation between a signal and next-period returns.
+    """Mean per-period Spearman correlation of a signal with next-period returns.
 
-    Null rows are dropped period by period. A period with no usable rows or a constant
-    signal counts as IC 0, so the result is always finite.
+    Null rows are dropped period by period. A period with no usable rows or a
+    constant signal counts as IC 0, so the result is always finite.
+
+    TODO: This estimate is biased towards 0. Revisit before trusting small
+    ICs or comparing signals with different coverage. Sources:
+      - Periods with no usable rows or a constant signal count as 0 and stay
+        in the denominator, so a signal that covers fewer periods is shrunk.
+      - Nulls are dropped per period, so a sparse signal is scored on fewer
+        assets, which gives noisier per-period correlations.
+      - Spearman is about 3/pi (~0.955) of the Pearson correlation for
+        Gaussian data; the generator corrects for this, real data will not.
+      - Each period's sample correlation is itself slightly biased towards 0
+        (about rho * (1 - rho**2) / (2 * n) for n assets).
+    Options: report coverage next to IC, average over valid periods only,
+    weight periods by asset count, or Fisher-z average the per-period ICs.
 
     Args:
         signal: Output of `run_signal` on `data.features`.
