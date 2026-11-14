@@ -17,9 +17,8 @@ from typing import Any
 import polars as pl
 
 from quantenv import metrics, walkforward
-from quantenv.alpha import Alpha
 from quantenv.panel import Panel
-from quantenv.walkforward import PREDICTION, Run, WalkForward
+from quantenv.walkforward import PREDICTION, Run, Runner, WalkForward
 
 TRUNCATION_POINTS = (0.3, 0.7)
 SHUFFLE_SEED = 12345
@@ -48,7 +47,7 @@ def same_period_ranks(timestamps: pl.Series, a: pl.Series, b: pl.Series) -> bool
 
 
 def truncation(
-    cls: type[Alpha],
+    runner: Runner,
     panel: Panel,
     wf: WalkForward,
     start: Any = None,
@@ -57,14 +56,14 @@ def truncation(
 ) -> bool:
     """Reruns on the panel cut after a few timestamps and compares.
 
-    For each cut, `features` reruns on the truncated panel. If its output up
-    to the cut matches the full run, every block before the cut is identical
-    by construction, so only the block containing the cut is refit and
-    predicted. Otherwise the whole truncated pipeline reruns, since a feature
-    that changed may still not affect the predictions.
+    Each cut is one session. `features` reruns on the truncated panel. If its
+    output up to the cut matches the full run, every block before the cut is
+    identical by construction, so only the block containing the cut is refit
+    and predicted. Otherwise the whole truncated pipeline reruns, since a
+    feature that changed may still not affect the predictions.
 
     Args:
-        cls: The alpha class.
+        runner: Runs the alpha.
         panel: The data.
         wf: Walk-forward settings.
         start: First predicted timestamp, as for `walkforward.run`.
@@ -79,26 +78,22 @@ def truncation(
     """
     s = panel.schema
     if base is None:
-        base = walkforward.run(cls, panel, wf, start)
+        base = walkforward.run(runner, panel, wf, start)
     predicted = panel.timestamps.filter(panel.timestamps >= base.start)
     for p in points:
         cut = predicted[min(int(p * len(predicted)), len(predicted) - 1)]
         short = panel.until(cut)
-        engineered = walkforward.engineer(cls, short)
         until_cut = base.engineered.lazy().filter(pl.col(s.timestamp) <= cut)
-        if engineered.equals(until_cut.collect()):
-            # Features agree up to the cut: only the cut's block can differ.
-            block = walkforward.blocks(short, wf, base.start)[-1]
-            labelled = engineered.with_columns(short.frame.get_column(s.target))
-            out = walkforward.fit_predict(cls, labelled, s.timestamp, s.target, block)
-            first = block.start
-        else:
-            out = walkforward.run(cls, short, wf, base.start, engineered)
-            out = out.predictions.get_column(PREDICTION)
-            first = base.start
+        todo = walkforward.blocks(short, wf, base.start)
+        with runner.session(s.timestamp) as session:
+            engineered = walkforward.engineer(session, short)
+            if engineered.equals(until_cut.collect()):
+                # Features agree up to the cut: only the cut's block can differ.
+                todo = todo[-1:]
+            out = walkforward.predict_blocks(session, short, todo)
         expected = (
             base.predictions.lazy()
-            .filter(pl.col(s.timestamp).is_between(first, cut))
+            .filter(pl.col(s.timestamp).is_between(todo[0].start, cut))
             .collect()
         )
         stamps = expected.get_column(s.timestamp)
@@ -135,7 +130,7 @@ def shuffle_within_periods(
 
 
 def column_dependence(
-    cls: type[Alpha],
+    runner: Runner,
     panel: Panel,
     columns: list[str],
     wf: WalkForward,
@@ -148,7 +143,7 @@ def column_dependence(
     use a column is caught as well.
 
     Args:
-        cls: The alpha class.
+        runner: Runs the alpha.
         panel: The data.
         columns: Columns to test, e.g. those suspected of holding future
             information.
@@ -166,11 +161,11 @@ def column_dependence(
     if not columns:
         return False
     if base is None:
-        base = walkforward.run(cls, panel, wf, start)
+        base = walkforward.run(runner, panel, wf, start)
     shuffled = panel.with_frame(
         shuffle_within_periods(panel.frame, columns, panel.schema.timestamp)
     )
-    out = walkforward.run(cls, shuffled, wf, base.start).predictions
+    out = walkforward.run(runner, shuffled, wf, base.start).predictions
     p = base.predictions
     return not same_period_ranks(
         p.get_column(panel.schema.timestamp),

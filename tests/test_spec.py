@@ -11,6 +11,10 @@ WF = walkforward.WalkForward()
 TOL = 0.01  # About 4 standard errors of a 750-period mean IC on 200 assets.
 
 
+def _local(code: str) -> walkforward.Local:
+    return walkforward.Local(compile_alpha(code))
+
+
 @pytest.fixture(scope="module")
 def data():
     return synthetic.generate(seed=1)
@@ -19,7 +23,7 @@ def data():
 def _ic(code: str, data) -> float:
     panel = data.panel
     s = panel.schema
-    run = walkforward.run(compile_alpha(code), panel, WF)
+    run = walkforward.run(_local(code), panel, WF)
     frame = between(panel.frame, s.timestamp, run.start).with_columns(
         run.predictions.get_column(walkforward.PREDICTION)
     )
@@ -41,7 +45,7 @@ def test_leaky_feature_scores_high_and_is_caught(data):
     assert leaky is not None
     code = baselines.column_code(leaky)
     assert _ic(code, data) == pytest.approx(0.3, abs=0.02)
-    assert checks.column_dependence(compile_alpha(code), data.panel, [leaky], WF)
+    assert checks.column_dependence(_local(code), data.panel, [leaky], WF)
 
 
 def test_signal_ignoring_leak_is_not_flagged(data):
@@ -58,9 +62,9 @@ def test_signal_ignoring_leak_is_not_flagged(data):
         "    def predict(self, df):\n"
         f"        return pl.col({real!r}) + self.scale * pl.col('jitter')\n"
     )
-    cls = compile_alpha(code)
-    assert not checks.column_dependence(cls, data.panel, [data.truth.leaky], WF)
-    assert not checks.truncation(cls, data.panel, WF)
+    runner = _local(code)
+    assert not checks.column_dependence(runner, data.panel, [data.truth.leaky], WF)
+    assert not checks.truncation(runner, data.panel, WF)
 
 
 def test_reading_future_rows_is_caught_and_past_rows_are_not(data):
@@ -71,8 +75,8 @@ def test_reading_future_rows_is_caught_and_past_rows_are_not(data):
         "    def predict(self, df):\n"
         "        return pl.col('x')\n"
     )
-    future = compile_alpha(template.format(k=-1))
-    past = compile_alpha(template.format(k=1))
+    future = _local(template.format(k=-1))
+    past = _local(template.format(k=1))
     assert checks.truncation(future, data.panel, WF)
     assert not checks.truncation(past, data.panel, WF)
 
@@ -87,7 +91,7 @@ def test_fit_never_sees_unrealised_targets(data):
         "        assert df['timestamp'].min() > self.last\n"
         "        return pl.col('ret')\n"
     )
-    walkforward.run(compile_alpha(code), data.panel, WF)
+    walkforward.run(_local(code), data.panel, WF)
 
 
 def test_fitted_linear_model_recovers_oracle_ic(data):

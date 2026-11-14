@@ -22,13 +22,17 @@ def _seed_without_leak() -> int:
     return next(s for s in range(100) if synthetic.ground_truth(s).leaky is None)
 
 
+def _local(code: str) -> walkforward.Local:
+    return walkforward.Local(compile_alpha(code))
+
+
 def _predict_code(body: str) -> str:
     return f"class S(Alpha):\n    def predict(self, df):\n        return {body}\n"
 
 
 def _ic(code: str, panel: Panel, wf: walkforward.WalkForward = WF) -> float:
     s = panel.schema
-    run = walkforward.run(compile_alpha(code), panel, wf)
+    run = walkforward.run(_local(code), panel, wf)
     frame = between(panel.frame, s.timestamp, run.start).with_columns(
         run.predictions.get_column(walkforward.PREDICTION)
     )
@@ -168,7 +172,7 @@ def test_fresh_instance_per_block(data):
         "        assert self.n == 1\n"
         "        return pl.col('f00')\n"
     )
-    walkforward.run(compile_alpha(code), data.panel, WF)
+    walkforward.run(_local(code), data.panel, WF)
 
 
 def test_signal_cannot_modify_the_panel(data):
@@ -182,14 +186,14 @@ def test_signal_cannot_modify_the_panel(data):
         "        df[0, 'f01'] = 99.0\n"
         "        return pl.col('f00')\n"
     )
-    walkforward.run(compile_alpha(code), data.panel, WF)
+    walkforward.run(_local(code), data.panel, WF)
     assert data.panel.frame.equals(before)
 
 
 def test_min_train_must_leave_periods_to_predict(data):
     with pytest.raises(ValueError):
         walkforward.run(
-            compile_alpha(_predict_code("pl.col('f00')")),
+            _local(_predict_code("pl.col('f00')")),
             data.panel,
             walkforward.WalkForward(min_train=10_000),
         )
@@ -221,9 +225,9 @@ def plain_panel():
 
 def test_checks_work_on_a_plain_panel(plain_panel):
     wf = walkforward.WalkForward(refit_every=20, min_train=20)
-    honest = compile_alpha(_predict_code("pl.col('x')"))
-    peeking = compile_alpha(_predict_code("pl.col('peek')"))
-    future = compile_alpha(_predict_code("pl.col('x').shift(-1).over('id')"))
+    honest = _local(_predict_code("pl.col('x')"))
+    peeking = _local(_predict_code("pl.col('peek')"))
+    future = _local(_predict_code("pl.col('x').shift(-1).over('id')"))
 
     assert not checks.column_dependence(honest, plain_panel, ["peek"], wf)
     assert not checks.truncation(honest, plain_panel, wf)
@@ -249,7 +253,7 @@ def test_shuffle_keeps_each_periods_values(data):
 def test_tiny_leak_weight_is_caught(data):
     real, leaky = data.truth.real[0], data.truth.leaky
     code = _predict_code(f"pl.col({real!r}) + 1e-6 * pl.col({leaky!r})")
-    assert checks.column_dependence(compile_alpha(code), data.panel, [leaky], WF)
+    assert checks.column_dependence(_local(code), data.panel, [leaky], WF)
 
 
 def test_whole_sample_normalisation_is_lookahead(data):
@@ -260,12 +264,12 @@ def test_whole_sample_normalisation_is_lookahead(data):
         "    def predict(self, df):\n"
         "        return pl.col('z') * pl.col('f00')\n"
     )
-    assert checks.truncation(compile_alpha(code), data.panel, WF)
+    assert checks.truncation(_local(code), data.panel, WF)
 
 
 def test_no_suspects_means_no_dependence_flag(data):
-    cls = compile_alpha(baselines.column_code(data.truth.leaky))
-    assert not checks.column_dependence(cls, data.panel, [], WF)
+    runner = _local(baselines.column_code(data.truth.leaky))
+    assert not checks.column_dependence(runner, data.panel, [], WF)
 
 
 # Baselines.
@@ -343,7 +347,7 @@ def test_slow_signal_times_out():
         "        return pl.col('f00')\n"
     )
     s = scoring.score_submission(code, 0.1, _hidden(), SMALL_WF, time_limit=1.0)
-    assert s.invalid == 1 and "took" in s.error
+    assert s.invalid == 1 and "ran past" in s.error
 
 
 def test_hung_signal_is_killed(monkeypatch):

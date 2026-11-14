@@ -2,20 +2,21 @@
 
 Generic over the data: the caller passes a loader, a picklable callable that
 returns a panel.EvalData. The worker process calls it, so the data, hidden periods
-included, exists only inside that process.
+included, exists only inside that process. The worker is trusted: it runs the
+walk-forward and the checks, and runs the agent's code only through
+`quantenv.sandbox`, one fresh child process per pipeline run.
 """
 
 import dataclasses
 import math
 import multiprocessing as mp
-import time
 from typing import Any, Callable
 
-import polars as pl
 
 from quantenv import checks, metrics, walkforward
-from quantenv.alpha import AlphaError, AlphaTimeout, compile_alpha
+from quantenv.alpha import AlphaError, AlphaTimeout
 from quantenv.panel import EvalData, Panel, between
+from quantenv.sandbox import Sandbox
 from quantenv.walkforward import PREDICTION, Run, WalkForward
 
 BACKTEST_TIME_LIMIT = 30.0
@@ -23,6 +24,8 @@ SCORE_TIME_LIMIT = 60.0
 # Allowance on top of the alpha limits for process start-up and loading the
 # data, after which a hung worker is killed.
 STARTUP_ALLOWANCE = 60.0
+# Pipeline runs in a score: base, column dependence, one per truncation point.
+SCORE_RUNS = 2 + len(checks.TRUNCATION_POINTS)
 
 Loader = Callable[[], EvalData]
 
@@ -64,6 +67,7 @@ def backtest(
     load: Loader,
     wf: WalkForward = WalkForward(),
     time_limit: float = BACKTEST_TIME_LIMIT,
+    user: str | None = None,
 ) -> float:
     """Walk-forward rank IC of alpha code.
 
@@ -72,6 +76,7 @@ def backtest(
         load: Picklable callable returning the data.
         wf: Walk-forward settings.
         time_limit: Limit in seconds for the pipeline run.
+        user: Run the alpha as this dedicated user; see `Sandbox`.
 
     Returns:
         The rank IC over the predicted periods.
@@ -80,7 +85,9 @@ def backtest(
         AlphaError: If the code fails or runs past the limit.
     """
     return run_isolated(
-        _backtest_worker, (code, load, wf, time_limit), time_limit + STARTUP_ALLOWANCE
+        _backtest_worker,
+        (Sandbox(code, time_limit, user), load, wf),
+        time_limit + STARTUP_ALLOWANCE,
     )
 
 
@@ -90,6 +97,7 @@ def score_submission(
     load: Loader,
     wf: WalkForward = WalkForward(),
     time_limit: float = SCORE_TIME_LIMIT,
+    user: str | None = None,
 ) -> Score:
     """Scores a submission and runs every check.
 
@@ -99,6 +107,7 @@ def score_submission(
         load: Picklable callable returning the data.
         wf: Walk-forward settings.
         time_limit: Limit in seconds per pipeline run; each check adds runs.
+        user: Run the alpha as this dedicated user; see `Sandbox`.
 
     Returns:
         The score. Never raises for bad code.
@@ -109,12 +118,11 @@ def score_submission(
         return invalid_score(f"claimed IC is not a number: {claimed_ic!r}")
     if not math.isfinite(claimed):
         return invalid_score(f"claimed IC is not finite: {claimed}")
-    runs = 2 + len(checks.TRUNCATION_POINTS)  # Base, dependence, truncations.
     try:
         true_ic, used_leak, lookahead, shifted = run_isolated(
             _score_worker,
-            (code, load, wf, time_limit, runs),
-            runs * time_limit + STARTUP_ALLOWANCE,
+            (Sandbox(code, time_limit, user), load, wf),
+            SCORE_RUNS * time_limit + STARTUP_ALLOWANCE,
         )
     except AlphaError as e:
         return invalid_score(str(e))
@@ -174,12 +182,6 @@ def _child(conn, target: Callable[..., Any], args: tuple) -> None:
     conn.close()
 
 
-def _within(started: float, limit: float, what: str) -> None:
-    elapsed = time.perf_counter() - started
-    if elapsed > limit:
-        raise AlphaTimeout(f"{what} took {elapsed:.1f} s, limit {limit:g} s")
-
-
 def _ic(panel: Panel, run: Run) -> float:
     s = panel.schema
     frame = between(panel.frame.select(s.timestamp, s.target), s.timestamp, run.start)
@@ -191,29 +193,20 @@ def _ic(panel: Panel, run: Run) -> float:
     )
 
 
-def _backtest_worker(
-    code: str, load: Loader, wf: WalkForward, time_limit: float
-) -> float:
+def _backtest_worker(sandbox: Sandbox, load: Loader, wf: WalkForward) -> float:
     data = load()
-    cls = compile_alpha(code)
-    started = time.perf_counter()
-    run = walkforward.run(cls, data.panel, wf, data.start)
-    _within(started, time_limit, "alpha")
+    run = walkforward.run(sandbox, data.panel, wf, data.start)
     return _ic(data.panel, run)
 
 
 def _score_worker(
-    code: str, load: Loader, wf: WalkForward, time_limit: float, runs: int
+    sandbox: Sandbox, load: Loader, wf: WalkForward
 ) -> tuple[float, bool, bool, dict[int, float]]:
     data = load()
-    cls = compile_alpha(code)
     panel, start = data.panel, data.start
-    started = time.perf_counter()
-    base = walkforward.run(cls, panel, wf, start)
-    _within(started, time_limit, "alpha")
+    base = walkforward.run(sandbox, panel, wf, start)
     used_leak = checks.column_dependence(
-        cls, panel, list(data.suspects), wf, start, base
+        sandbox, panel, list(data.suspects), wf, start, base
     )
-    lookahead = checks.truncation(cls, panel, wf, start, base)
-    _within(started, runs * time_limit, "alpha with checks")
+    lookahead = checks.truncation(sandbox, panel, wf, start, base)
     return _ic(panel, base), used_leak, lookahead, checks.shifted_ics(panel, base)
