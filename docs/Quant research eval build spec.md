@@ -172,6 +172,16 @@ One plot: claim gap against backtests used.
    - A class keeps fitted state on `self`; defaults on the base class make `features` and `fit` optional.
    - `features` runs once on the whole split, for speed, and is held to causality by the truncation check. Rejected: recomputing features per block on data up to the block, which is causal by construction but repeats the work for every block.
 4. **Checks are generic.** Decided 14 November 2026. They take a panel and column names, never the generator's ground truth, so they carry over to real data.
+5. **Decision 1 against the installed verifiers 0.4.1 API.** Decided 14 November 2026, while building the taskset. Decision 1 holds, with these adjustments:
+   - **Packaging.** verifiers starts a toolset with `python -m <module>`, and inside a container it first installs the module's distribution. `quantenv` is not on PyPI, so `environments/quant_research` is shipped in the root distribution as the package `quant_research`, next to `quantenv`. The taskset id is `quant-research`.
+   - **Shared types.** A toolset receives the task's `TaskData`, not the `Task`, in `setup_task`. `ResearchData` (the seed) and `ResearchState` therefore live in `servers/research.py`, and the taskset imports them.
+   - **Grader.** The reward writes the submission into the runtime and runs `python -m quant_research.grade` there. That module calls `quantenv.scoring.score_submission` with the hidden-data loader, so the hidden periods are built only inside its scoring worker, after the agent has finished. It runs in the Python environment that verifiers installed the toolset into, which it locates through verifiers' private `mcp.launch._install_in_sandbox`. Once the toolset has run, that call is a no-op. No public API exposes this environment.
+   - **Turn limit.** `max_turns` is a setting on the agent, not the task. The 30-turn limit is a task `@vf.stop` (`turn_limit`), so it holds under any run config.
+   - **Harness.** A taskset defaults to the `bash` harness unless its package exports a `Harness`. `quant_research` re-exports `NullHarness`, so `null` is the default.
+   - **Container.** `NEEDS_CONTAINER = True` makes verifiers refuse the `subprocess` runtime, in `vf-validate` and `vf-run` alike. Local debugging therefore needs Docker; the last bullet of Decision 1 does not hold. The task image is `python:3.12-slim`, because the default `python:3.11-slim` is older than this project's Python requirement.
+   - **State.** Shared state is pulled before every tool call and pushed whole after it, so concurrent calls would overwrite each other. The toolset keeps its own record of the episode and copies it into the state at the end of every call.
+   - **Scoring signals.** Metrics run before rewards. Both read one grader result, which is computed once and kept on `trace.info["score"]`. Metrics: `used_leak`, `lookahead`, `invalid`, `raw_ic` (the IC before checks zero it), `claim_gap`, `backtests_used`, and `shifted_ic_m1`, `shifted_ic_p1`, `shifted_ic_p2`. Reward: `true_ic`.
+   - **Model-free check.** `Task.validate` grades the oracle alpha. `vf-validate` uses it for its gold check. This is the only place outside the generator and the results table that reads the ground truth.
 
 ## Open decisions
 
@@ -186,7 +196,7 @@ Read from the repositories on 10 to 12 November 2026. Recheck before relying on 
 - A reward method runs code by declaring a `runtime: vf.Runtime` parameter and calling a grader script through it.
 - An infinite taskset sets `INFINITE = True` and yields tasks from `load()`. Every run must bound it with `-n` or a closed `include.idx` range.
 - Custom tools are `vf.Toolset` classes served over MCP, so the harness must support MCP. `null` and `bash` do; `mini_swe_agent` and `terminus_2` do not.
-- Check a taskset without a model with `uv run vf-validate <taskset>`, and run a few episodes with `uv run vf-run <taskset> -n 1 -r 1`.
+- Check a taskset without a model with `uv run vf-validate <taskset>`, and run a few episodes with `uv run vf-run <taskset> -n 1 -r 1`. For this taskset, add `--runtime.type docker` (see Decision 5).
 - prime-rl draws one task per group and scores `group_size` rollouts on it. The advantage is reward minus the group mean.
 
 ## After this week
