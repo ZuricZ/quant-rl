@@ -11,6 +11,7 @@ draws for a part come from one call; everything else is polars expressions.
 
 import dataclasses
 import datetime as dt
+import hashlib
 import math
 from typing import Any
 
@@ -104,6 +105,24 @@ class Synthetic:
     panel: Panel
     truth: GroundTruth
     hidden_start: Any = None
+
+
+def dataset_seed(index: int, secret: str) -> int:
+    """The seed of dataset `index` under `secret`.
+
+    Code that can run the generator can rebuild any dataset whose seed it can
+    guess, hidden periods and ground truth included. Seeds drawn from a
+    secret it does not know cannot be guessed.
+
+    Args:
+        index: Dataset number, e.g. a task's position in the taskset.
+        secret: Known only to whoever builds and scores the datasets.
+
+    Returns:
+        A 128-bit seed.
+    """
+    digest = hashlib.sha256(f"{secret}\0{index}".encode()).digest()
+    return int.from_bytes(digest[:16], "big")
 
 
 def spearman_to_pearson(rho_s: float) -> float:

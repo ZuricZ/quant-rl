@@ -5,12 +5,17 @@ The agent gets the visible periods through the research toolset, which runs
 in the rollout's container. After the episode, the reward runs
 `quant_research.grade` in that same runtime; it rebuilds the dataset with
 its hidden periods inside a scoring worker, so hidden data never exists
-while the agent runs.
+while the agent runs. All agent code runs in `quantenv.sandbox`.
+
+Dataset seeds are drawn from the taskset's `secret`. The generator is
+installed in the container, so code that knew a seed could rebuild the
+hidden periods; it cannot guess one drawn from a secret it never sees.
 """
 
 import dataclasses
 import itertools
 import json
+import secrets
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -150,7 +155,12 @@ async def grade(
     """
     python = await _install_in_sandbox(ResearchToolset(tools), runtime)
     stem = f"/tmp/vf-grade-{uuid.uuid4().hex}"
-    request = {"seed": seed, "code": code, "claimed_ic": claimed_ic}
+    request = {
+        "seed": seed,
+        "code": code,
+        "claimed_ic": claimed_ic,
+        "user": tools.sandbox_user,
+    }
     await runtime.write(f"{stem}.json", json.dumps(request).encode())
     result = await runtime.run(
         [python, "-m", "quant_research.grade", f"{stem}.json", f"{stem}.out.json"], {}
@@ -173,7 +183,18 @@ class QuantResearchTaskConfig(vf.TaskConfig):
 
 
 class QuantResearchConfig(vf.TasksetConfig):
+    """Taskset settings.
+
+    Attributes:
+        task: Settings passed to every task.
+        secret: Dataset seeds are drawn from it, see
+            `synthetic.dataset_seed`. Random unless set. Set the same value
+            for runs that must share datasets, such as several models and
+            `scripts/run_baselines.py --secret`. Never show it to the agent.
+    """
+
     task: QuantResearchTaskConfig = QuantResearchTaskConfig()
+    secret: str = Field(default_factory=lambda: secrets.token_hex(16))
 
 
 class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskConfig]):
@@ -243,25 +264,32 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
         """Grades the oracle alpha: it must score above 0 and pass the checks."""
         weights = synthetic.ground_truth(self.data.seed).weights
         score = await grade(
-            self.config.tools, runtime, self.data.seed, baselines.weighted_code(weights), 0.0
+            self.config.tools,
+            runtime,
+            self.data.seed,
+            baselines.weighted_code(weights),
+            0.0,
         )
         return score["reward"] > 0 and not score["used_leak"] and not score["lookahead"]
 
 
 class QuantResearchTaskset(vf.Taskset[QuantResearchTask, QuantResearchConfig]):
-    """Infinite: task i uses dataset seed i. Seeds 0 to 29 (`-n 30`) are the
-    eval split."""
+    """Infinite: task i uses dataset `synthetic.dataset_seed(i, secret)`.
+    Tasks 0 to 29 (`-n 30`) are the eval split."""
 
     INFINITE = True
 
     def load(self) -> Iterator[QuantResearchTask]:
         task_config = self.config.task
-        for seed in itertools.count():
+        for index in itertools.count():
+            seed = synthetic.dataset_seed(index, self.config.secret)
             description = describe_panel(synthetic.visible_data(seed).panel)
             data = ResearchData(
                 seed=seed,
-                name=f"seed-{seed}",
-                prompt=prompt(description, task_config.tools.budget, task_config.max_turns),
+                name=f"task-{index}",
+                prompt=prompt(
+                    description, task_config.tools.budget, task_config.max_turns
+                ),
                 image=IMAGE,
                 timeout=vf.TaskTimeout(scoring=SCORING_TIMEOUT),
             )

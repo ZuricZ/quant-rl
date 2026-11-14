@@ -5,9 +5,10 @@ finished:
 
     python -m quant_research.grade REQUEST RESULT
 
-REQUEST is a JSON file with `seed`, `code` and `claimed_ic`. The score is
-written as JSON to RESULT rather than stdout, which the agent's code can
-print to. The hidden periods are built only inside the scoring worker that
+REQUEST is a JSON file with `seed`, `code`, `claimed_ic` and `user`, the
+sandbox user. It holds the dataset seed, so it is deleted as soon as it is
+read, before any agent code runs. The score is written as JSON to RESULT.
+The hidden periods are built only inside the scoring worker that
 `quantenv.scoring` starts, never in this process.
 """
 
@@ -28,11 +29,14 @@ def main(argv: list[str]) -> None:
         argv: The request path and the result path.
     """
     request_path, result_path = argv
-    request = json.loads(Path(request_path).read_text())
+    request_file = Path(request_path)
+    request = json.loads(request_file.read_text())
+    request_file.unlink()
     score = scoring.score_submission(
         request["code"],
         request["claimed_ic"],
         functools.partial(synthetic.hidden_data, request["seed"]),
+        user=request["user"],
     )
     Path(result_path).write_text(json.dumps(dataclasses.asdict(score)))
 

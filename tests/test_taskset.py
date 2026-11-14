@@ -52,12 +52,19 @@ def task() -> QuantResearchTask:
     return QuantResearchTask(ResearchData(seed=0), QuantResearchTaskConfig())
 
 
-def test_taskset_is_infinite_with_one_seed_per_task():
-    taskset = QuantResearchTaskset(QuantResearchConfig())
+def test_taskset_is_infinite_with_one_secret_seed_per_task():
+    taskset = QuantResearchTaskset(QuantResearchConfig(secret="s"))
     assert taskset.INFINITE and not taskset.bounded
     tasks = list(taskset.take(2))
-    assert [t.data.seed for t in tasks] == [0, 1]
     assert [t.data.idx for t in tasks] == [0, 1]
+    assert [t.data.seed for t in tasks] == [
+        synthetic.dataset_seed(i, "s") for i in (0, 1)
+    ]
+    assert str(tasks[0].data.seed) not in tasks[0].data.prompt
+
+
+def test_secret_is_random_unless_set():
+    assert QuantResearchConfig().secret != QuantResearchConfig().secret
 
 
 def test_prompt_states_columns_budget_and_contract():
@@ -67,7 +74,12 @@ def test_prompt_states_columns_budget_and_contract():
     prompt = next(iter(QuantResearchTaskset(config))).data.prompt
     assert "f00" in prompt and "ret" in prompt
     assert "You have 7 backtests" in prompt
-    for name in ("features(df)", "fit(train)", "predict(df)", "submit(code, claimed_ic)"):
+    for name in (
+        "features(df)",
+        "fit(train)",
+        "predict(df)",
+        "submit(code, claimed_ic)",
+    ):
         assert name in prompt
 
 
@@ -142,8 +154,11 @@ def test_grader_scores_on_hidden_periods(tmp_path):
     truth = synthetic.ground_truth(0)
     code = baselines.weighted_code(truth.weights)
     request, result = tmp_path / "request.json", tmp_path / "result.json"
-    request.write_text(json.dumps({"seed": 0, "code": code, "claimed_ic": 0.05}))
+    request.write_text(
+        json.dumps({"seed": 0, "code": code, "claimed_ic": 0.05, "user": None})
+    )
     grade.main([str(request), str(result)])
+    assert not request.exists()
     hidden = functools.partial(synthetic.hidden_data, 0)
     expected = scoring.score_submission(code, 0.05, hidden)
     score = json.loads(result.read_text())

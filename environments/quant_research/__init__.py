@@ -9,4 +9,9 @@ from verifiers.v1.harnesses.null import NullHarness
 from quant_research.servers.research import ResearchToolset
 from quant_research.taskset import QuantResearchTask, QuantResearchTaskset
 
-__all__ = ["NullHarness", "QuantResearchTask", "QuantResearchTaskset", "ResearchToolset"]
+__all__ = [
+    "NullHarness",
+    "QuantResearchTask",
+    "QuantResearchTaskset",
+    "ResearchToolset",
+]

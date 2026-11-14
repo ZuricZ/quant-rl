@@ -2,7 +2,8 @@
 
 The server runs colocated with the harness, inside the rollout's container,
 and only ever builds the visible periods of the task's dataset. Each backtest
-rebuilds them in a fresh scoring worker, which also runs the agent's code.
+rebuilds them in a fresh scoring worker, which runs the agent's code in
+`quantenv.sandbox` as the unprivileged sandbox user.
 
 Run as `python -m quant_research.servers.research`; verifiers launches it.
 """
@@ -19,13 +20,15 @@ from quantenv.panel import Panel
 from quantenv.sources import synthetic
 
 BUDGET = 10
+SANDBOX_USER = "nobody"
 
 
 class ResearchData(vf.TaskData):
     """Task data shared by the task and its toolset.
 
     Attributes:
-        seed: Dataset seed.
+        seed: Dataset seed, drawn from a secret (see
+            `synthetic.dataset_seed`). The agent must not learn it.
     """
 
     seed: int = Field(ge=0)
@@ -53,10 +56,15 @@ class ResearchConfig(vf.ToolsetConfig):
     Attributes:
         colocated: Serve the tools inside the harness's runtime.
         budget: Backtest calls allowed per episode.
+        sandbox_user: User that runs the agent's code, in backtests and in
+            the final score. Every process of this user is killed after each
+            pipeline run, so it must not be used for anything else. None runs
+            the code as the server's own user, without that isolation.
     """
 
     colocated: bool = True
     budget: int = Field(BUDGET, ge=0)
+    sandbox_user: str | None = SANDBOX_USER
 
 
 def describe_panel(panel: Panel) -> str:
@@ -83,7 +91,8 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
     The toolset keeps its own record of the episode and copies it into the
     shared state at the end of every call. State is pulled before a call and
     pushed after it, so a call that started from an older copy would
-    otherwise overwrite what a concurrent call recorded.
+    otherwise overwrite what a concurrent call recorded. Backtests run one at
+    a time, since each one ends by killing every process of the sandbox user.
     """
 
     TOOL_PREFIX = None  # Advertise the tools as describe, backtest and submit.
@@ -97,6 +106,7 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
         self._load = functools.partial(synthetic.visible_data, task.seed)
         self._description = describe_panel(self._load().panel)
         self._episode = ResearchState()
+        self._backtesting = asyncio.Lock()
 
     def _publish(self) -> None:
         for name in ResearchState.model_fields.keys() - vf.State.model_fields.keys():
@@ -139,7 +149,13 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
         episode.backtests_used += 1
         left = self.config.budget - episode.backtests_used
         try:
-            ic = await asyncio.to_thread(scoring.backtest, code, self._load)
+            async with self._backtesting:
+                ic = await asyncio.to_thread(
+                    scoring.backtest,
+                    code,
+                    self._load,
+                    user=self.config.sandbox_user,
+                )
         except AlphaError as e:
             return f"error: {e}\nbacktests left: {left}"
         finally:
