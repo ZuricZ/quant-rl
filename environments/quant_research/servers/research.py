@@ -28,10 +28,17 @@ class ResearchData(vf.TaskData):
 
     Attributes:
         seed: Dataset seed, drawn from a secret (see
-            `synthetic.dataset_seed`). The agent must not learn it.
+            `synthetic.dataset_seed`), as lowercase hex. Traces serialise
+            with orjson, which rejects integers wider than 64 bits. The agent
+            must not learn it.
     """
 
-    seed: int = Field(ge=0)
+    seed: str = Field(pattern=r"^[0-9a-f]+$")
+
+    @property
+    def dataset_seed(self) -> int:
+        """`seed` as the integer the generator takes."""
+        return int(self.seed, 16)
 
 
 class ResearchState(vf.State):
@@ -103,7 +110,7 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
         Args:
             task: The rollout's task data.
         """
-        self._load = functools.partial(synthetic.visible_data, task.seed)
+        self._load = functools.partial(synthetic.visible_data, task.dataset_seed)
         self._description = describe_panel(self._load().panel)
         self._episode = ResearchState()
         self._backtesting = asyncio.Lock()

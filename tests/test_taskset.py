@@ -33,7 +33,7 @@ COLUMN = baselines.column_code("f00")
 
 def _toolset(budget: int = 2) -> ResearchToolset:
     tools = ResearchToolset(ResearchConfig(budget=budget))
-    asyncio.run(tools.setup_task(ResearchData(seed=0)))
+    asyncio.run(tools.setup_task(ResearchData(seed="0")))
     return tools
 
 
@@ -49,7 +49,7 @@ def _trace(task: QuantResearchTask, state: ResearchState) -> vf.Trace:
 
 @pytest.fixture(scope="module")
 def task() -> QuantResearchTask:
-    return QuantResearchTask(ResearchData(seed=0), QuantResearchTaskConfig())
+    return QuantResearchTask(ResearchData(seed="0"), QuantResearchTaskConfig())
 
 
 def test_taskset_is_infinite_with_one_secret_seed_per_task():
@@ -57,10 +57,11 @@ def test_taskset_is_infinite_with_one_secret_seed_per_task():
     assert taskset.INFINITE and not taskset.bounded
     tasks = list(taskset.take(2))
     assert [t.data.idx for t in tasks] == [0, 1]
-    assert [t.data.seed for t in tasks] == [
+    assert [t.data.dataset_seed for t in tasks] == [
         synthetic.dataset_seed(i, "s") for i in (0, 1)
     ]
-    assert str(tasks[0].data.seed) not in tasks[0].data.prompt
+    data = tasks[0].data
+    assert data.seed not in data.prompt and str(data.dataset_seed) not in data.prompt
 
 
 def test_secret_is_random_unless_set():
@@ -133,7 +134,7 @@ def test_submit_stops_the_episode(task):
 
 def test_turn_limit_stops_the_episode():
     config = QuantResearchTaskConfig(max_turns=1)
-    task = QuantResearchTask(ResearchData(seed=0), config)
+    task = QuantResearchTask(ResearchData(seed="0"), config)
     trace = _trace(task, ResearchState())
     assert not task.turn_limit(trace)
     reply = vf.MessageNode(message=vf.AssistantMessage(content="hi"), sampled=True)
@@ -165,3 +166,10 @@ def test_grader_scores_on_hidden_periods(tmp_path):
     assert score["reward"] == pytest.approx(expected.reward)
     assert score["invalid"] == 0 and score["used_leak"] == 0
     assert set(score) == {f.name for f in dataclasses.fields(scoring.Score)}
+
+
+def test_trace_of_a_real_task_serialises():
+    # orjson rejects integers wider than 64 bits; dataset seeds have 128.
+    task = next(iter(QuantResearchTaskset(QuantResearchConfig(secret="s"))))
+    trace = _trace(task, ResearchState(submitted=True, code=COLUMN, claimed_ic=0.1))
+    assert json.loads(trace.to_json())["task"]["data"]["name"] == "task-0"

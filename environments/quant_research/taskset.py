@@ -225,7 +225,7 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
                 score = await grade(
                     self.config.tools,
                     runtime,
-                    self.data.seed,
+                    self.data.dataset_seed,
                     state.code,
                     state.claimed_ic,
                 )
@@ -262,11 +262,11 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
 
     async def validate(self, runtime: vf.Runtime) -> bool:
         """Grades the oracle alpha: it must score above 0 and pass the checks."""
-        weights = synthetic.ground_truth(self.data.seed).weights
+        weights = synthetic.ground_truth(self.data.dataset_seed).weights
         score = await grade(
             self.config.tools,
             runtime,
-            self.data.seed,
+            self.data.dataset_seed,
             baselines.weighted_code(weights),
             0.0,
         )
@@ -285,7 +285,7 @@ class QuantResearchTaskset(vf.Taskset[QuantResearchTask, QuantResearchConfig]):
             seed = synthetic.dataset_seed(index, self.config.secret)
             description = describe_panel(synthetic.visible_data(seed).panel)
             data = ResearchData(
-                seed=seed,
+                seed=f"{seed:032x}",
                 name=f"task-{index}",
                 prompt=prompt(
                     description, task_config.tools.budget, task_config.max_turns
