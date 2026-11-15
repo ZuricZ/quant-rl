@@ -1,6 +1,7 @@
 """Edge cases of the panel, generator, walk-forward, checks and scoring."""
 
 import dataclasses
+import importlib.metadata
 import datetime as dt
 import functools
 import math
@@ -454,3 +455,7 @@ def test_lookahead_except_on_any_fixed_dates_is_caught():
         s = scoring.score_submission(_peek_except(dates), 0.1, _hidden(), SMALL_WF)
         assert s.invalid == 0, s.error
         assert s.lookahead == 1, dates[:3]
+
+
+def test_project_is_named_quant_research():
+    assert importlib.metadata.distribution("quant-research").version == "0.1.0"

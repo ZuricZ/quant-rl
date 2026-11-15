@@ -100,10 +100,10 @@ def test_secret_is_required_and_masked():
         QuantResearchConfig.model_validate_json(config.model_dump_json())
 
 
-def test_seed_stays_out_of_published_task_data(task):
+def test_seed_stays_out_of_published_task_data(task, tmp_path):
     seed = synthetic.dataset_seed(0, SECRET, "eval")
     trace = _trace(task, ResearchState())
-    asyncio.run(task.setup(trace, None))
+    asyncio.run(task.setup(trace, _LocalRuntime(tmp_path)))
     assert trace.state.seed == f"{seed:032x}"
     published = trace.to_json().decode()
     for text in (str(seed), f"{seed:032x}", SECRET):
@@ -123,6 +123,12 @@ def test_prompt_states_columns_budget_and_contract():
         "submit(code, claimed_sharpe)",
     ):
         assert name in prompt
+
+
+def test_prompt_states_the_hidden_run_and_its_time_limit():
+    prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
+    assert "10,000 unseen periods" in prompt
+    assert f"{scoring.SCORE_TIME_LIMIT:g} seconds per run" in prompt
 
 
 def test_describe_lists_visible_data_only():
@@ -179,14 +185,18 @@ def test_submit_stops_the_episode(task):
     assert task.submitted(_trace(task, ResearchState(submitted=True)))
 
 
-def test_turn_limit_stops_the_episode():
+def test_turn_limit_stops_the_episode_as_truncated():
     config = QuantResearchTaskConfig(max_turns=1)
     task = QuantResearchTask(DATA, config)
     trace = _trace(task, ResearchState())
-    assert not task.turn_limit(trace)
+    assert not task.max_turns(trace)
     reply = vf.MessageNode(message=vf.AssistantMessage(content="hi"), sampled=True)
     trace.nodes.append(reply)
-    assert task.turn_limit(trace)
+    assert task.max_turns(trace)
+    # verifiers names the stop after the hook; "max_turns" counts as a
+    # truncation, which scoring and training treat as such.
+    trace.stop(task.max_turns.__name__)
+    assert trace.is_truncated
 
 
 def test_no_submission_is_invalid(task):
@@ -217,10 +227,10 @@ def test_grader_scores_on_hidden_periods(tmp_path):
     assert set(score) == {f.name for f in dataclasses.fields(scoring.Score)}
 
 
-def test_trace_of_a_real_task_serialises(task):
+def test_trace_of_a_real_task_serialises(task, tmp_path):
     # orjson rejects integers wider than 64 bits; dataset seeds have 128.
     trace = _trace(task, ResearchState(submitted=True, code=COLUMN, claimed_sharpe=0.1))
-    asyncio.run(task.setup(trace, None))
+    asyncio.run(task.setup(trace, _LocalRuntime(tmp_path)))
     assert json.loads(trace.to_json())["task"]["data"]["name"] == "eval-0"
 
 
@@ -275,3 +285,12 @@ def test_scoring_runs_in_a_fresh_container():
     # The grader must not run where agent code ran during the episode.
     task = next(iter(QuantResearchTaskset(_config())))
     assert task.scoring.mode == "isolated"
+
+
+def test_setup_refuses_an_unusable_sandbox_user(tmp_path):
+    config = QuantResearchTaskConfig(
+        secret=SECRET, tools=ResearchConfig(sandbox_user="no-such-user-xyz")
+    )
+    task = QuantResearchTask(DATA, config)
+    with pytest.raises(RuntimeError, match="sandbox user"):
+        asyncio.run(task.setup(_trace(task, ResearchState()), _LocalRuntime(tmp_path)))

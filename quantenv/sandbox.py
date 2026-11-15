@@ -21,6 +21,13 @@ the trusted parent over its stdin and stdout:
   removed, so nothing persists between runs.
 - Resource limits on address space, processes and file size, set by the
   child itself before it loads the agent's code (POSIX only).
+- One session at a time per sandbox user, across processes (an exclusive
+  lock file), since each session's clean-up kills all of that user's
+  processes.
+
+Problems with the sandbox itself, such as an unknown user or missing
+privileges, raise `SandboxError`, never `AlphaError`: they are not the
+agent's fault.
 
 Not covered: network access and System V IPC.
 
@@ -56,6 +63,10 @@ _MAX_ERROR = 2000
 _GiB = 2**30
 # Not walked for writable directories: kernel interfaces, not storage.
 _PSEUDO_FS = ("/proc", "/sys")
+
+
+class SandboxError(RuntimeError):
+    """The sandbox could not run, through no fault of the alpha code."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -106,14 +117,22 @@ class Sandbox:
         Raises:
             AlphaError: If the code fails to compile or a step fails.
             AlphaTimeout: If the session runs past its time limit.
+            SandboxError: If the child cannot be started as configured.
         """
+        with contextlib.ExitStack() as stack:
+            if self.user is not None:
+                stack.enter_context(_exclusive(self.user))
+            yield stack.enter_context(self._child(timestamp))
+
+    @contextlib.contextmanager
+    def _child(self, timestamp: str) -> Iterator[Session]:
         workdir = tempfile.mkdtemp(prefix="quantenv-session-")
         identity = {}
-        if self.user is not None:
-            uid, gid = _ids(self.user)
-            os.chown(workdir, uid, gid)
-            identity = {"user": uid, "group": gid, "extra_groups": []}
         try:
+            if self.user is not None:
+                uid, gid = _ids(self.user)
+                os.chown(workdir, uid, gid)
+                identity = {"user": uid, "group": gid, "extra_groups": []}
             proc = subprocess.Popen(
                 [sys.executable, "-I", "-m", "quantenv.sandbox"],
                 stdin=subprocess.PIPE,
@@ -124,6 +143,9 @@ class Sandbox:
                 start_new_session=True,
                 **identity,
             )
+        except OSError as e:
+            shutil.rmtree(workdir, ignore_errors=True)
+            raise SandboxError(f"cannot start the alpha process: {e!r}") from e
         except BaseException:
             shutil.rmtree(workdir, ignore_errors=True)
             raise
@@ -207,11 +229,36 @@ def _read_exactly(stream: BinaryIO, n: int) -> bytes:
 
 
 def _ids(user: str) -> tuple[int, int]:
-    """The uid and primary gid of `user`."""
+    """The uid and primary gid of `user`.
+
+    Raises:
+        SandboxError: If there is no such user.
+    """
     import pwd  # POSIX only, like running as another user.
 
-    entry = pwd.getpwnam(user)
+    try:
+        entry = pwd.getpwnam(user)
+    except KeyError as e:
+        raise SandboxError(f"no sandbox user {user!r}") from e
     return entry.pw_uid, entry.pw_gid
+
+
+@contextlib.contextmanager
+def _exclusive(user: str) -> Iterator[None]:
+    """Holds the lock that lets one session at a time run as `user`.
+
+    The lock file is the caller's, mode 0600, so the sandbox user can
+    neither open it nor have it swept as its own.
+    """
+    import fcntl  # POSIX only, like running as another user.
+
+    path = os.path.join(tempfile.gettempdir(), f"quantenv-sandbox-{user}.lock")
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 def _permits(st: os.stat_result, uid: int, gid: int, mode: int) -> bool:

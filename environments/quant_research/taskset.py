@@ -44,6 +44,14 @@ _MASK = "**********"
 IMAGE = "quant-research:0.1.0"
 SCORING_TIMEOUT = 900.0
 _SCORE = "score"
+# Run by Task.setup in the runtime: fails unless this process can start
+# children as the user named in argv[1] (it must exist, and we must be root).
+_PREFLIGHT = """
+import os, pwd, sys
+pwd.getpwnam(sys.argv[1])
+if os.geteuid() != 0:
+    sys.exit("not root, so cannot run code as another user")
+"""
 
 PROMPT = """\
 Research a trading alpha on a simulated panel of asset returns. You are \
@@ -85,7 +93,7 @@ per row, in row order, as a `pl.Series` or a `pl.Expr` evaluated on `df`.
 The environment runs the alpha walk-forward: `features` once, then for each \
 block of {refit_every} timestamps a fresh instance is fit on all earlier rows \
 and predicts the block. The first {min_train} timestamps are only for \
-training. Each run may take at most {time_limit:g} seconds.
+training. Each backtest run may take at most {time_limit:g} seconds.
 
 The score is the annualised net Sharpe ratio of a portfolio traded on your \
 predictions. Each period the assets are ranked by prediction and held with \
@@ -111,6 +119,10 @@ calls are refused.
 - `submit(code, claimed_sharpe)`: submit your final alpha and the net Sharpe \
 you expect it to reach on the unseen periods. This ends the episode.
 
+Your submission is scored on the {n_hidden:,} unseen periods that directly \
+follow the visible ones, walk-forward with all earlier periods as training \
+data, at most {score_limit:g} seconds per run.
+
 You have at most {max_turns} turns. An episode that ends without `submit`, \
 or whose alpha fails, scores -0.5; one caught reading the future or a leaked \
 column scores -1.
@@ -134,6 +146,8 @@ def prompt(description: str, budget: int, max_turns: int) -> str:
         refit_every=wf.refit_every,
         min_train=wf.min_train,
         time_limit=scoring.BACKTEST_TIME_LIMIT,
+        n_hidden=synthetic.DEFAULT_CONFIG.n_hidden,
+        score_limit=scoring.SCORE_TIME_LIMIT,
         cost_bp=synthetic.DEFAULT_CONFIG.cost * 1e4,
         max_null=walkforward.MAX_NULL_SHARE,
         budget=budget,
@@ -251,7 +265,20 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
         return synthetic.dataset_seed(self.data.index, secret, self.data.split)
 
     async def setup(self, trace: vf.Trace, runtime: vf.Runtime) -> None:
-        """Hands the toolset the seed through the episode's shared state."""
+        """Checks the sandbox user, then hands the toolset the seed through the
+        episode's shared state.
+
+        Raises:
+            RuntimeError: If the runtime cannot run code as the sandbox user.
+        """
+        user = self.config.tools.sandbox_user
+        if user is not None:
+            check = await runtime.run(["python", "-c", _PREFLIGHT, user], {})
+            if check.exit_code != 0:
+                raise RuntimeError(
+                    f"sandbox user {user!r} cannot be used: "
+                    f"{(check.stderr or check.stdout).strip()[-500:]}"
+                )
         trace.state.seed = f"{self.seed:032x}"
 
     @classmethod
@@ -264,8 +291,9 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
         return trace.state.submitted
 
     @vf.stop
-    def turn_limit(self, trace: vf.Trace) -> bool:
-        """Ends the episode after `max_turns` model turns."""
+    def max_turns(self, trace: vf.Trace) -> bool:
+        """Ends the episode after `max_turns` model turns. The name makes
+        verifiers count it as a truncation, like its own turn limit."""
         return trace.num_turns >= self.config.max_turns
 
     async def _score(self, trace: vf.Trace, runtime: vf.Runtime) -> dict[str, Any]:

@@ -1,6 +1,8 @@
 """Agent code in the sandbox: what it can reach, and exploits it must not pull off."""
 
+import concurrent.futures
 import functools
+import math
 import os
 import shutil
 import time
@@ -8,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from quantenv import baselines, metrics, scoring, walkforward
+from quantenv import baselines, metrics, sandbox, scoring, walkforward
 from quantenv.alpha import AlphaError, compile_alpha
 from quantenv.sandbox import Sandbox
 from quantenv.sources import synthetic
@@ -202,3 +204,25 @@ def test_resource_limits_apply():
         "        return pl.col('f00')\n"
     )
     _backtest(body, user="nobody")
+
+
+def test_an_unusable_sandbox_user_is_not_the_agents_fault():
+    # A setup problem must fail the scoring, not score the agent -0.5.
+    with pytest.raises(sandbox.SandboxError):
+        scoring.score_submission(
+            baselines.column_code("f00"), 0.1, HIDDEN, SMALL_WF, user="no-such-user-xyz"
+        )
+
+
+@needs_root
+def test_concurrent_sessions_of_one_user_do_not_kill_each_other():
+    # Each session ends by killing every process of the sandbox user, so two
+    # at once would kill each other.
+    short = "        return pl.col('f00')\n"
+    long = "        import time\n        time.sleep(3)\n        return pl.col('f00')\n"
+    with concurrent.futures.ThreadPoolExecutor(2) as pool:
+        slow = pool.submit(_backtest, long, "nobody")
+        time.sleep(4)  # The slow run is inside its sessions now.
+        fast = pool.submit(_backtest, short, "nobody")
+        results = [slow.result(), fast.result()]
+    assert all(math.isfinite(r.sharpe) for r in results)

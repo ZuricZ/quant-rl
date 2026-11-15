@@ -16,7 +16,7 @@ from typing import Any, Callable
 from quantenv import checks, metrics, walkforward
 from quantenv.alpha import AlphaError, AlphaTimeout
 from quantenv.panel import EvalData, between
-from quantenv.sandbox import Sandbox
+from quantenv.sandbox import Sandbox, SandboxError
 from quantenv.walkforward import PREDICTION, Run, WalkForward
 
 BACKTEST_TIME_LIMIT = 30.0
@@ -32,6 +32,9 @@ FLAGGED_REWARD = -1.0
 SCORE_RUNS = 2 + checks.N_CUTS
 
 Loader = Callable[[], EvalData]
+
+# What a worker reports: a result, the alpha's failure, or the scoring's own.
+_OK, _ALPHA_ERROR, _SCORING_ERROR = "ok", "alpha", "scoring"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -90,6 +93,8 @@ def backtest(
 
     Raises:
         AlphaError: If the code fails or runs past the limit.
+        SandboxError: If the backtest itself fails, e.g. the sandbox user
+            is unusable.
     """
     return run_isolated(
         _backtest_worker,
@@ -118,6 +123,10 @@ def score_submission(
 
     Returns:
         The score. Never raises for bad code.
+
+    Raises:
+        SandboxError: If scoring itself fails, e.g. the sandbox user is
+            unusable. The submission is not to blame, so it is not scored.
     """
     try:
         claimed = float(claimed_sharpe)
@@ -163,7 +172,9 @@ def run_isolated(target: Callable[..., Any], args: tuple, timeout: float) -> Any
 
     Raises:
         AlphaTimeout: If the process runs past `timeout`.
-        AlphaError: If `target` raises, or the process dies.
+        AlphaError: If `target` raises AlphaError, or the process dies.
+        SandboxError: If `target` raises anything else: a problem with the
+            scoring itself, not with the alpha.
     """
     ctx = mp.get_context("spawn")
     parent, child = ctx.Pipe(duplex=False)
@@ -173,7 +184,7 @@ def run_isolated(target: Callable[..., Any], args: tuple, timeout: float) -> Any
     try:
         if not parent.poll(timeout):
             raise AlphaTimeout(f"ran past {timeout:g} s")
-        ok, payload = parent.recv()
+        kind, payload = parent.recv()
     except EOFError as e:
         raise AlphaError("worker process died") from e
     finally:
@@ -181,18 +192,20 @@ def run_isolated(target: Callable[..., Any], args: tuple, timeout: float) -> Any
             proc.kill()
         proc.join()
         parent.close()
-    if not ok:
+    if kind == _ALPHA_ERROR:
         raise AlphaError(payload)
+    if kind == _SCORING_ERROR:
+        raise SandboxError(payload)
     return payload
 
 
 def _child(conn, target: Callable[..., Any], args: tuple) -> None:
     try:
-        result = (True, target(*args))
+        result = (_OK, target(*args))
     except AlphaError as e:
-        result = (False, str(e))
+        result = (_ALPHA_ERROR, str(e))
     except Exception as e:
-        result = (False, f"{type(e).__name__}: {e}")
+        result = (_SCORING_ERROR, f"{type(e).__name__}: {e}")
     conn.send(result)
     conn.close()
 
