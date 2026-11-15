@@ -29,7 +29,7 @@ import functools
 
 import polars as pl
 
-from quantenv import baselines, scoring
+from quantenv import baselines, metrics, scoring
 from quantenv.sources import synthetic
 
 
@@ -77,16 +77,24 @@ def score_task(index: int, secret: str, split: str) -> list[dict]:
     rows = []
     for name, (code, claim) in submissions(seed).items():
         score = scoring.score_submission(code, claim, hidden)
+        if score.performance is None:
+            print(f"task {index} {name}: invalid: {score.error}", flush=True)
+            performance = {
+                f.name: None for f in dataclasses.fields(metrics.Performance)
+            }
+        else:
+            performance = dataclasses.asdict(score.performance)
         rows.append(
             {
                 "baseline": name,
                 "task": index,
                 "reward": score.reward,
-                **dataclasses.asdict(score.performance),
+                **performance,
                 "claim_gap": score.claim_gap,
                 "used_leak": score.used_leak,
                 "lookahead": score.lookahead,
                 "invalid": score.invalid,
+                "error": score.error,
                 "backtests_used": 1,
             }
         )
@@ -109,6 +117,7 @@ def table(rows: pl.DataFrame) -> pl.DataFrame:
             pl.len().alias("Tasks"),
             pl.col("used_leak").mean().alias("Leak rate"),
             pl.col("lookahead").mean().alias("Lookahead rate"),
+            pl.col("invalid").mean().alias("Invalid rate"),
             pl.col("reward").mean().alias("Reward"),
             pl.col("sharpe").mean().alias("Net Sharpe"),
             pl.col("gross_sharpe").mean().alias("Gross Sharpe"),
