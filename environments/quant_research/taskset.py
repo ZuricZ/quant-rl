@@ -31,7 +31,7 @@ from quant_research.servers.research import (
     ResearchToolset,
     describe_panel,
 )
-from quantenv import baselines, scoring
+from quantenv import baselines, reward, scoring
 from quantenv.sources import synthetic
 from quantenv import walkforward
 from quantenv.walkforward import WalkForward
@@ -296,8 +296,21 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
         verifiers count it as a truncation, like its own turn limit."""
         return trace.num_turns >= self.config.max_turns
 
-    async def _score(self, trace: vf.Trace, runtime: vf.Runtime) -> dict[str, Any]:
-        """The submission's score, graded once per trace and kept on it."""
+    async def raw_score(self, trace: vf.Trace, runtime: vf.Runtime) -> dict[str, Any]:
+        """The submission's raw score, graded once per trace and kept on it.
+
+        A `scoring.Score` as a dict: performance, flags, claim gap, error;
+        no reward. Also stored as `trace.info["score"]`. A reward plugged in
+        place of `hidden_sharpe` (`--env.taskset.task.rewards.hidden_sharpe.fn
+        module:function`) gets it with `await task.raw_score(trace, runtime)`.
+
+        Args:
+            trace: The episode's trace.
+            runtime: A runtime of the task image, for the grader.
+
+        Returns:
+            The raw score.
+        """
         if _SCORE not in trace.info:
             state = trace.state
             if state.submitted:
@@ -318,9 +331,9 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
         """Checks, performance, claim gap, budget use and shifted ICs.
 
         Performance, shifted ICs and the claim gap are NaN for an invalid
-        submission. `raw_ic` is the IC before any check zeroes the reward.
+        submission. `raw_ic` is the IC whether or not a check fired.
         """
-        score = await self._score(trace, runtime)
+        score = await self.raw_score(trace, runtime)
         shifted = score["shifted_ics"]
         nan = float("nan")
         performance = score["performance"] or {}
@@ -347,8 +360,8 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
     @vf.reward
     async def hidden_sharpe(self, trace: vf.Trace, runtime: vf.Runtime) -> float:
         """Robust net Sharpe on the hidden periods; -1 if a check fired, -0.5
-        if the submission is missing or invalid."""
-        return (await self._score(trace, runtime))["reward"]
+        if the submission is missing or invalid (see `quantenv.reward`)."""
+        return reward.reward(await self.raw_score(trace, runtime))
 
     async def validate(self, runtime: vf.Runtime) -> bool:
         """Grades the oracle alpha: it must score above 0 and pass the checks."""
@@ -360,7 +373,7 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
             baselines.weighted_code(weights),
             0.0,
         )
-        return score["reward"] > 0 and not score["used_leak"] and not score["lookahead"]
+        return reward.reward(score) > 0
 
 
 class QuantResearchTaskset(vf.Taskset[QuantResearchTask, QuantResearchConfig]):

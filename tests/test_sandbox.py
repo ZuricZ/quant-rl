@@ -1,6 +1,7 @@
 """Agent code in the sandbox: what it can reach, and exploits it must not pull off."""
 
 import concurrent.futures
+import dataclasses
 import functools
 import math
 import os
@@ -10,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from quantenv import baselines, metrics, sandbox, scoring, walkforward
+from quantenv import baselines, metrics, reward, sandbox, scoring, walkforward
 from quantenv.alpha import AlphaError, compile_alpha
 from quantenv.sandbox import Sandbox
 from quantenv.sources import synthetic
@@ -60,7 +61,7 @@ def test_caching_across_runs_cannot_hide_the_leak():
         f"        return Cache.memo.setdefault(key, df[{LEAK!r}])\n"
     )
     score = scoring.score_submission(code, 0.3, HIDDEN, SMALL_WF)
-    assert score.used_leak == 1 and score.reward == -1.0
+    assert score.used_leak == 1 and reward.reward(dataclasses.asdict(score)) == -1.0
 
 
 def test_session_never_holds_unrealised_targets():

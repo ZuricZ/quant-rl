@@ -29,7 +29,7 @@ import functools
 
 import polars as pl
 
-from quantenv import baselines, metrics, scoring
+from quantenv import baselines, metrics, reward, scoring
 from quantenv.sources import synthetic
 
 
@@ -88,7 +88,7 @@ def score_task(index: int, secret: str, split: str) -> list[dict]:
             {
                 "baseline": name,
                 "task": index,
-                "reward": score.reward,
+                "reward": reward.reward(dataclasses.asdict(score)),
                 **performance,
                 "claim_gap": score.claim_gap,
                 "used_leak": score.used_leak,

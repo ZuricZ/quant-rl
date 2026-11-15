@@ -24,10 +24,6 @@ SCORE_TIME_LIMIT = 60.0
 # Allowance on top of the alpha limits for process start-up and loading the
 # data, after which a hung worker is killed.
 STARTUP_ALLOWANCE = 60.0
-# Rewards outside the Sharpe scale: worse than any plausible honest alpha, so
-# neither breaking the rules nor failing to submit pays.
-INVALID_REWARD = -0.5
-FLAGGED_REWARD = -1.0
 # Pipeline runs in a score: base, column dependence, one per truncation cut.
 SCORE_RUNS = 2 + checks.N_CUTS
 
@@ -39,12 +35,10 @@ _OK, _ALPHA_ERROR, _SCORING_ERROR = "ok", "alpha", "scoring"
 
 @dataclasses.dataclass(frozen=True)
 class Score:
-    """Outcome of scoring one submission.
+    """Raw outcome of scoring one submission. Carries no reward: the host
+    turns it into one with `quantenv.reward.reward`.
 
     Attributes:
-        reward: Robust annualised net Sharpe on the scored periods (see
-            `metrics.robust_sharpe`); `FLAGGED_REWARD` if a check fired;
-            `INVALID_REWARD` if the submission was invalid.
         performance: The walk-forward portfolio on the scored periods; None
             if invalid.
         claim_gap: Claimed minus realised net Sharpe; NaN if invalid.
@@ -57,7 +51,6 @@ class Score:
         error: Why the submission was invalid, or "".
     """
 
-    reward: float
     performance: metrics.Performance | None
     claim_gap: float
     used_leak: int
@@ -69,7 +62,7 @@ class Score:
 
 def invalid_score(error: str) -> Score:
     """The score of a submission that cannot be evaluated."""
-    return Score(INVALID_REWARD, None, float("nan"), 0, 0, 1, error=error)
+    return Score(None, float("nan"), 0, 0, 1, error=error)
 
 
 def backtest(
@@ -142,11 +135,7 @@ def score_submission(
         )
     except AlphaError as e:
         return invalid_score(str(e))
-    # TODO: The reward is unbounded. Consider squashing it, e.g.
-    # tanh(robust_sharpe / S0) with S0 = 3, once real runs show its range.
-    reward = FLAGGED_REWARD if used_leak or lookahead else performance.robust_sharpe
     return Score(
-        reward,
         performance,
         claimed - performance.sharpe,
         int(used_leak),

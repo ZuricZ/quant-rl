@@ -31,7 +31,7 @@ from quant_research.taskset import (  # noqa: E402
     QuantResearchTaskConfig,
     QuantResearchTaskset,
 )
-from quantenv import baselines, scoring  # noqa: E402
+from quantenv import baselines, reward, scoring  # noqa: E402
 from quantenv.sources import synthetic  # noqa: E402
 
 COLUMN = baselines.column_code("f00")
@@ -221,7 +221,10 @@ def test_grader_scores_on_hidden_periods(tmp_path):
     hidden = functools.partial(synthetic.hidden_data, 0)
     expected = scoring.score_submission(code, 1.0, hidden)
     score = json.loads(result.read_text())
-    assert score["reward"] == pytest.approx(expected.reward)
+    assert "reward" not in score  # The host applies the rule, not the image.
+    assert reward.reward(score) == pytest.approx(
+        reward.reward(dataclasses.asdict(expected))
+    )
     assert score["performance"]["sharpe"] == pytest.approx(expected.performance.sharpe)
     assert score["invalid"] == 0 and score["used_leak"] == 0
     assert set(score) == {f.name for f in dataclasses.fields(scoring.Score)}
@@ -294,3 +297,21 @@ def test_setup_refuses_an_unusable_sandbox_user(tmp_path):
     task = QuantResearchTask(DATA, config)
     with pytest.raises(RuntimeError, match="sandbox user"):
         asyncio.run(task.setup(_trace(task, ResearchState()), _LocalRuntime(tmp_path)))
+
+
+async def plugged_reward(task, trace, runtime) -> float:
+    """A stand-in for a reward plugged by config in place of hidden_sharpe."""
+    score = await task.raw_score(trace, runtime)
+    return 7.0 if score["invalid"] else 0.0
+
+
+def test_a_plugged_reward_replaces_hidden_sharpe_and_gets_the_raw_score():
+    config = QuantResearchTaskConfig(
+        secret=SECRET,
+        rewards={"hidden_sharpe": {"fn": "test_taskset:plugged_reward"}},
+    )
+    task = QuantResearchTask(DATA, config)
+    (fn,) = task.hooks("reward")
+    assert fn.__name__ == "hidden_sharpe"
+    trace = _trace(task, ResearchState())  # No submission: invalid.
+    assert asyncio.run(fn(task=task, trace=trace, runtime=None)) == 7.0

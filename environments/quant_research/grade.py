@@ -7,7 +7,8 @@ finished:
 
 REQUEST is a JSON file with `seed`, `code`, `claimed_sharpe` and `user`, the
 sandbox user. It holds the dataset seed, so it is deleted as soon as it is
-read, before any agent code runs. The score is written as JSON to RESULT.
+read, before any agent code runs. The raw score (`scoring.Score`, no reward) is written as JSON to
+RESULT; the host applies the reward rule (`quantenv.reward`).
 The hidden periods are built only inside the scoring worker that
 `quantenv.scoring` starts, never in this process.
 """
