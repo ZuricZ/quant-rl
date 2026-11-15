@@ -2,14 +2,17 @@
 
 - truncation: does a prediction at t change when rows after t are removed?
   Catches alpha code that reads future rows.
-- column_dependence: does the output change when columns are permuted across
+- column_dependence: does performance fall when columns are permuted across
   assets within each timestamp? Catches use of columns known or suspected to
   hold future information.
 - shifted_ics: rank IC against past, next and next-but-one returns. A
   statistical flag for leaks built into the data; not proof.
 
-The first two compare per-period ranks, not raw values, so floating-point
-noise that cannot change the score is ignored. Their random choices (cut
+Truncation compares per-period ranks, not raw values, so floating-point noise
+that cannot change the score is ignored. Column dependence compares rank IC,
+because predictions may change without the column being used: a data-driven
+screen that drops the suspect column as implausibly strong may admit it once
+it is permuted into noise. Their random choices (cut
 dates, permutation) come from a seed that agent code must not know: an
 alpha that knew the cut dates could be honest on exactly those dates.
 """
@@ -24,6 +27,10 @@ from quantenv.panel import Panel
 from quantenv.walkforward import PREDICTION, Run, Runner, WalkForward
 
 N_CUTS = 8
+# Column dependence flags a drop in mean rank IC that is both significant and
+# material. See the spec, Decision 8, for the measurements behind these.
+DEPENDENCE_Z = 4.0
+DEPENDENCE_MIN_DROP = 0.05  # Share of the base run's |IC|.
 _KEY = "_shuffle_key"
 _STRATUM = "_stratum"
 
@@ -186,10 +193,13 @@ def column_dependence(
     *,
     seed: int,
 ) -> bool:
-    """Reruns with `columns` permuted within each timestamp and compares.
+    """Reruns with `columns` permuted within each timestamp and compares IC.
 
     Permuting also changes what `fit` trains on, so a model that learned to
-    use a column is caught as well.
+    use a column is caught as well. Flags when the permuted run's mean rank
+    IC is lower by more than `DEPENDENCE_Z` standard errors of the paired
+    per-period difference and by more than `DEPENDENCE_MIN_DROP` of the base
+    run's |IC|.
 
     Args:
         runner: Runs the alpha.
@@ -202,8 +212,8 @@ def column_dependence(
         seed: Secret seed for the permutation.
 
     Returns:
-        True if the predictions depend on any of `columns`. False if
-        `columns` is empty.
+        True if performance depends on any of `columns`. False if `columns`
+        is empty.
 
     Raises:
         AlphaError: If any run fails.
@@ -218,11 +228,27 @@ def column_dependence(
         )
     )
     out = walkforward.run(runner, shuffled, wf, base.start).predictions
-    p = base.predictions
-    return not same_period_ranks(
-        p.get_column(panel.schema.timestamp),
-        p.get_column(PREDICTION),
-        out.get_column(PREDICTION),
+    s = panel.schema
+    ics = metrics.period_rank_ics(
+        panel.frame.lazy()
+        .filter(pl.col(s.timestamp) >= base.start)
+        .select(s.timestamp, s.target)
+        .collect()
+        .with_columns(
+            base.predictions.get_column(PREDICTION).alias("_base"),
+            out.get_column(PREDICTION).alias("_permuted"),
+        ),
+        {"base": ("_base", s.target), "permuted": ("_permuted", s.target)},
+        s.timestamp,
+    )
+    diff = pl.col("base") - pl.col("permuted")
+    drop, se, base_ic = ics.select(
+        diff.mean().alias("drop"),
+        (diff.std() / pl.len().sqrt()).alias("se"),
+        pl.col("base").mean().alias("base_ic"),
+    ).row(0)
+    return drop > DEPENDENCE_Z * (se or 0.0) and drop > DEPENDENCE_MIN_DROP * abs(
+        base_ic
     )
 
 

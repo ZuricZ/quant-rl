@@ -250,10 +250,16 @@ def test_shuffle_keeps_each_periods_values(data):
     assert per_period(shuffled).equals(per_period(frame))
 
 
-def test_tiny_leak_weight_is_caught(data):
+def test_small_leak_weight_is_caught_only_if_it_helps(data):
+    # Dependence is judged on IC: a weight too small to change the score is
+    # tolerated, one that buys a material gain is not.
     real, leaky = data.truth.real[0], data.truth.leaky
-    code = _predict_code(f"pl.col({real!r}) + 1e-6 * pl.col({leaky!r})")
-    assert checks.column_dependence(_local(code), data.panel, [leaky], WF, seed=0)
+    negligible = _predict_code(f"pl.col({real!r}) + 1e-6 * pl.col({leaky!r})")
+    helpful = _predict_code(f"pl.col({real!r}) + 0.1 * pl.col({leaky!r})")
+    assert not checks.column_dependence(
+        _local(negligible), data.panel, [leaky], WF, seed=0
+    )
+    assert checks.column_dependence(_local(helpful), data.panel, [leaky], WF, seed=0)
 
 
 def test_whole_sample_normalisation_is_lookahead(data):

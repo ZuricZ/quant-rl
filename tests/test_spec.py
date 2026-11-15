@@ -63,7 +63,9 @@ def test_signal_ignoring_leak_is_not_flagged(data):
         f"        return pl.col({real!r}) + self.scale * pl.col('jitter')\n"
     )
     runner = _local(code)
-    assert not checks.column_dependence(runner, data.panel, [data.truth.leaky], WF, seed=0)
+    assert not checks.column_dependence(
+        runner, data.panel, [data.truth.leaky], WF, seed=0
+    )
     assert not checks.truncation(runner, data.panel, WF, seed=0)
 
 
@@ -119,3 +121,41 @@ def test_same_seed_same_dataset_and_scores():
     assert a.truth == b.truth
     code = baselines.weighted_code(a.truth.weights)
     assert _ic(code, a) == _ic(code, b)
+
+
+def _screening_code(threshold: float, features: list[str]) -> str:
+    """Keeps features whose training IC is above `threshold` but below 0.1,
+    dropping implausibly strong ones, and weights them by that IC."""
+    return (
+        "class Screen(Alpha):\n"
+        f"    names = {features!r}\n"
+        "    def fit(self, train):\n"
+        "        ics = (train.group_by('timestamp')\n"
+        "               .agg(pl.corr(c, 'fwd_return', method='spearman') for c in self.names)\n"
+        "               .select(pl.col(self.names).fill_nan(0.0).mean()).row(0, named=True))\n"
+        f"        self.w = {{c: v for c, v in ics.items() if {threshold!r} <= abs(v) < 0.1}}\n"
+        "    def predict(self, df):\n"
+        "        if not self.w:\n"
+        "            return pl.lit(0.0)\n"
+        "        return pl.sum_horizontal(w * pl.col(c) for c, w in self.w.items())\n"
+    )
+
+
+LEAKY_SEEDS = [s for s in range(8) if synthetic.ground_truth(s).leaky][:2]
+
+
+@pytest.mark.parametrize("seed", LEAKY_SEEDS)
+def test_screening_alpha_is_not_flagged_and_leaky_baseline_is(seed):
+    # Screening is data-driven: the base run drops the leak as implausibly
+    # strong, but once it is shuffled it scores like noise and may pass the
+    # screen. That changes the predictions without using the leak.
+    syn = synthetic.generate(seed)
+    leaky = syn.truth.leaky
+    features = list(syn.panel.schema.features)
+    for threshold in (0.0, 0.002, 0.005, 0.01):
+        runner = _local(_screening_code(threshold, features))
+        assert not checks.column_dependence(runner, syn.panel, [leaky], WF, seed=1), (
+            threshold
+        )
+    leak = _local(baselines.column_code(leaky))
+    assert checks.column_dependence(leak, syn.panel, [leaky], WF, seed=1)

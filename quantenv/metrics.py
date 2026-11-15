@@ -3,6 +3,32 @@
 import polars as pl
 
 
+def period_rank_ics(
+    frame: pl.DataFrame, pairs: dict[str, tuple[str, str]], timestamp: str
+) -> pl.DataFrame:
+    """Per-period Spearman correlation for several column pairs, in one pass.
+
+    Null pairs are ignored. A period with fewer than two usable rows or a
+    constant column gets IC 0, so every value is finite.
+
+    Args:
+        frame: Long frame with the timestamp and every named column.
+        pairs: Output name to (x column, y column).
+        timestamp: Time column to group by.
+
+    Returns:
+        One row per period, in time order: the timestamp and one IC column
+        per pair.
+    """
+    return (
+        frame.lazy()
+        .group_by(timestamp, maintain_order=True)
+        .agg(pl.corr(x, y, method="spearman").alias(k) for k, (x, y) in pairs.items())
+        .with_columns(pl.col(list(pairs)).fill_nan(0.0).fill_null(0.0))
+        .collect()
+    )
+
+
 def mean_rank_ics(
     frame: pl.DataFrame, pairs: dict[str, tuple[str, str]], timestamp: str
 ) -> dict[str, float]:
@@ -34,11 +60,8 @@ def mean_rank_ics(
         Output name to mean rank IC.
     """
     return (
-        frame.lazy()
-        .group_by(timestamp)
-        .agg(pl.corr(x, y, method="spearman").alias(k) for k, (x, y) in pairs.items())
-        .select(pl.col(list(pairs)).fill_nan(0.0).fill_null(0.0).mean())
-        .collect()
+        period_rank_ics(frame, pairs, timestamp)
+        .select(pl.col(list(pairs)).mean())
         .row(0, named=True)
     )
 
