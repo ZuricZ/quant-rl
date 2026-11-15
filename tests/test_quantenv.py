@@ -472,3 +472,16 @@ def test_lookahead_except_on_any_fixed_dates_is_caught():
 
 def test_project_is_named_quant_research():
     assert importlib.metadata.distribution("quant-research").version == "0.1.0"
+
+
+def test_check_thresholds_are_configurable(data):
+    leaky = data.truth.leaky
+    runner = _local(baselines.column_code(leaky))
+    assert checks.CheckConfig() == checks.CheckConfig(
+        n_cuts=8, dependence_z=4.0, dependence_min_drop=0.05
+    )
+    assert checks.column_dependence(runner, data.panel, [leaky], WF, seed=0)
+    lenient = checks.CheckConfig(dependence_min_drop=10.0)
+    assert not checks.column_dependence(
+        runner, data.panel, [leaky], WF, seed=0, config=lenient
+    )

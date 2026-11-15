@@ -24,8 +24,6 @@ SCORE_TIME_LIMIT = 60.0
 # Allowance on top of the alpha limits for process start-up and loading the
 # data, after which a hung worker is killed.
 STARTUP_ALLOWANCE = 60.0
-# Pipeline runs in a score: base, column dependence, one per truncation cut.
-SCORE_RUNS = 2 + checks.N_CUTS
 
 Loader = Callable[[], EvalData]
 
@@ -103,6 +101,7 @@ def score_submission(
     wf: WalkForward = WalkForward(),
     time_limit: float = SCORE_TIME_LIMIT,
     user: str | None = None,
+    check_config: checks.CheckConfig = checks.CheckConfig(),
 ) -> Score:
     """Scores a submission and runs every check.
 
@@ -113,6 +112,7 @@ def score_submission(
         wf: Walk-forward settings.
         time_limit: Limit in seconds per pipeline run; each check adds runs.
         user: Run the alpha as this dedicated user; see `Sandbox`.
+        check_config: Settings of the lookahead checks.
 
     Returns:
         The score. Never raises for bad code.
@@ -130,8 +130,9 @@ def score_submission(
     try:
         performance, used_leak, lookahead, shifted = run_isolated(
             _score_worker,
-            (Sandbox(code, time_limit, user), load, wf),
-            SCORE_RUNS * time_limit + STARTUP_ALLOWANCE,
+            (Sandbox(code, time_limit, user), load, wf, check_config),
+            # Pipeline runs: base, column dependence, one per truncation cut.
+            (2 + check_config.n_cuts) * time_limit + STARTUP_ALLOWANCE,
         )
     except AlphaError as e:
         return invalid_score(str(e))
@@ -224,16 +225,18 @@ def _backtest_worker(
 
 
 def _score_worker(
-    sandbox: Sandbox, load: Loader, wf: WalkForward
+    sandbox: Sandbox, load: Loader, wf: WalkForward, config: checks.CheckConfig
 ) -> tuple[metrics.Performance, bool, bool, dict[int, float]]:
     data = load()
     panel, start = data.panel, data.start
     seed = data.check_seed if data.check_seed is not None else secrets.randbits(64)
     base = walkforward.run(sandbox, panel, wf, start)
     used_leak = checks.column_dependence(
-        sandbox, panel, list(data.suspects), wf, start, base, seed=seed
+        sandbox, panel, list(data.suspects), wf, start, base, seed=seed, config=config
     )
-    lookahead = checks.truncation(sandbox, panel, wf, start, base, seed=seed)
+    lookahead = checks.truncation(
+        sandbox, panel, wf, start, base, seed=seed, config=config
+    )
     return (
         _performance(data, base),
         used_leak,

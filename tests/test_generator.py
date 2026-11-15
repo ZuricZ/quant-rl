@@ -83,3 +83,17 @@ def test_plain_features_are_independent_draws():
         pl.corr(pl.col(f), pl.col(f).shift(1).over("asset")) for f in _features()
     ).row(0)
     assert max(abs(v) for v in lag) < 0.02
+
+
+def test_return_scale_and_start_date_are_configurable():
+    import dataclasses
+    import datetime as dt
+
+    base = synthetic.generate(SEED, synthetic.PLAIN).panel.frame
+    config = dataclasses.replace(
+        synthetic.PLAIN, return_vol=0.04, start=dt.datetime(2010, 1, 4)
+    )
+    scaled = synthetic.generate(SEED, config).panel.frame
+    ratio = scaled["fwd_return"].std() / base["fwd_return"].std()
+    assert ratio == pytest.approx(2.0)
+    assert scaled["timestamp"].min() == dt.date(2010, 1, 4)

@@ -219,7 +219,9 @@ def test_grader_scores_on_hidden_periods(tmp_path):
     code = baselines.weighted_code(truth.weights)
     request, result = tmp_path / "request.json", tmp_path / "result.json"
     request.write_text(
-        json.dumps({"seed": 0, "code": code, "claimed_sharpe": 1.0, "user": None})
+        json.dumps(
+            {"seed": 0, "code": code, "claimed_sharpe": 1.0, "user": None, "checks": {}}
+        )
     )
     grade.main([str(request), str(result)])
     assert not request.exists()
@@ -320,3 +322,12 @@ def test_a_plugged_reward_replaces_hidden_sharpe_and_gets_the_raw_score():
     assert fn.__name__ == "hidden_sharpe"
     trace = _trace(task, ResearchState())  # No submission: invalid.
     assert asyncio.run(fn(task=task, trace=trace, runtime=None)) == 7.0
+
+
+def test_preflight_module_rejects_an_unknown_user():
+    run = subprocess.run(
+        [sys.executable, "-m", "quant_research.preflight", "no-such-user-xyz"],
+        capture_output=True,
+        text=True,
+    )
+    assert run.returncode != 0 and "no-such-user-xyz" in run.stderr

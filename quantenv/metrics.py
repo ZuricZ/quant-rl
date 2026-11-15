@@ -16,10 +16,14 @@ _MAD_TO_SD = 1.4826
 def period_rank_ics(
     frame: pl.DataFrame, pairs: dict[str, tuple[str, str]], timestamp: str
 ) -> pl.DataFrame:
-    """Per-period Spearman correlation for several column pairs, in one pass.
+    """Cross-sectional rank IC per period, for several column pairs at once.
 
-    Null pairs are ignored. A period with fewer than two usable rows or a
-    constant column gets IC 0, so every value is finite.
+    For each timestamp, the Spearman correlation across assets of x with y.
+    The pairs only batch several such correlations into one pass over the
+    frame, e.g. predictions against returns at three shifts, or every
+    feature against the target. Null pairs are ignored. A period with fewer
+    than two usable rows or a constant column gets IC 0, so every value is
+    finite.
 
     Args:
         frame: Long frame with the timestamp and every named column.
@@ -71,7 +75,8 @@ def mean_rank_ics(
     """
     return (
         period_rank_ics(frame, pairs, timestamp)
-        .select(pl.col(list(pairs)).mean())
+        .drop(timestamp)
+        .mean()
         .row(0, named=True)
     )
 
@@ -133,7 +138,12 @@ def rank_weight(prediction: str, timestamp: str) -> pl.Expr:
 
 
 def sharpe(pnl: pl.Expr, periods_per_year: float) -> pl.Expr:
-    """Annualised Sharpe ratio of per-period P&L; 0 if it does not vary."""
+    """Annualised Sharpe ratio of per-period P&L; 0 if it does not vary.
+
+    NOTE: Biased towards 0 by how nulls are handled upstream: null
+    predictions get weight 0 (`rank_weight`), so periods or assets an alpha
+    does not cover add flat P&L, and P&L that never varies scores 0.
+    """
     ratio = pnl.mean() / pnl.std() * math.sqrt(periods_per_year)
     return ratio.fill_nan(0.0).fill_null(0.0)
 

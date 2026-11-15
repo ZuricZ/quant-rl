@@ -31,9 +31,8 @@ from quant_research.servers.research import (
     ResearchToolset,
     describe_panel,
 )
-from quantenv import baselines, reward, scoring
+from quantenv import baselines, checks, reward, scoring, walkforward
 from quantenv.sources import synthetic
-from quantenv import walkforward
 from quantenv.walkforward import WalkForward
 
 MAX_TURNS = 30
@@ -44,14 +43,6 @@ _MASK = "**********"
 IMAGE = "quant-research:0.1.0"
 SCORING_TIMEOUT = 900.0
 _SCORE = "score"
-# Run by Task.setup in the runtime: fails unless this process can start
-# children as the user named in argv[1] (it must exist, and we must be root).
-_PREFLIGHT = """
-import os, pwd, sys
-pwd.getpwnam(sys.argv[1])
-if os.geteuid() != 0:
-    sys.exit("not root, so cannot run code as another user")
-"""
 
 PROMPT = """\
 Research a trading alpha on a simulated panel of asset returns. You are \
@@ -164,6 +155,7 @@ async def grade(
     seed: int,
     code: str,
     claimed_sharpe: float | None,
+    check_config: checks.CheckConfig = checks.CheckConfig(),
 ) -> dict[str, Any]:
     """Scores a submission on the hidden periods inside `runtime`.
 
@@ -176,6 +168,7 @@ async def grade(
         seed: Dataset seed.
         code: Alpha code.
         claimed_sharpe: The claimed net Sharpe on unseen data.
+        check_config: Settings of the lookahead checks.
 
     Returns:
         The fields of `quantenv.scoring.Score`.
@@ -189,6 +182,7 @@ async def grade(
         "seed": seed,
         "code": code,
         "claimed_sharpe": claimed_sharpe,
+        "checks": dataclasses.asdict(check_config),
         "user": tools.sandbox_user,
     }
     await runtime.write(f"{stem}.json", json.dumps(request).encode())
@@ -211,12 +205,14 @@ class QuantResearchTaskConfig(vf.TaskConfig):
         image: Task image, built from the repository's Dockerfile, which
             installs this package; for a remote runtime, a registry
             reference to it.
+        check_config: Settings of the lookahead checks run when grading.
     """
 
     tools: ResearchConfig = ResearchConfig()
     max_turns: int = Field(MAX_TURNS, gt=0)
     secret: SecretStr | None = None
     image: str = IMAGE
+    check_config: checks.CheckConfig = checks.CheckConfig()
 
 
 class QuantResearchConfig(vf.TasksetConfig):
@@ -276,7 +272,9 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
         """
         user = self.config.tools.sandbox_user
         if user is not None:
-            check = await runtime.run(["python", "-c", _PREFLIGHT, user], {})
+            check = await runtime.run(
+                ["python", "-m", "quant_research.preflight", user], {}
+            )
             if check.exit_code != 0:
                 raise RuntimeError(
                     f"sandbox user {user!r} cannot be used: "
@@ -323,6 +321,7 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
                     self.seed,
                     state.code,
                     state.claimed_sharpe,
+                    self.config.check_config,
                 )
             else:
                 score = dataclasses.asdict(scoring.invalid_score("no submission"))
@@ -376,6 +375,7 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
             self.seed,
             baselines.weighted_code(weights),
             0.0,
+            self.config.check_config,
         )
         return reward.reward(score) > 0
 

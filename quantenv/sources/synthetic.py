@@ -33,8 +33,7 @@ import polars as pl
 
 from quantenv.panel import EvalData, Panel, Schema
 
-_START = dt.datetime(2000, 1, 3)
-_RETURN_VOL = 0.02
+# Scratch columns of the generator, dropped before the panel is returned.
 _IDIO = "_idio"
 _LEAK_NOISE = "_leak_noise"
 _VOL_SHOCK = "_vol_shock"
@@ -84,6 +83,9 @@ class Config:
         regime_off_strength: Signal strength in the "off" regime, relative to
             "on"; 1 for no regimes.
         cost: Trading cost per unit of turnover, in return units.
+        return_vol: Typical per-period return volatility, before the market
+            volatility and per-asset multipliers.
+        start: First timestamp; its date for daily bars.
     """
 
     n_assets: int = 200
@@ -109,6 +111,8 @@ class Config:
     regime_switch_prob: float = 0.004
     regime_off_strength: float = 0.25
     cost: float = 0.0002
+    return_vol: float = 0.02
+    start: dt.datetime = dt.datetime(2000, 1, 3)
 
     @property
     def feature_names(self) -> list[str]:
@@ -345,7 +349,7 @@ def generate(
     where s_t is the regime strength and the signal is the weighted real
     features plus the centred interaction. The target is then
 
-        fwd_return = 2% * vol_t * (sqrt(1 - q) * sigma_i * z
+        fwd_return = return_vol * vol_t * (sqrt(1 - q) * sigma_i * z
                                    + sqrt(q / K) * beta_i . F_t),
 
     with market volatility vol_t, per-asset volatility sigma_i, return factor
@@ -529,7 +533,7 @@ def _target(config: Config, world: _World) -> pl.Expr:
         * pl.col(f"_F{j}")
         for j in range(k)
     ]
-    return _RETURN_VOL * pl.col(_VOL) * pl.sum_horizontal(idio, *common)
+    return config.return_vol * pl.col(_VOL) * pl.sum_horizontal(idio, *common)
 
 
 def _leak(config: Config, world: _World, ts: str) -> list[pl.Expr]:
@@ -550,9 +554,9 @@ def _keys(config: Config, offset: int, n_periods: int) -> pl.DataFrame:
     schema = config.schema
     period = pl.int_range(offset, offset + n_periods)
     if config.bar is None:
-        stamp = pl.lit(_START.date()).dt.add_business_days(period)
+        stamp = pl.lit(config.start.date()).dt.add_business_days(period)
     else:
-        stamp = pl.lit(_START) + period * pl.lit(config.bar)
+        stamp = pl.lit(config.start) + period * pl.lit(config.bar)
     asset_names = [f"A{i:03d}" for i in range(config.n_assets)]
     assets = pl.DataFrame(
         {schema.asset: pl.Series(asset_names, dtype=pl.Enum(asset_names))}

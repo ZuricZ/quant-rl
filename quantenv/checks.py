@@ -12,12 +12,13 @@ Truncation compares per-period ranks, not raw values, so floating-point noise
 that cannot change the score is ignored. Column dependence compares rank IC,
 because predictions may change without the column being used: a data-driven
 screen that drops the suspect column as implausibly strong may admit it once
-it is permuted into noise. Their random choices (cut
-dates, permutation) come from a seed that agent code must not know: an
-alpha that knew the cut dates could be honest on exactly those dates.
+it is permuted into noise. Their random choices (cut dates, permutation)
+come from a seed that agent code must not know: an alpha that knew the cut
+dates could be honest on exactly those dates. Their thresholds are a
+`CheckConfig`.
 """
 
-import hashlib
+import dataclasses
 from typing import Any
 
 import polars as pl
@@ -26,27 +27,28 @@ from quantenv import metrics, walkforward
 from quantenv.panel import Panel
 from quantenv.walkforward import PREDICTION, Run, Runner, WalkForward
 
-N_CUTS = 8
-# Column dependence flags a drop in mean rank IC that is both significant and
-# material. See the spec, Decision 8, for the measurements behind these.
-DEPENDENCE_Z = 4.0
-DEPENDENCE_MIN_DROP = 0.05  # Share of the base run's |IC|.
+# Scratch columns, dropped before results are returned.
 _KEY = "_shuffle_key"
 _STRATUM = "_stratum"
 
 
-def subseed(seed: int, purpose: str) -> int:
-    """An independent 64-bit seed for one use of `seed`.
+@dataclasses.dataclass(frozen=True)
+class CheckConfig:
+    """Settings of the lookahead checks. See the spec, Decisions 7 and 8,
+    for the measurements behind the defaults.
 
-    Args:
-        seed: The checks' seed.
-        purpose: What the result seeds.
-
-    Returns:
-        A seed in [0, 2**64).
+    Attributes:
+        n_cuts: Truncation cuts; each costs one pipeline run.
+        dependence_z: Column dependence flags a drop in mean rank IC larger
+            than this many standard errors of the paired per-period
+            difference...
+        dependence_min_drop: ...and larger than this share of the base
+            run's |IC|.
     """
-    digest = hashlib.sha256(f"{seed}\0{purpose}".encode()).digest()
-    return int.from_bytes(digest[:8], "big")
+
+    n_cuts: int = 8
+    dependence_z: float = 4.0
+    dependence_min_drop: float = 0.05
 
 
 def cut_points(timestamps: pl.Series, n: int, seed: int) -> list[Any]:
@@ -105,7 +107,7 @@ def truncation(
     base: Run | None = None,
     *,
     seed: int,
-    n_cuts: int = N_CUTS,
+    config: CheckConfig = CheckConfig(),
 ) -> bool:
     """Reruns on the panel cut after a few secret timestamps and compares.
 
@@ -122,7 +124,7 @@ def truncation(
         start: First predicted timestamp, as for `walkforward.run`.
         base: The full run, if already computed.
         seed: Secret seed for the cut dates (see `cut_points`).
-        n_cuts: Number of cuts; each costs one pipeline run.
+        config: Check settings; uses `n_cuts`.
 
     Returns:
         True if any prediction at or before a cut changed: lookahead.
@@ -134,7 +136,7 @@ def truncation(
     if base is None:
         base = walkforward.run(runner, panel, wf, start)
     predicted = panel.timestamps.filter(panel.timestamps >= base.start)
-    cuts = cut_points(predicted, min(n_cuts, len(predicted)), subseed(seed, "cuts"))
+    cuts = cut_points(predicted, min(config.n_cuts, len(predicted)), seed)
     for cut in cuts:
         short = panel.until(cut)
         until_cut = base.engineered.lazy().filter(pl.col(s.timestamp) <= cut)
@@ -192,14 +194,15 @@ def column_dependence(
     base: Run | None = None,
     *,
     seed: int,
+    config: CheckConfig = CheckConfig(),
 ) -> bool:
     """Reruns with `columns` permuted within each timestamp and compares IC.
 
     Permuting also changes what `fit` trains on, so a model that learned to
     use a column is caught as well. Flags when the permuted run's mean rank
-    IC is lower by more than `DEPENDENCE_Z` standard errors of the paired
-    per-period difference and by more than `DEPENDENCE_MIN_DROP` of the base
-    run's |IC|.
+    IC is lower by more than `config.dependence_z` standard errors of the
+    paired per-period difference and by more than
+    `config.dependence_min_drop` of the base run's |IC|.
 
     Args:
         runner: Runs the alpha.
@@ -210,6 +213,7 @@ def column_dependence(
         start: First predicted timestamp, as for `walkforward.run`.
         base: The unpermuted run, if already computed.
         seed: Secret seed for the permutation.
+        config: Check settings; uses the dependence thresholds.
 
     Returns:
         True if performance depends on any of `columns`. False if `columns`
@@ -223,9 +227,7 @@ def column_dependence(
     if base is None:
         base = walkforward.run(runner, panel, wf, start)
     shuffled = panel.with_frame(
-        shuffle_within_periods(
-            panel.frame, columns, panel.schema.timestamp, subseed(seed, "shuffle")
-        )
+        shuffle_within_periods(panel.frame, columns, panel.schema.timestamp, seed)
     )
     out = walkforward.run(runner, shuffled, wf, base.start).predictions
     s = panel.schema
@@ -247,9 +249,8 @@ def column_dependence(
         (diff.std() / pl.len().sqrt()).alias("se"),
         pl.col("base").mean().alias("base_ic"),
     ).row(0)
-    return drop > DEPENDENCE_Z * (se or 0.0) and drop > DEPENDENCE_MIN_DROP * abs(
-        base_ic
-    )
+    material = drop > config.dependence_min_drop * abs(base_ic)
+    return drop > config.dependence_z * (se or 0.0) and material
 
 
 def shifted_ics(panel: Panel, run: Run) -> dict[int, float]:
