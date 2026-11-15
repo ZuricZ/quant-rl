@@ -5,7 +5,7 @@ finished:
 
     python -m quant_research.grade REQUEST RESULT
 
-REQUEST is a JSON file with `seed`, `code`, `claimed_ic` and `user`, the
+REQUEST is a JSON file with `seed`, `code`, `claimed_sharpe` and `user`, the
 sandbox user. It holds the dataset seed, so it is deleted as soon as it is
 read, before any agent code runs. The score is written as JSON to RESULT.
 The hidden periods are built only inside the scoring worker that
@@ -34,7 +34,7 @@ def main(argv: list[str]) -> None:
     request_file.unlink()
     score = scoring.score_submission(
         request["code"],
-        request["claimed_ic"],
+        request["claimed_sharpe"],
         functools.partial(synthetic.hidden_data, request["seed"]),
         user=request["user"],
     )

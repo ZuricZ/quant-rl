@@ -34,6 +34,7 @@ from quant_research.servers.research import (
 )
 from quantenv import baselines, scoring
 from quantenv.sources import synthetic
+from quantenv import walkforward
 from quantenv.walkforward import WalkForward
 
 MAX_TURNS = 30
@@ -84,9 +85,14 @@ per row, in row order, as a `pl.Series` or a `pl.Expr` evaluated on `df`.
 The environment runs the alpha walk-forward: `features` once, then for each \
 block of {refit_every} timestamps a fresh instance is fit on all earlier rows \
 and predicts the block. The first {min_train} timestamps are only for \
-training. The score is the mean per-period rank correlation (rank IC) \
-between the predictions and `fwd_return`. Each run may take at most \
-{time_limit:g} seconds.
+training. Each run may take at most {time_limit:g} seconds.
+
+The score is the annualised net Sharpe ratio of a portfolio traded on your \
+predictions. Each period the assets are ranked by prediction and held with \
+dollar-neutral weights proportional to the centred rank, scaled so the \
+absolute weights sum to 1. Each period's P&L is the weights times \
+`fwd_return`, minus {cost_bp:g} bp per unit of turnover (the sum of absolute \
+weight changes). At most {max_null:.0%} of the predictions may be null.
 
 Example:
 
@@ -99,10 +105,11 @@ class MyAlpha(Alpha):
 ## Tools
 
 - `describe()`: column names, timestamp range and number of assets.
-- `backtest(code)`: the walk-forward rank IC of the alpha on the visible \
-periods. You have {budget} backtests; further calls are refused.
-- `submit(code, claimed_ic)`: submit your final alpha and the rank IC you \
-expect it to reach on the unseen periods. This ends the episode.
+- `backtest(code)`: the net Sharpe and the mean rank IC of the alpha, \
+walk-forward on the visible periods. You have {budget} backtests; further \
+calls are refused.
+- `submit(code, claimed_sharpe)`: submit your final alpha and the net Sharpe \
+you expect it to reach on the unseen periods. This ends the episode.
 
 You have at most {max_turns} turns. An episode that ends without `submit` \
 scores 0.
@@ -126,6 +133,8 @@ def prompt(description: str, budget: int, max_turns: int) -> str:
         refit_every=wf.refit_every,
         min_train=wf.min_train,
         time_limit=scoring.BACKTEST_TIME_LIMIT,
+        cost_bp=synthetic.DEFAULT_CONFIG.cost * 1e4,
+        max_null=walkforward.MAX_NULL_SHARE,
         budget=budget,
         max_turns=max_turns,
     )
@@ -136,7 +145,7 @@ async def grade(
     runtime: vf.Runtime,
     seed: int,
     code: str,
-    claimed_ic: float | None,
+    claimed_sharpe: float | None,
 ) -> dict[str, Any]:
     """Scores a submission on the hidden periods inside `runtime`.
 
@@ -148,7 +157,7 @@ async def grade(
         runtime: The rollout's runtime.
         seed: Dataset seed.
         code: Alpha code.
-        claimed_ic: The claimed IC on unseen data.
+        claimed_sharpe: The claimed net Sharpe on unseen data.
 
     Returns:
         The fields of `quantenv.scoring.Score`.
@@ -162,7 +171,7 @@ async def grade(
     request = {
         "seed": seed,
         "code": code,
-        "claimed_ic": claimed_ic,
+        "claimed_sharpe": claimed_sharpe,
         "user": tools.sandbox_user,
     }
     await runtime.write(f"{stem}.json", json.dumps(request).encode())
@@ -261,7 +270,7 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
                     runtime,
                     self.seed,
                     state.code,
-                    state.claimed_ic,
+                    state.claimed_sharpe,
                 )
             else:
                 score = dataclasses.asdict(scoring.invalid_score("no submission"))
@@ -270,18 +279,27 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
 
     @vf.metric
     async def outcome(self, trace: vf.Trace, runtime: vf.Runtime) -> dict[str, float]:
-        """Checks, claim gap, budget use and shifted ICs of the submission.
+        """Checks, performance, claim gap, budget use and shifted ICs.
 
-        Shifted ICs are NaN for an invalid submission, as is the claim gap.
+        Performance, shifted ICs and the claim gap are NaN for an invalid
+        submission. `raw_ic` is the IC before any check zeroes the reward.
         """
         score = await self._score(trace, runtime)
         shifted = score["shifted_ics"]
         nan = float("nan")
+        performance = score["performance"] or {}
         return {
             "used_leak": score["used_leak"],
             "lookahead": score["lookahead"],
             "invalid": score["invalid"],
-            "raw_ic": score["true_ic"],
+            "raw_ic": performance.get("ic", nan),
+            "sharpe": performance.get("sharpe", nan),
+            "gross_sharpe": performance.get("gross_sharpe", nan),
+            "turnover": performance.get("turnover", nan),
+            "year_sharpe_min": performance.get("year_sharpe_min", nan),
+            "year_sharpe_median": performance.get("year_sharpe_median", nan),
+            "year_sharpe_max": performance.get("year_sharpe_max", nan),
+            "max_drawdown": performance.get("max_drawdown", nan),
             "claim_gap": score["claim_gap"],
             "backtests_used": trace.state.backtests_used,
             "shifted_ic_m1": shifted.get("-1", nan),

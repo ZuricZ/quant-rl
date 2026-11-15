@@ -44,6 +44,7 @@ class Config:
         no_leak_prob: Share of seeds whose leaky slot becomes another real
             feature.
         replacement_ic: Planted IC of that extra real feature.
+        cost: Trading cost per unit of turnover, in return units.
     """
 
     n_assets: int = 200
@@ -56,10 +57,18 @@ class Config:
     leaky_ic: float = 0.3
     no_leak_prob: float = 0.2
     replacement_ic: float = 0.06
+    cost: float = 0.0
 
     @property
     def feature_names(self) -> list[str]:
         return [f"f{i:02d}" for i in range(self.n_features)]
+
+    @property
+    def periods_per_year(self) -> float:
+        """252 trading days, or as many back-to-back intraday bars in them."""
+        if self.bar is None:
+            return 252.0
+        return 252.0 * (dt.timedelta(days=1) / self.bar)
 
     @property
     def schema(self) -> Schema:
@@ -285,7 +294,11 @@ def visible_data(seed: int, config: Config = DEFAULT_CONFIG) -> EvalData:
     Returns:
         The visible panel, scored after the walk-forward warm-up.
     """
-    return EvalData(generate(seed, config).panel)
+    return EvalData(
+        generate(seed, config).panel,
+        cost=config.cost,
+        periods_per_year=config.periods_per_year,
+    )
 
 
 def hidden_data(seed: int, config: Config = DEFAULT_CONFIG) -> EvalData:
@@ -305,4 +318,11 @@ def hidden_data(seed: int, config: Config = DEFAULT_CONFIG) -> EvalData:
     suspects = () if syn.truth.leaky is None else (syn.truth.leaky,)
     # As secret as the dataset seed it is derived from.
     check_seed = _hash_int(8, "checks", seed)
-    return EvalData(syn.panel, syn.hidden_start, suspects, check_seed)
+    return EvalData(
+        syn.panel,
+        syn.hidden_start,
+        suspects,
+        check_seed,
+        cost=config.cost,
+        periods_per_year=config.periods_per_year,
+    )

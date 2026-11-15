@@ -86,10 +86,7 @@ class Panel:
         increasing, n_timestamps, n_assets = (
             self.frame.lazy()
             .select(
-                (
-                    (ts > ts.shift(1))
-                    | ((ts == ts.shift(1)) & (asset > asset.shift(1)))
-                )
+                ((ts > ts.shift(1)) | ((ts == ts.shift(1)) & (asset > asset.shift(1))))
                 .slice(1)
                 .all()
                 .alias("increasing"),
@@ -146,9 +143,13 @@ class EvalData:
             truncation check cuts and how the column dependence check
             permutes. Agent code must not be able to learn it, or it can
             special-case those choices. None draws a fresh one per score.
+        cost: Trading cost per unit of turnover, in return units.
+        periods_per_year: Periods in a year, for annualising Sharpe ratios.
     """
 
     panel: Panel
     start: Any = None
     suspects: tuple[str, ...] = ()
     check_seed: int | None = None
+    cost: float = 0.0
+    periods_per_year: float = 252.0

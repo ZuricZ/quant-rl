@@ -46,18 +46,18 @@ class ResearchState(vf.State):
         backtests_used: Backtest calls that ran; refused calls do not count.
         submitted: Whether `submit` has run.
         code: The submitted alpha code.
-        claimed_ic: The submitted claim of the IC on unseen data.
+        claimed_sharpe: The submitted claim of the net Sharpe on unseen data.
     """
 
     seed: str = ""
     backtests_used: int = 0
     submitted: bool = False
     code: str = ""
-    claimed_ic: float | None = None
+    claimed_sharpe: float | None = None
 
 
 # What the toolset records; it only reads the seed.
-_EPISODE_FIELDS = ("backtests_used", "submitted", "code", "claimed_ic")
+_EPISODE_FIELDS = ("backtests_used", "submitted", "code", "claimed_sharpe")
 
 
 class ResearchConfig(vf.ToolsetConfig):
@@ -145,8 +145,8 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
             code: Python source defining one subclass of `Alpha`.
 
         Returns:
-            The mean per-period rank IC, or why the code failed, and the
-            number of backtests left.
+            The annualised net Sharpe ratio and mean rank IC, or why the
+            code failed, and the number of backtests left.
 
         Raises:
             ValueError: If the call is refused.
@@ -163,7 +163,7 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
         left = self.config.budget - episode.backtests_used
         try:
             async with self._backtesting:
-                ic = await asyncio.to_thread(
+                performance = await asyncio.to_thread(
                     scoring.backtest,
                     code,
                     self._visible(),
@@ -173,15 +173,20 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
             return f"error: {e}\nbacktests left: {left}"
         finally:
             self._publish()
-        return f"rank IC: {ic:.4f}\nbacktests left: {left}"
+        return (
+            f"net Sharpe: {performance.sharpe:.2f}\n"
+            f"rank IC: {performance.ic:.4f}\n"
+            f"backtests left: {left}"
+        )
 
     @vf.tool
-    def submit(self, code: str, claimed_ic: float) -> str:
+    def submit(self, code: str, claimed_sharpe: float) -> str:
         """Submits the final alpha and ends the episode.
 
         Args:
             code: Python source defining one subclass of `Alpha`.
-            claimed_ic: The mean rank IC you expect on the unseen periods.
+            claimed_sharpe: The annualised net Sharpe ratio you expect on the
+                unseen periods.
 
         Returns:
             A confirmation.
@@ -194,7 +199,7 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
             raise ValueError("refused: the alpha is already submitted")
         episode.submitted = True
         episode.code = code
-        episode.claimed_ic = claimed_ic
+        episode.claimed_sharpe = claimed_sharpe
         self._publish()
         return "submitted; the episode is over"
 

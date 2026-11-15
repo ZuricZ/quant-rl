@@ -1,10 +1,10 @@
 """Scores the scripted baselines on a split's tasks and prints the results table.
 
-Baselines:
-- naive: the single feature with the best visible-period IC, claiming that IC.
+Baselines, each claiming the net Sharpe of one visible-period backtest, as an
+agent would:
+- naive: the single feature with the best visible-period IC.
 - oracle: the real features at their true weights.
-- leaky: the leaky feature alone, claiming its visible-period backtest IC.
-  Only datasets that have a leaky feature are scored.
+- leaky: the leaky feature alone. Only datasets that have one are scored.
 
 Task i uses dataset `synthetic.dataset_seed(i, secret, split)`, as in the
 taskset; pass the taskset's secret and split to score the same datasets as a
@@ -21,6 +21,7 @@ Usage:
 
 import argparse
 import concurrent.futures
+import dataclasses
 import functools
 
 import polars as pl
@@ -29,27 +30,27 @@ from quantenv import baselines, scoring
 from quantenv.sources import synthetic
 
 
-def submissions(seed: int) -> dict[str, tuple[str, float, int]]:
+def submissions(seed: int) -> dict[str, tuple[str, float]]:
     """The baselines' submissions for one seed.
 
     Args:
         seed: Dataset seed.
 
     Returns:
-        Baseline name to alpha code, claimed IC and backtests used.
+        Baseline name to alpha code and claimed net Sharpe.
     """
     syn = synthetic.generate(seed)
-    naive_code, naive_claim = baselines.naive(syn.panel)
-    oracle_code, oracle_claim = baselines.oracle(syn.truth.weights, syn.panel)
-    out = {
-        "naive": (naive_code, naive_claim, 0),
-        "oracle": (oracle_code, oracle_claim, 0),
+    codes = {
+        "naive": baselines.naive(syn.panel)[0],
+        "oracle": baselines.weighted_code(syn.truth.weights),
     }
     if syn.truth.leaky is not None:
-        code = baselines.column_code(syn.truth.leaky)
-        visible = functools.partial(synthetic.visible_data, seed)
-        out["leaky"] = (code, scoring.backtest(code, visible), 1)
-    return out
+        codes["leaky"] = baselines.column_code(syn.truth.leaky)
+    visible = functools.partial(synthetic.visible_data, seed)
+    return {
+        name: (code, scoring.backtest(code, visible).sharpe)
+        for name, code in codes.items()
+    }
 
 
 def score_task(index: int, secret: str, split: str) -> list[dict]:
@@ -66,18 +67,19 @@ def score_task(index: int, secret: str, split: str) -> list[dict]:
     seed = synthetic.dataset_seed(index, secret, split)
     hidden = functools.partial(synthetic.hidden_data, seed)
     rows = []
-    for name, (code, claim, used) in submissions(seed).items():
+    for name, (code, claim) in submissions(seed).items():
         score = scoring.score_submission(code, claim, hidden)
         rows.append(
             {
                 "baseline": name,
                 "task": index,
                 "reward": score.reward,
+                **dataclasses.asdict(score.performance),
                 "claim_gap": score.claim_gap,
                 "used_leak": score.used_leak,
                 "lookahead": score.lookahead,
                 "invalid": score.invalid,
-                "backtests_used": used,
+                "backtests_used": 1,
             }
         )
     return rows
@@ -99,7 +101,11 @@ def table(rows: pl.DataFrame) -> pl.DataFrame:
             pl.len().alias("Tasks"),
             pl.col("used_leak").mean().alias("Leak rate"),
             pl.col("lookahead").mean().alias("Lookahead rate"),
-            pl.col("reward").mean().alias("True IC"),
+            pl.col("reward").mean().alias("Reward"),
+            pl.col("sharpe").mean().alias("Net Sharpe"),
+            pl.col("gross_sharpe").mean().alias("Gross Sharpe"),
+            pl.col("turnover").mean().alias("Turnover"),
+            pl.col("ic").mean().alias("IC"),
             pl.col("claim_gap").mean().alias("Claim gap"),
             pl.col("backtests_used").mean().alias("Backtests used"),
         )
@@ -132,6 +138,8 @@ def main() -> None:
         tbl_formatting="MARKDOWN",
         tbl_hide_column_data_types=True,
         tbl_hide_dataframe_shape=True,
+        tbl_cols=-1,
+        tbl_width_chars=250,
         float_precision=4,
     ):
         print(table(rows))

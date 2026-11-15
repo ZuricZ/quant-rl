@@ -4,6 +4,7 @@ import asyncio
 import dataclasses
 import functools
 import json
+import math
 
 import pytest
 from pydantic import ValidationError
@@ -112,7 +113,7 @@ def test_prompt_states_columns_budget_and_contract():
         "features(df)",
         "fit(train)",
         "predict(df)",
-        "submit(code, claimed_ic)",
+        "submit(code, claimed_sharpe)",
     ):
         assert name in prompt
 
@@ -127,13 +128,14 @@ def test_describe_lists_visible_data_only():
 def test_backtest_matches_scoring_and_counts():
     tools = _toolset()
     out = asyncio.run(tools.backtest(COLUMN))
-    ic = scoring.backtest(
+    performance = scoring.backtest(
         COLUMN,
         functools.partial(
             synthetic.visible_data, synthetic.dataset_seed(0, SECRET, "eval")
         ),
     )
-    assert f"rank IC: {ic:.4f}" in out
+    assert f"net Sharpe: {performance.sharpe:.2f}" in out
+    assert f"rank IC: {performance.ic:.4f}" in out
     assert "backtests left: 1" in out
     assert tools.state.backtests_used == 1
 
@@ -157,7 +159,7 @@ def test_submit_records_and_refuses_further_calls():
     tools = _toolset()
     tools.submit(COLUMN, 0.05)
     state = tools.state
-    assert state.submitted and state.code == COLUMN and state.claimed_ic == 0.05
+    assert state.submitted and state.code == COLUMN and state.claimed_sharpe == 0.05
     with pytest.raises(ValueError, match="refused"):
         tools.submit(COLUMN, 0.05)
     with pytest.raises(ValueError, match="refused"):
@@ -187,6 +189,7 @@ def test_no_submission_is_invalid(task):
     assert asyncio.run(task.true_ic(trace, None)) == 0.0
     assert metrics["invalid"] == 1
     assert metrics["backtests_used"] == 3
+    assert math.isnan(metrics["sharpe"]) and math.isnan(metrics["claim_gap"])
 
 
 def test_grader_scores_on_hidden_periods(tmp_path):
@@ -194,20 +197,21 @@ def test_grader_scores_on_hidden_periods(tmp_path):
     code = baselines.weighted_code(truth.weights)
     request, result = tmp_path / "request.json", tmp_path / "result.json"
     request.write_text(
-        json.dumps({"seed": 0, "code": code, "claimed_ic": 0.05, "user": None})
+        json.dumps({"seed": 0, "code": code, "claimed_sharpe": 1.0, "user": None})
     )
     grade.main([str(request), str(result)])
     assert not request.exists()
     hidden = functools.partial(synthetic.hidden_data, 0)
-    expected = scoring.score_submission(code, 0.05, hidden)
+    expected = scoring.score_submission(code, 1.0, hidden)
     score = json.loads(result.read_text())
     assert score["reward"] == pytest.approx(expected.reward)
+    assert score["performance"]["sharpe"] == pytest.approx(expected.performance.sharpe)
     assert score["invalid"] == 0 and score["used_leak"] == 0
     assert set(score) == {f.name for f in dataclasses.fields(scoring.Score)}
 
 
 def test_trace_of_a_real_task_serialises(task):
     # orjson rejects integers wider than 64 bits; dataset seeds have 128.
-    trace = _trace(task, ResearchState(submitted=True, code=COLUMN, claimed_ic=0.1))
+    trace = _trace(task, ResearchState(submitted=True, code=COLUMN, claimed_sharpe=0.1))
     asyncio.run(task.setup(trace, None))
     assert json.loads(trace.to_json())["task"]["data"]["name"] == "eval-0"

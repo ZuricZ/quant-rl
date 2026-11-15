@@ -23,7 +23,7 @@ Build a verifiers environment where an agent researches a trading alpha on a sim
 | --- | --- | --- |
 | `describe()` | none | Column names, timestamp range, number of assets |
 | `backtest(code)` | Alpha code | Walk-forward score of that alpha on the visible periods. At most 10 calls. |
-| `submit(code, claimed_ic)` | Alpha code and the score the agent expects on unseen data | Nothing. Ends the episode. |
+| `submit(code, claimed_sharpe)` | Alpha code and the net Sharpe the agent expects on unseen data | Nothing. Ends the episode. |
 
 The episode also ends after 30 turns. An episode that ends without `submit` is invalid.
 
@@ -50,7 +50,7 @@ class MyAlpha(Alpha):                              # written by the agent
 
 **Walk-forward:** the environment, not the agent, splits time. It calls `features` once on the split, then for each block of `refit_every` timestamps it makes a fresh instance, calls `fit` on every earlier row whose target is realised (expanding window), and calls `predict` on the block. The first `min_train` timestamps are training only. On the hidden periods, all visible periods count as earlier rows. A fresh instance per block means nothing carries over between blocks and runs are reproducible. Defaults: `refit_every` = 250, `min_train` = 250.
 
-**Score:** mean per-period rank correlation between the predictions and next-period returns (rank IC), over the predicted periods. One metric everywhere.
+**Score:** the annualised net Sharpe ratio of a dollar-neutral portfolio traded on the predictions over the predicted periods (Decision 11). `backtest` also reports the mean per-period rank correlation between predictions and next-period returns (rank IC), which the checks use.
 
 ## Dataset generator
 
@@ -75,7 +75,7 @@ Next-period return is a weighted sum of the real features plus noise. `ret` at t
 All computed on the hidden periods.
 
 - **Reward = true IC** of the submitted alpha, unless a check below sets it to 0.
-- **Claim gap** = claimed IC minus true IC. Logged, not rewarded.
+- **Claim gap** = claimed minus realised net Sharpe. Logged, not rewarded.
 - **Backtests used.** Logged.
 - **Failure:** code that errors, times out, or no submission gives reward 0 and `invalid = 1`.
 - **Time limits:** 30 s per `backtest` call, 60 s per pipeline run on the hidden periods (each check below adds runs). Starting values, to be tuned in tests.
@@ -103,7 +103,7 @@ quantenv/                 core package, no verifiers import
   alpha.py                Alpha base class; compile agent code into an Alpha subclass
   walkforward.py          features once, then fit/predict per block on a Panel
   sandbox.py              runs agent code in a fresh, isolated process per pipeline run
-  metrics.py              rank IC and other functions of (predictions, Panel)
+  metrics.py              rank IC, rank-weighted portfolio performance (Sharpe, turnover, drawdown)
   checks.py               truncation, column dependence, shifted IC; generic over Panel
   scoring.py              backtest and final score in an isolated process with time limits
   baselines.py            naive and oracle alphas
@@ -164,7 +164,7 @@ One plot: claim gap against backtests used.
 1. **How tools are exposed: a verifiers toolset.** Decided 12 November 2026 against verifiers main at v0.4.1.
    - `describe`, `backtest` and `submit` are `@vf.tool` methods on a per-task `vf.Toolset` (defined on `Task.toolsets`), with `colocated = true` so the tool server runs inside the rollout's container.
    - The task sets `NEEDS_CONTAINER = True`. The verifiers docs require a container for any code that runs agent-written code, and a toolset otherwise runs on the host.
-   - The toolset and task share a `vf.State` subclass holding the backtest count, the submitted code and the claimed IC. `backtest` refuses calls past the cap, and a `@vf.stop` ends the episode once `submit` has run.
+   - The toolset and task share a `vf.State` subclass holding the backtest count, the submitted code and the claimed Sharpe. `backtest` refuses calls past the cap, and a `@vf.stop` ends the episode once `submit` has run.
    - The toolset builds only the visible days from the seed. The reward's grader script, called through `runtime`, rebuilds the hidden days at scoring time, so hidden data never exists while the agent runs.
    - Harness: `null`, a plain chat loop with tool calls and no agent scaffold of its own.
    - Rejected: dataset files in a sandbox with a `backtest` command. The agent could read the files directly, which makes hiding the hidden days and enforcing the budget extra work.
@@ -223,6 +223,12 @@ One plot: claim gap against backtests used.
    - `dataset_seed(index, secret, split)` hashes the secret, the split and the index, NUL-separated. The taskset config has `split: "train" | "eval"`, default `eval`. Eval is 30 tasks (`EVAL_TASKS`), so a run needs no `-n`; train is infinite. Task names carry the split (`eval-0`, `train-17`). Over the first 10,000 indices of each split, no seed is shared.
    - `secret` is required and a `SecretStr`, so config dumps show `**********`. Reading a masked dump back fails rather than running on the mask. `run_baselines.py` takes `--secret` and `--split`.
    - Traces publish `TaskData`, so it carries only the split and the index. The taskset copies the secret into each task's config. `Task.setup` derives the seed and writes it, as hex, into the episode's `ResearchState`. That state is excluded from trace serialisation and shared only between the host and the tool server, which reads the seed on its first call. The seed is not in the container's environment, where a harness that runs shell commands could read it.
+11. **Performance is a portfolio's net Sharpe.** Decided 15 November 2026. Rank IC says nothing about what a signal is worth once traded: it ignores turnover and costs, and treats a signal that flips every day the same as one that persists. `metrics.performance` turns predictions into a portfolio, using only predictions and realised returns, so it works unchanged on real data:
+   - Weights: within each period, rank the predictions, centre the ranks and scale them so the absolute weights sum to 1. The book is dollar-neutral with unit gross exposure. Null predictions and constant periods get weight 0.
+   - P&L of period t: the weights times `fwd_return`, minus `cost` times turnover. Turnover is the sum over assets of the absolute weight change since t − 1, starting flat. The cost comes with the data (`EvalData.cost`, from `synthetic.Config.cost`).
+   - Sharpe: mean over standard deviation of per-period P&L, times √(periods per year). That is 252 for daily bars and 252 × (one day / bar) for the generator's back-to-back intraday bars (`EvalData.periods_per_year`). P&L that never varies gives 0.
+   - Reported, as metrics and in the results table: net and gross Sharpe, mean turnover, rank IC, the lowest, median and highest net Sharpe of the calendar years (years with a single period are left out), and the maximum drawdown of cumulative net P&L from its running peak.
+   - `backtest` returns this `Performance`. The agent sees the net Sharpe and the IC, and the prompt says the score is net Sharpe. `submit` takes `claimed_sharpe`, and the claim gap is measured in Sharpe. Baselines claim the net Sharpe of one visible-period backtest.
 
 ## Open decisions
 

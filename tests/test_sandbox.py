@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from quantenv import baselines, scoring, walkforward
+from quantenv import baselines, metrics, scoring, walkforward
 from quantenv.alpha import AlphaError, compile_alpha
 from quantenv.sandbox import Sandbox
 from quantenv.sources import synthetic
@@ -26,7 +26,7 @@ needs_root = pytest.mark.skipif(
 )
 
 
-def _backtest(body: str, user: str | None = None) -> float:
+def _backtest(body: str, user: str | None = None) -> metrics.Performance:
     code = f"class S(Alpha):\n    def predict(self, df):\n{body}"
     return scoring.backtest(code, VISIBLE, SMALL_WF, user=user)
 

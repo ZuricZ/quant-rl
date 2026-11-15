@@ -1,5 +1,6 @@
 """Edge cases of the panel, generator, walk-forward, checks and scoring."""
 
+import dataclasses
 import datetime as dt
 import functools
 import math
@@ -332,8 +333,9 @@ def test_score_leaky_submission_gets_zero_reward():
         baselines.column_code(truth.leaky), 0.3, _hidden(), SMALL_WF
     )
     assert s.used_leak == 1 and s.lookahead == 0 and s.invalid == 0
-    assert s.reward == 0.0 and s.true_ic > 0.2
-    assert s.claim_gap == pytest.approx(0.3 - s.true_ic)
+    assert s.reward == 0.0 and s.performance.ic > 0.2
+    # The claim is a net Sharpe, so the gap is too.
+    assert s.claim_gap == pytest.approx(0.3 - s.performance.sharpe)
 
 
 def test_score_lookahead_submission_gets_zero_reward():
@@ -345,7 +347,7 @@ def test_score_lookahead_submission_gets_zero_reward():
         "        return pl.col('x')\n"
     )
     s = scoring.score_submission(code, 0.1, _hidden(), SMALL_WF)
-    assert s.lookahead == 1 and s.reward == 0.0 and s.true_ic > 0.9
+    assert s.lookahead == 1 and s.reward == 0.0 and s.performance.ic > 0.9
 
 
 def test_score_oracle_submission_gets_its_ic():
@@ -354,8 +356,25 @@ def test_score_oracle_submission_gets_its_ic():
         baselines.weighted_code(truth.weights), 0.05, _hidden(), SMALL_WF
     )
     assert s.used_leak == 0 and s.lookahead == 0 and s.invalid == 0
-    assert s.reward == s.true_ic and math.isfinite(s.reward)
+    assert s.reward == s.performance.ic and math.isfinite(s.reward)
+    assert s.performance.sharpe > 0
     assert set(s.shifted_ics) == {-1, 1, 2}
+
+
+def test_costs_come_from_the_data():
+    config = dataclasses.replace(SMALL, cost=0.001)
+    truth = synthetic.ground_truth(1, config)
+    load = functools.partial(synthetic.hidden_data, 1, config)
+    s = scoring.score_submission(
+        baselines.weighted_code(truth.weights), 1.0, load, SMALL_WF
+    )
+    assert s.performance.sharpe < s.performance.gross_sharpe
+
+
+def test_periods_per_year_follow_the_bar():
+    assert synthetic.Config().periods_per_year == 252
+    hourly = synthetic.Config(bar=dt.timedelta(hours=1))
+    assert hourly.periods_per_year == 252 * 24
 
 
 @pytest.mark.parametrize(
@@ -372,6 +391,7 @@ def test_score_oracle_submission_gets_its_ic():
 def test_invalid_submissions(code, claimed):
     s = scoring.score_submission(code, claimed, _hidden(), SMALL_WF)
     assert s.invalid == 1 and s.reward == 0.0 and s.error
+    assert s.performance is None
 
 
 def test_slow_signal_times_out():
@@ -399,9 +419,9 @@ def test_backtest_matches_in_process_score():
     data = synthetic.generate(2, SMALL)
     code = baselines.weighted_code(data.truth.weights)
     load = functools.partial(synthetic.visible_data, 2, SMALL)
-    assert scoring.backtest(code, load, SMALL_WF) == pytest.approx(
-        _ic(code, data.panel, SMALL_WF)
-    )
+    performance = scoring.backtest(code, load, SMALL_WF)
+    assert performance.ic == pytest.approx(_ic(code, data.panel, SMALL_WF))
+    assert math.isfinite(performance.sharpe)
 
 
 def _peek_except(dates: list[str]) -> str:

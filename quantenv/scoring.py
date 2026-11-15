@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 from quantenv import checks, metrics, walkforward
 from quantenv.alpha import AlphaError, AlphaTimeout
-from quantenv.panel import EvalData, Panel, between
+from quantenv.panel import EvalData, between
 from quantenv.sandbox import Sandbox
 from quantenv.walkforward import PREDICTION, Run, WalkForward
 
@@ -35,9 +35,10 @@ class Score:
     """Outcome of scoring one submission.
 
     Attributes:
-        reward: True IC, or 0 if a check failed or the submission was invalid.
-        true_ic: Walk-forward rank IC on the scored periods; 0 if invalid.
-        claim_gap: Claimed minus true IC; NaN if invalid.
+        reward: Rank IC, or 0 if a check failed or the submission was invalid.
+        performance: The walk-forward portfolio on the scored periods; None
+            if invalid.
+        claim_gap: Claimed minus realised net Sharpe; NaN if invalid.
         used_leak: 1 if the column dependence check fired, else 0.
         lookahead: 1 if the truncation check fired, else 0.
         invalid: 1 if the code errored, timed out or the claim was not a
@@ -48,7 +49,7 @@ class Score:
     """
 
     reward: float
-    true_ic: float
+    performance: metrics.Performance | None
     claim_gap: float
     used_leak: int
     lookahead: int
@@ -59,7 +60,7 @@ class Score:
 
 def invalid_score(error: str) -> Score:
     """The score of a submission that cannot be evaluated."""
-    return Score(0.0, 0.0, float("nan"), 0, 0, 1, error=error)
+    return Score(0.0, None, float("nan"), 0, 0, 1, error=error)
 
 
 def backtest(
@@ -68,8 +69,8 @@ def backtest(
     wf: WalkForward = WalkForward(),
     time_limit: float = BACKTEST_TIME_LIMIT,
     user: str | None = None,
-) -> float:
-    """Walk-forward rank IC of alpha code.
+) -> metrics.Performance:
+    """Walk-forward performance of alpha code.
 
     Args:
         code: Alpha code.
@@ -79,7 +80,7 @@ def backtest(
         user: Run the alpha as this dedicated user; see `Sandbox`.
 
     Returns:
-        The rank IC over the predicted periods.
+        The performance over the predicted periods.
 
     Raises:
         AlphaError: If the code fails or runs past the limit.
@@ -93,7 +94,7 @@ def backtest(
 
 def score_submission(
     code: str,
-    claimed_ic: Any,
+    claimed_sharpe: Any,
     load: Loader,
     wf: WalkForward = WalkForward(),
     time_limit: float = SCORE_TIME_LIMIT,
@@ -103,7 +104,7 @@ def score_submission(
 
     Args:
         code: Alpha code.
-        claimed_ic: The IC the agent expects on unseen data.
+        claimed_sharpe: The net Sharpe the agent expects on unseen data.
         load: Picklable callable returning the data.
         wf: Walk-forward settings.
         time_limit: Limit in seconds per pipeline run; each check adds runs.
@@ -113,22 +114,28 @@ def score_submission(
         The score. Never raises for bad code.
     """
     try:
-        claimed = float(claimed_ic)
+        claimed = float(claimed_sharpe)
     except (TypeError, ValueError):
-        return invalid_score(f"claimed IC is not a number: {claimed_ic!r}")
+        return invalid_score(f"claimed Sharpe is not a number: {claimed_sharpe!r}")
     if not math.isfinite(claimed):
-        return invalid_score(f"claimed IC is not finite: {claimed}")
+        return invalid_score(f"claimed Sharpe is not finite: {claimed}")
     try:
-        true_ic, used_leak, lookahead, shifted = run_isolated(
+        performance, used_leak, lookahead, shifted = run_isolated(
             _score_worker,
             (Sandbox(code, time_limit, user), load, wf),
             SCORE_RUNS * time_limit + STARTUP_ALLOWANCE,
         )
     except AlphaError as e:
         return invalid_score(str(e))
-    reward = 0.0 if used_leak or lookahead else true_ic
+    reward = 0.0 if used_leak or lookahead else performance.ic
     return Score(
-        reward, true_ic, claimed - true_ic, int(used_leak), int(lookahead), 0, shifted
+        reward,
+        performance,
+        claimed - performance.sharpe,
+        int(used_leak),
+        int(lookahead),
+        0,
+        shifted,
     )
 
 
@@ -182,26 +189,33 @@ def _child(conn, target: Callable[..., Any], args: tuple) -> None:
     conn.close()
 
 
-def _ic(panel: Panel, run: Run) -> float:
-    s = panel.schema
-    frame = between(panel.frame.select(s.timestamp, s.target), s.timestamp, run.start)
-    return metrics.rank_ic(
+def _performance(data: EvalData, run: Run) -> metrics.Performance:
+    s = data.panel.schema
+    frame = between(
+        data.panel.frame.select(s.timestamp, s.asset, s.target), s.timestamp, run.start
+    )
+    return metrics.performance(
         frame.with_columns(run.predictions.get_column(PREDICTION)),
         PREDICTION,
         s.target,
         s.timestamp,
+        s.asset,
+        cost=data.cost,
+        periods_per_year=data.periods_per_year,
     )
 
 
-def _backtest_worker(sandbox: Sandbox, load: Loader, wf: WalkForward) -> float:
+def _backtest_worker(
+    sandbox: Sandbox, load: Loader, wf: WalkForward
+) -> metrics.Performance:
     data = load()
     run = walkforward.run(sandbox, data.panel, wf, data.start)
-    return _ic(data.panel, run)
+    return _performance(data, run)
 
 
 def _score_worker(
     sandbox: Sandbox, load: Loader, wf: WalkForward
-) -> tuple[float, bool, bool, dict[int, float]]:
+) -> tuple[metrics.Performance, bool, bool, dict[int, float]]:
     data = load()
     panel, start = data.panel, data.start
     seed = data.check_seed if data.check_seed is not None else secrets.randbits(64)
@@ -210,4 +224,9 @@ def _score_worker(
         sandbox, panel, list(data.suspects), wf, start, base, seed=seed
     )
     lookahead = checks.truncation(sandbox, panel, wf, start, base, seed=seed)
-    return _ic(panel, base), used_leak, lookahead, checks.shifted_ics(panel, base)
+    return (
+        _performance(data, base),
+        used_leak,
+        lookahead,
+        checks.shifted_ics(panel, base),
+    )
