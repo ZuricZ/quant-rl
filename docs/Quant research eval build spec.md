@@ -115,7 +115,7 @@ scripts/run_baselines.py  naive, oracle and leaky baselines on the eval tasks
 tests/
 ```
 
-The taskset is infinite, one dataset per task. Tasks 0 to 29 are the eval split. Task i uses the seed `dataset_seed(i, secret)` (Decision 6).
+One dataset per task. The taskset config chooses a split: `eval` is 30 tasks, `train` is infinite. Task i of a split uses the seed `dataset_seed(i, secret, split)`, and the two splits never share a dataset (Decision 10).
 
 ## Tests to write first
 
@@ -178,7 +178,7 @@ One plot: claim gap against backtests used.
 4. **Checks are generic.** Decided 14 November 2026. They take a panel and column names, never the generator's ground truth, so they carry over to real data.
 5. **Decision 1 against the installed verifiers 0.4.1 API.** Decided 14 November 2026, while building the taskset. Decision 1 holds, with these adjustments:
    - **Packaging.** verifiers starts a toolset with `python -m <module>`, and inside a container it first installs the module's distribution. `quantenv` is not on PyPI, so `environments/quant_research` is shipped in the root distribution as the package `quant_research`, next to `quantenv`. The taskset id is `quant-research`.
-   - **Shared types.** A toolset receives the task's `TaskData`, not the `Task`, in `setup_task`. `ResearchData` (the seed) and `ResearchState` therefore live in `servers/research.py`, and the taskset imports them. The seed is stored as a hex string and converted where it is used (`ResearchData.dataset_seed`). Traces serialise with orjson, which rejects the 128-bit integers of Decision 6.
+   - **Shared types.** A toolset receives the task's `TaskData`, not the `Task`, in `setup_task`. `ResearchData` and `ResearchState` therefore live in `servers/research.py`, and the taskset imports them. The seed itself is not task data (Decision 10).
    - **Grader.** The reward writes the submission into the runtime and runs `python -m quant_research.grade` there. That module calls `quantenv.scoring.score_submission` with the hidden-data loader, so the hidden periods are built only inside its scoring worker, after the agent has finished. It runs in the Python environment that verifiers installed the toolset into, which it locates through verifiers' private `mcp.launch._install_in_sandbox`. Once the toolset has run, that call is a no-op. No public API exposes this environment.
    - **Turn limit.** `max_turns` is a setting on the agent, not the task. The 30-turn limit is a task `@vf.stop` (`turn_limit`), so it holds under any run config.
    - **Harness.** A taskset defaults to the `bash` harness unless its package exports a `Harness`. `quant_research` re-exports `NullHarness`, so `null` is the default.
@@ -195,7 +195,7 @@ One plot: claim gap against backtests used.
    - `walkforward` splits into a trusted driver and a session that runs the agent's steps. The driver owns the panel, chooses the blocks and validates every output. The session receives the observable columns, then each block's newly realised targets just before that block. It never holds a target that is not yet realised.
    - `sandbox.Sandbox` runs each session, meaning one pipeline run, in a fresh interpreter. Requests go to the child pickled; only data frames come back, as Arrow IPC, never unpickled. The child starts with an empty environment and a private working directory, which is also its `TMPDIR` and `HOME`. When the caller is root, it runs as a dedicated unprivileged user, with that user's primary group and no supplementary groups. Popen's `user=` alone would keep gid 0 and the root group's files readable. Before loading agent code, the child lowers its own `RLIMIT_AS` (16 GiB), `RLIMIT_NPROC` (the larger of 256 and 8 per core, since polars starts a thread per core) and `RLIMIT_FSIZE` (1 GiB). After each session, every process of that user is killed, and every entry the user owns is removed from every directory it can reach and write. Those directories are found by walking the file system once per scoring worker, which takes about 0.5 s. The walk found `/run/lock` and `/var/lib/php/sessions`, which the earlier fixed list of temp directories missed; either would have let a run leave predictions for the next. The taskset uses `nobody`; the user must not run anything else.
    - `scoring` runs the walk-forward and the checks in its trusted worker, and agent code only through the sandbox.
-   - `synthetic.dataset_seed(index, secret)` derives 128-bit seeds. The taskset's `secret` is random unless set. Runs that must share datasets, such as several models and the baselines (`run_baselines.py --secret`), must set the same one. The agent never sees the secret or the seed. The grader deletes its request file, which holds the seed, before any agent code runs.
+   - `synthetic.dataset_seed` derives 128-bit seeds from the taskset's secret (Decision 10). The agent never sees the secret or the seed. The grader deletes its request file, which holds the seed, before any agent code runs.
    - The toolset runs backtests one at a time, because each one ends by killing the sandbox user's processes.
 
    Still open:
@@ -219,6 +219,10 @@ One plot: claim gap against backtests used.
 9. **Panels are dense grids, and predictions must cover them.** Decided 15 November 2026. The generator (`shift(n_assets)` for `ret`), scoring and the checks line frames up by row position. Until now `Panel` checked only that the timestamps were sorted, so a ragged or duplicated panel from real data would have been scored silently wrong.
    - `Panel.__post_init__` now checks, in one lazy pass, that keys strictly increase in (timestamp, asset) order, which also makes them unique, and that rows = timestamps × assets. Otherwise it raises `ValueError`. This costs 13 ms on the 2.2M-row hidden panel; a score builds about 10 panels (the full panel, the 8 truncations and the permuted copy), so about 0.1 s per score.
    - Predictions: the walk-forward driver already required one value per row. A run may now leave at most `MAX_NULL_SHARE` = 10% of its predictions null (NaN and inf count as null), or it fails as invalid. Rank IC drops null rows, so without a cap an alpha could predict only where it is confident and be scored on those rows alone. Ten percent leaves room for warm-up nulls from rolling features. All-null and all-NaN alphas are now invalid rather than scoring 0.
+10. **Train and eval splits, a required secret, and no seed in task data.** Decided 15 November 2026.
+   - `dataset_seed(index, secret, split)` hashes the secret, the split and the index, NUL-separated. The taskset config has `split: "train" | "eval"`, default `eval`. Eval is 30 tasks (`EVAL_TASKS`), so a run needs no `-n`; train is infinite. Task names carry the split (`eval-0`, `train-17`). Over the first 10,000 indices of each split, no seed is shared.
+   - `secret` is required and a `SecretStr`, so config dumps show `**********`. Reading a masked dump back fails rather than running on the mask. `run_baselines.py` takes `--secret` and `--split`.
+   - Traces publish `TaskData`, so it carries only the split and the index. The taskset copies the secret into each task's config. `Task.setup` derives the seed and writes it, as hex, into the episode's `ResearchState`. That state is excluded from trace serialisation and shared only between the host and the tool server, which reads the seed on its first call. The seed is not in the container's environment, where a harness that runs shell commands could read it.
 
 ## Open decisions
 

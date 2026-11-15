@@ -10,6 +10,7 @@ Run as `python -m quant_research.servers.research`; verifiers launches it.
 
 import asyncio
 import functools
+from typing import Literal
 
 import verifiers.v1 as vf
 from pydantic import Field
@@ -24,37 +25,39 @@ SANDBOX_USER = "nobody"
 
 
 class ResearchData(vf.TaskData):
-    """Task data shared by the task and its toolset.
+    """Task data. Published with every trace, so it holds no seed.
 
     Attributes:
-        seed: Dataset seed, drawn from a secret (see
-            `synthetic.dataset_seed`), as lowercase hex. Traces serialise
-            with orjson, which rejects integers wider than 64 bits. The agent
-            must not learn it.
+        split: "train" or "eval".
+        index: Dataset number within the split.
     """
 
-    seed: str = Field(pattern=r"^[0-9a-f]+$")
-
-    @property
-    def dataset_seed(self) -> int:
-        """`seed` as the integer the generator takes."""
-        return int(self.seed, 16)
+    split: Literal["train", "eval"]
+    index: int = Field(ge=0)
 
 
 class ResearchState(vf.State):
-    """Episode state shared by the toolset and the task.
+    """Episode state shared by the toolset and the task. Never serialised
+    into traces.
 
     Attributes:
+        seed: Dataset seed as hex, set by the task's setup before the agent
+            starts. The agent must not learn it.
         backtests_used: Backtest calls that ran; refused calls do not count.
         submitted: Whether `submit` has run.
         code: The submitted alpha code.
         claimed_ic: The submitted claim of the IC on unseen data.
     """
 
+    seed: str = ""
     backtests_used: int = 0
     submitted: bool = False
     code: str = ""
     claimed_ic: float | None = None
+
+
+# What the toolset records; it only reads the seed.
+_EPISODE_FIELDS = ("backtests_used", "submitted", "code", "claimed_ic")
 
 
 class ResearchConfig(vf.ToolsetConfig):
@@ -104,19 +107,20 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
 
     TOOL_PREFIX = None  # Advertise the tools as describe, backtest and submit.
 
-    async def setup_task(self, task: ResearchData) -> None:
-        """Builds the visible periods once, for `describe`.
-
-        Args:
-            task: The rollout's task data.
-        """
-        self._load = functools.partial(synthetic.visible_data, task.dataset_seed)
-        self._description = describe_panel(self._load().panel)
+    def __init__(self, config: ResearchConfig) -> None:
+        super().__init__(config)
         self._episode = ResearchState()
         self._backtesting = asyncio.Lock()
+        self._description: str | None = None
+
+    def _visible(self) -> functools.partial:
+        """The loader of the visible periods, from the seed in the state."""
+        if not self.state.seed:
+            raise ValueError("the task is not set up: no dataset seed")
+        return functools.partial(synthetic.visible_data, int(self.state.seed, 16))
 
     def _publish(self) -> None:
-        for name in ResearchState.model_fields.keys() - vf.State.model_fields.keys():
+        for name in _EPISODE_FIELDS:
             setattr(self.state, name, getattr(self._episode, name))
 
     @vf.tool
@@ -126,6 +130,8 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
         Returns:
             Column names, timestamp range and number of assets.
         """
+        if self._description is None:
+            self._description = describe_panel(self._visible()().panel)
         return self._description
 
     @vf.tool
@@ -160,7 +166,7 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
                 ic = await asyncio.to_thread(
                     scoring.backtest,
                     code,
-                    self._load,
+                    self._visible(),
                     user=self.config.sandbox_user,
                 )
         except AlphaError as e:

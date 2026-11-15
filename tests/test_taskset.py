@@ -6,6 +6,7 @@ import functools
 import json
 
 import pytest
+from pydantic import ValidationError
 
 # verifiers imports fcntl, which Windows lacks.
 pytest.importorskip("fcntl")
@@ -29,11 +30,20 @@ from quantenv import baselines, scoring  # noqa: E402
 from quantenv.sources import synthetic  # noqa: E402
 
 COLUMN = baselines.column_code("f00")
+SECRET = "a-test-secret-value"
+DATA = ResearchData(split="eval", index=0)
+
+
+def _config(**task) -> QuantResearchConfig:
+    return QuantResearchConfig(secret=SECRET, task=QuantResearchTaskConfig(**task))
 
 
 def _toolset(budget: int = 2) -> ResearchToolset:
     tools = ResearchToolset(ResearchConfig(budget=budget))
-    asyncio.run(tools.setup_task(ResearchData(seed="0")))
+    asyncio.run(tools.setup_task(DATA))
+    # Outside a call the toolset sees its inert state; the host's Task.setup
+    # puts the seed there in a rollout.
+    tools.state.seed = f"{synthetic.dataset_seed(0, SECRET, 'eval'):032x}"
     return tools
 
 
@@ -49,29 +59,52 @@ def _trace(task: QuantResearchTask, state: ResearchState) -> vf.Trace:
 
 @pytest.fixture(scope="module")
 def task() -> QuantResearchTask:
-    return QuantResearchTask(ResearchData(seed="0"), QuantResearchTaskConfig())
+    return next(iter(QuantResearchTaskset(_config())))
 
 
-def test_taskset_is_infinite_with_one_secret_seed_per_task():
-    taskset = QuantResearchTaskset(QuantResearchConfig(secret="s"))
-    assert taskset.INFINITE and not taskset.bounded
-    tasks = list(taskset.take(2))
-    assert [t.data.idx for t in tasks] == [0, 1]
-    assert [t.data.dataset_seed for t in tasks] == [
-        synthetic.dataset_seed(i, "s") for i in (0, 1)
-    ]
-    data = tasks[0].data
-    assert data.seed not in data.prompt and str(data.dataset_seed) not in data.prompt
+def test_train_and_eval_seeds_are_disjoint():
+    seeds = {
+        split: {synthetic.dataset_seed(i, SECRET, split) for i in range(10_000)}
+        for split in ("train", "eval")
+    }
+    assert len(seeds["train"]) == len(seeds["eval"]) == 10_000
+    assert not seeds["train"] & seeds["eval"]
 
 
-def test_secret_is_random_unless_set():
-    assert QuantResearchConfig().secret != QuantResearchConfig().secret
+def test_eval_split_is_30_named_tasks_and_train_is_infinite():
+    eval_set = QuantResearchTaskset(_config())
+    assert eval_set.bounded
+    tasks = list(eval_set)
+    assert len(tasks) == 30
+    assert tasks[0].data.name == "eval-0" and tasks[-1].data.name == "eval-29"
+    train = QuantResearchTaskset(QuantResearchConfig(secret=SECRET, split="train"))
+    assert not train.bounded
+    assert [t.data.name for t in train.take(2)] == ["train-0", "train-1"]
+
+
+def test_secret_is_required_and_masked():
+    with pytest.raises(ValidationError):
+        QuantResearchConfig()
+    config = _config()
+    assert SECRET not in config.model_dump_json()
+    # A masked dump read back must fail loudly, not run on the mask.
+    with pytest.raises(ValidationError):
+        QuantResearchConfig.model_validate_json(config.model_dump_json())
+
+
+def test_seed_stays_out_of_published_task_data(task):
+    seed = synthetic.dataset_seed(0, SECRET, "eval")
+    trace = _trace(task, ResearchState())
+    asyncio.run(task.setup(trace, None))
+    assert trace.state.seed == f"{seed:032x}"
+    published = trace.to_json().decode()
+    for text in (str(seed), f"{seed:032x}", SECRET):
+        assert text not in published
+        assert text not in task.data.prompt
 
 
 def test_prompt_states_columns_budget_and_contract():
-    config = QuantResearchConfig(
-        task=QuantResearchTaskConfig(tools=ResearchConfig(budget=7))
-    )
+    config = _config(tools=ResearchConfig(budget=7))
     prompt = next(iter(QuantResearchTaskset(config))).data.prompt
     assert "f00" in prompt and "ret" in prompt
     assert "You have 7 backtests" in prompt
@@ -94,7 +127,12 @@ def test_describe_lists_visible_data_only():
 def test_backtest_matches_scoring_and_counts():
     tools = _toolset()
     out = asyncio.run(tools.backtest(COLUMN))
-    ic = scoring.backtest(COLUMN, functools.partial(synthetic.visible_data, 0))
+    ic = scoring.backtest(
+        COLUMN,
+        functools.partial(
+            synthetic.visible_data, synthetic.dataset_seed(0, SECRET, "eval")
+        ),
+    )
     assert f"rank IC: {ic:.4f}" in out
     assert "backtests left: 1" in out
     assert tools.state.backtests_used == 1
@@ -134,7 +172,7 @@ def test_submit_stops_the_episode(task):
 
 def test_turn_limit_stops_the_episode():
     config = QuantResearchTaskConfig(max_turns=1)
-    task = QuantResearchTask(ResearchData(seed="0"), config)
+    task = QuantResearchTask(DATA, config)
     trace = _trace(task, ResearchState())
     assert not task.turn_limit(trace)
     reply = vf.MessageNode(message=vf.AssistantMessage(content="hi"), sampled=True)
@@ -168,8 +206,8 @@ def test_grader_scores_on_hidden_periods(tmp_path):
     assert set(score) == {f.name for f in dataclasses.fields(scoring.Score)}
 
 
-def test_trace_of_a_real_task_serialises():
+def test_trace_of_a_real_task_serialises(task):
     # orjson rejects integers wider than 64 bits; dataset seeds have 128.
-    task = next(iter(QuantResearchTaskset(QuantResearchConfig(secret="s"))))
     trace = _trace(task, ResearchState(submitted=True, code=COLUMN, claimed_ic=0.1))
-    assert json.loads(trace.to_json())["task"]["data"]["name"] == "task-0"
+    asyncio.run(task.setup(trace, None))
+    assert json.loads(trace.to_json())["task"]["data"]["name"] == "eval-0"

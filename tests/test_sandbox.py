@@ -130,11 +130,12 @@ def _live_processes(uid: int) -> list[str]:
     return live
 
 
-def test_dataset_seeds_depend_on_the_secret():
-    a = synthetic.dataset_seed(0, "a")
-    assert a == synthetic.dataset_seed(0, "a")
-    assert a != synthetic.dataset_seed(0, "b")
-    assert a != synthetic.dataset_seed(1, "a")
+def test_dataset_seeds_depend_on_secret_split_and_index():
+    a = synthetic.dataset_seed(0, "a", "eval")
+    assert a == synthetic.dataset_seed(0, "a", "eval")
+    assert a != synthetic.dataset_seed(0, "b", "eval")
+    assert a != synthetic.dataset_seed(0, "a", "train")
+    assert a != synthetic.dataset_seed(1, "a", "eval")
     assert a >= 2**64
 
 

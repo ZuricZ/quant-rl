@@ -1,4 +1,4 @@
-"""Scores the scripted baselines on the eval tasks and prints the results table.
+"""Scores the scripted baselines on a split's tasks and prints the results table.
 
 Baselines:
 - naive: the single feature with the best visible-period IC, claiming that IC.
@@ -6,14 +6,16 @@ Baselines:
 - leaky: the leaky feature alone, claiming its visible-period backtest IC.
   Only datasets that have a leaky feature are scored.
 
-Task i uses dataset `synthetic.dataset_seed(i, secret)`, as in the
-taskset; pass the taskset's secret to score the same datasets as a model run.
+Task i uses dataset `synthetic.dataset_seed(i, secret, split)`, as in the
+taskset; pass the taskset's secret and split to score the same datasets as a
+model run.
 Every submission goes through `quantenv.scoring.score_submission` on the
 hidden periods, the same path as the environment's reward. It imports no
 verifiers code, so it also runs on Windows.
 
 Usage:
-    uv run python scripts/run_baselines.py --secret S [--tasks 30] [--workers 4]
+    uv run python scripts/run_baselines.py --secret S [--split eval] [--tasks 30]
+        [--workers 4]
         [--out rows.csv]
 """
 
@@ -50,17 +52,18 @@ def submissions(seed: int) -> dict[str, tuple[str, float, int]]:
     return out
 
 
-def score_task(index: int, secret: str) -> list[dict]:
+def score_task(index: int, secret: str, split: str) -> list[dict]:
     """Scores every baseline on one task.
 
     Args:
         index: Task number.
         secret: The taskset's secret.
+        split: The taskset's split.
 
     Returns:
         One row per baseline.
     """
-    seed = synthetic.dataset_seed(index, secret)
+    seed = synthetic.dataset_seed(index, secret, split)
     hidden = functools.partial(synthetic.hidden_data, seed)
     rows = []
     for name, (code, claim, used) in submissions(seed).items():
@@ -109,6 +112,7 @@ def table(rows: pl.DataFrame) -> pl.DataFrame:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--secret", required=True, help="the taskset's secret")
+    parser.add_argument("--split", choices=("train", "eval"), default="eval")
     parser.add_argument("--tasks", type=int, default=30, help="score tasks 0..N-1")
     parser.add_argument("--workers", type=int, default=4, help="tasks in parallel")
     parser.add_argument("--out", help="write the per-task rows to this CSV")
@@ -117,7 +121,7 @@ def main() -> None:
     # Each scoring call runs in its own process, so threads are enough here.
     with concurrent.futures.ThreadPoolExecutor(args.workers) as pool:
         per_task = []
-        score = functools.partial(score_task, secret=args.secret)
+        score = functools.partial(score_task, secret=args.secret, split=args.split)
         for task_rows in pool.map(score, range(args.tasks)):
             per_task.extend(task_rows)
             print(f"scored task {task_rows[0]['task']}", flush=True)

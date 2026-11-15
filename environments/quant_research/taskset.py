@@ -7,21 +7,22 @@ in the rollout's container. After the episode, the reward runs
 its hidden periods inside a scoring worker, so hidden data never exists
 while the agent runs. All agent code runs in `quantenv.sandbox`.
 
-Dataset seeds are drawn from the taskset's `secret`. The generator is
-installed in the container, so code that knew a seed could rebuild the
-hidden periods; it cannot guess one drawn from a secret it never sees.
+Dataset seeds are drawn from the taskset's `secret` and split. The
+generator is installed in the container, so code that knew a seed could
+rebuild the hidden periods; it cannot guess one drawn from a secret it never
+sees. Seeds never enter task data, which every trace publishes: the task's
+setup puts the seed in the episode's shared state, read by the toolset.
 """
 
 import dataclasses
 import itertools
 import json
-import secrets
 import uuid
-from collections.abc import Iterator
-from typing import Any
+from collections.abc import Iterable, Iterator
+from typing import Any, Literal
 
 import verifiers.v1 as vf
-from pydantic import Field
+from pydantic import Field, SecretStr, field_validator
 from verifiers.v1.mcp.launch import _install_in_sandbox
 
 from quant_research.servers.research import (
@@ -36,6 +37,9 @@ from quantenv.sources import synthetic
 from quantenv.walkforward import WalkForward
 
 MAX_TURNS = 30
+EVAL_TASKS = 30
+# What pydantic writes in place of a SecretStr when dumping.
+_MASK = "**********"
 IMAGE = "python:3.12-slim"
 SCORING_TIMEOUT = 900.0
 _SCORE = "score"
@@ -176,10 +180,12 @@ class QuantResearchTaskConfig(vf.TaskConfig):
     Attributes:
         tools: The research toolset's settings, including the backtest budget.
         max_turns: Model turns per episode.
+        secret: The taskset's secret; the taskset sets it on every task.
     """
 
     tools: ResearchConfig = ResearchConfig()
     max_turns: int = Field(MAX_TURNS, gt=0)
+    secret: SecretStr | None = None
 
 
 class QuantResearchConfig(vf.TasksetConfig):
@@ -187,21 +193,49 @@ class QuantResearchConfig(vf.TasksetConfig):
 
     Attributes:
         task: Settings passed to every task.
-        secret: Dataset seeds are drawn from it, see
-            `synthetic.dataset_seed`. Random unless set. Set the same value
-            for runs that must share datasets, such as several models and
-            `scripts/run_baselines.py --secret`. Never show it to the agent.
+        split: "eval" is a fixed set of `EVAL_TASKS` tasks; "train" is
+            infinite. Their datasets never coincide.
+        secret: Required. Dataset seeds are drawn from it, see
+            `synthetic.dataset_seed`. Runs that must share datasets, such as
+            several models and `scripts/run_baselines.py --secret`, set the
+            same value. Dumps show it masked; never show it to the agent.
     """
 
     task: QuantResearchTaskConfig = QuantResearchTaskConfig()
-    secret: str = Field(default_factory=lambda: secrets.token_hex(16))
+    split: Literal["train", "eval"] = "eval"
+    secret: SecretStr
+
+    @field_validator("secret")
+    @classmethod
+    def _not_masked(cls, secret: SecretStr) -> SecretStr:
+        # A dumped config read back holds the mask, which would silently
+        # become everyone's secret.
+        if not secret.get_secret_value() or secret.get_secret_value() == _MASK:
+            raise ValueError("secret is empty or masked; pass the real secret")
+        return secret
 
 
 class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskConfig]):
-    """One dataset seed: research with the tools, submit once."""
+    """One dataset: research with the tools, submit once."""
 
     # The tools and the grader run agent-written code.
     NEEDS_CONTAINER = True
+
+    @property
+    def seed(self) -> int:
+        """The dataset seed, from the secret, split and index.
+
+        Raises:
+            ValueError: If the task's config has no secret.
+        """
+        if self.config.secret is None:
+            raise ValueError("task config has no secret; build tasks via the taskset")
+        secret = self.config.secret.get_secret_value()
+        return synthetic.dataset_seed(self.data.index, secret, self.data.split)
+
+    async def setup(self, trace: vf.Trace, runtime: vf.Runtime) -> None:
+        """Hands the toolset the seed through the episode's shared state."""
+        trace.state.seed = f"{self.seed:032x}"
 
     @classmethod
     def toolsets(cls, config: QuantResearchTaskConfig) -> list[vf.Toolset]:
@@ -225,7 +259,7 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
                 score = await grade(
                     self.config.tools,
                     runtime,
-                    self.data.dataset_seed,
+                    self.seed,
                     state.code,
                     state.claimed_ic,
                 )
@@ -262,11 +296,11 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
 
     async def validate(self, runtime: vf.Runtime) -> bool:
         """Grades the oracle alpha: it must score above 0 and pass the checks."""
-        weights = synthetic.ground_truth(self.data.dataset_seed).weights
+        weights = synthetic.ground_truth(self.seed).weights
         score = await grade(
             self.config.tools,
             runtime,
-            self.data.dataset_seed,
+            self.seed,
             baselines.weighted_code(weights),
             0.0,
         )
@@ -274,23 +308,31 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
 
 
 class QuantResearchTaskset(vf.Taskset[QuantResearchTask, QuantResearchConfig]):
-    """Infinite: task i uses dataset `synthetic.dataset_seed(i, secret)`.
-    Tasks 0 to 29 (`-n 30`) are the eval split."""
+    """Task i of a split uses `synthetic.dataset_seed(i, secret, split)`. The
+    eval split is tasks 0 to `EVAL_TASKS` - 1; the train split is infinite."""
 
-    INFINITE = True
+    @property
+    def INFINITE(self) -> bool:  # noqa: N802 - the name verifiers reads.
+        return self.config.split == "train"
 
     def load(self) -> Iterator[QuantResearchTask]:
-        task_config = self.config.task
-        for index in itertools.count():
-            seed = synthetic.dataset_seed(index, self.config.secret)
-            description = describe_panel(synthetic.visible_data(seed).panel)
-            data = ResearchData(
-                seed=f"{seed:032x}",
-                name=f"task-{index}",
-                prompt=prompt(
-                    description, task_config.tools.budget, task_config.max_turns
-                ),
-                image=IMAGE,
-                timeout=vf.TaskTimeout(scoring=SCORING_TIMEOUT),
+        task_config = self.config.task.model_copy(update={"secret": self.config.secret})
+        indices: Iterable[int] = (
+            itertools.count() if self.INFINITE else range(EVAL_TASKS)
+        )
+        for index in indices:
+            task = QuantResearchTask(
+                ResearchData(split=self.config.split, index=index), task_config
+            )
+            description = describe_panel(synthetic.visible_data(task.seed).panel)
+            data = task.data.model_copy(
+                update=dict(
+                    name=f"{self.config.split}-{index}",
+                    prompt=prompt(
+                        description, task_config.tools.budget, task_config.max_turns
+                    ),
+                    image=IMAGE,
+                    timeout=vf.TaskTimeout(scoring=SCORING_TIMEOUT),
+                )
             )
             yield QuantResearchTask(data, task_config)

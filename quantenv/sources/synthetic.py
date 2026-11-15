@@ -107,21 +107,23 @@ class Synthetic:
     hidden_start: Any = None
 
 
-def dataset_seed(index: int, secret: str) -> int:
-    """The seed of dataset `index` under `secret`.
+def dataset_seed(index: int, secret: str, split: str) -> int:
+    """The seed of dataset `index` of `split` under `secret`.
 
     Code that can run the generator can rebuild any dataset whose seed it can
     guess, hidden periods and ground truth included. Seeds drawn from a
-    secret it does not know cannot be guessed.
+    secret it does not know cannot be guessed. The split is part of the
+    hash, so train and eval datasets are independent.
 
     Args:
-        index: Dataset number, e.g. a task's position in the taskset.
+        index: Dataset number within the split.
         secret: Known only to whoever builds and scores the datasets.
+        split: E.g. "train" or "eval".
 
     Returns:
         A 128-bit seed.
     """
-    return _hash_int(16, secret, index)
+    return _hash_int(16, secret, split, index)
 
 
 def _hash_int(n_bytes: int, *parts: object) -> int:
