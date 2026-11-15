@@ -61,7 +61,10 @@ def test_caching_across_runs_cannot_hide_the_leak():
         f"        return Cache.memo.setdefault(key, df[{LEAK!r}])\n"
     )
     score = scoring.score_submission(code, 0.3, HIDDEN, SMALL_WF)
-    assert score.used_leak == 1 and reward.reward(dataclasses.asdict(score)) == -1.0
+    assert (
+        score.used_leak == 1
+        and reward.reward(dataclasses.asdict(score)) == reward.FLAGGED_REWARD
+    )
 
 
 def test_session_never_holds_unrealised_targets():
@@ -208,7 +211,7 @@ def test_resource_limits_apply():
 
 
 def test_an_unusable_sandbox_user_is_not_the_agents_fault():
-    # A setup problem must fail the scoring, not score the agent -0.5.
+    # A setup problem must fail the scoring, not score the agent as invalid.
     with pytest.raises(sandbox.SandboxError):
         scoring.score_submission(
             baselines.column_code("f00"), 0.1, HIDDEN, SMALL_WF, user="no-such-user-xyz"

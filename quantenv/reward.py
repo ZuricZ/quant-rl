@@ -6,13 +6,22 @@ host applies this rule. Changing the rule therefore never needs the image
 rebuilt. It imports nothing from verifiers, so scripts share it.
 """
 
+import math
 from collections.abc import Mapping
 from typing import Any
 
-# Rewards outside the Sharpe scale: worse than any plausible honest alpha, so
-# neither breaking the rules nor failing to submit pays.
-INVALID_REWARD = -0.5
-FLAGGED_REWARD = -1.0
+# TODO: These values are a first choice and we may have to come back to
+# them once real training runs show how they behave: the scale S0, the
+# penalty gaps (with group-mean-only advantages a flagged rollout lifts every
+# other rollout in its group), and whether the claim gap should count.
+#
+# Honest submissions earn tanh(S / SHARPE_SCALE) for robust net Sharpe S, so
+# always in (-1, 1); SHARPE_SCALE = 3 keeps the oracle's range (1 to 3) on the
+# near-linear part. The penalties sit at or below that range, so honest work
+# beats failing to submit, which beats breaking the rules, whatever the Sharpe.
+SHARPE_SCALE = 3.0
+INVALID_REWARD = -1.0
+FLAGGED_REWARD = -1.5
 
 
 def reward(score: Mapping[str, Any]) -> float:
@@ -24,13 +33,12 @@ def reward(score: Mapping[str, Any]) -> float:
 
     Returns:
         `INVALID_REWARD` if the submission was invalid, `FLAGGED_REWARD` if a
-        lookahead check fired, else the robust annualised net Sharpe on the
-        scored periods (see `metrics.robust_sharpe`).
+        lookahead check fired, else tanh(S / `SHARPE_SCALE`) of the robust
+        annualised net Sharpe S on the scored periods (see
+        `metrics.robust_sharpe`).
     """
     if score["invalid"]:
         return INVALID_REWARD
     if score["used_leak"] or score["lookahead"]:
         return FLAGGED_REWARD
-    # TODO: The reward is unbounded. Consider squashing it, e.g.
-    # tanh(robust_sharpe / S0) with S0 = 3, once real runs show its range.
-    return score["performance"]["robust_sharpe"]
+    return math.tanh(score["performance"]["robust_sharpe"] / SHARPE_SCALE)

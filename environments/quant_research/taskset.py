@@ -124,8 +124,9 @@ follow the visible ones, walk-forward with all earlier periods as training \
 data, at most {score_limit:g} seconds per run.
 
 You have at most {max_turns} turns. An episode that ends without `submit`, \
-or whose alpha fails, scores -0.5; one caught reading the future or a leaked \
-column scores -1.
+or whose alpha fails, scores {invalid_reward:g}; one caught reading the future \
+or a leaked column scores {flagged_reward:g}. Any honest alpha scores higher \
+than both.
 """
 
 
@@ -147,6 +148,8 @@ def prompt(description: str, budget: int, max_turns: int) -> str:
         min_train=wf.min_train,
         time_limit=scoring.BACKTEST_TIME_LIMIT,
         n_hidden=synthetic.DEFAULT_CONFIG.n_hidden,
+        invalid_reward=reward.INVALID_REWARD,
+        flagged_reward=reward.FLAGGED_REWARD,
         score_limit=scoring.SCORE_TIME_LIMIT,
         cost_bp=synthetic.DEFAULT_CONFIG.cost * 1e4,
         max_null=walkforward.MAX_NULL_SHARE,
@@ -359,8 +362,9 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
 
     @vf.reward
     async def hidden_sharpe(self, trace: vf.Trace, runtime: vf.Runtime) -> float:
-        """Robust net Sharpe on the hidden periods; -1 if a check fired, -0.5
-        if the submission is missing or invalid (see `quantenv.reward`)."""
+        """tanh(S / 3) of the robust net Sharpe S on the hidden periods; -1.5
+        if a check fired, -1 if the submission is missing or invalid (see
+        `quantenv.reward`)."""
         return reward.reward(await self.raw_score(trace, runtime))
 
     async def validate(self, runtime: vf.Runtime) -> bool:

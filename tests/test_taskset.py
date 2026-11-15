@@ -125,6 +125,11 @@ def test_prompt_states_columns_budget_and_contract():
         assert name in prompt
 
 
+def test_prompt_states_the_penalties():
+    prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
+    assert "scores -1;" in prompt and "scores -1.5." in prompt
+
+
 def test_prompt_states_the_hidden_run_and_its_time_limit():
     prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
     assert "10,000 unseen periods" in prompt
@@ -203,7 +208,7 @@ def test_no_submission_is_invalid(task):
     trace = _trace(task, ResearchState(backtests_used=3))
     # Nothing to grade, so no runtime is needed.
     metrics = asyncio.run(task.outcome(trace, None))
-    assert asyncio.run(task.hidden_sharpe(trace, None)) == -0.5
+    assert asyncio.run(task.hidden_sharpe(trace, None)) == reward.INVALID_REWARD
     assert metrics["invalid"] == 1
     assert metrics["backtests_used"] == 3
     assert math.isnan(metrics["sharpe"]) and math.isnan(metrics["claim_gap"])
