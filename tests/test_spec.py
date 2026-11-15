@@ -17,7 +17,10 @@ def _local(code: str) -> walkforward.Local:
 
 @pytest.fixture(scope="module")
 def data():
-    return synthetic.generate(seed=1)
+    # PLAIN turns off the market's realism (factors, persistence, regimes,
+    # fat tails, interaction), so planted ICs show up exactly. The realistic
+    # default market has its own tests in test_generator.py.
+    return synthetic.generate(seed=1, config=synthetic.PLAIN)
 
 
 def _ic(code: str, data) -> float:

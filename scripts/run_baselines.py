@@ -3,7 +3,10 @@
 Baselines, each claiming the net Sharpe of one visible-period backtest, as an
 agent would:
 - naive: the single feature with the best visible-period IC.
-- oracle: the real features at their true weights.
+- template: the textbook alpha, refit each block: measure every feature's
+  IC, drop those too good to be true, weight the rest by IC.
+- oracle: the real features and their interaction at their true weights,
+  from the generator's ground truth. A baseline only; never in the reward.
 - leaky: the leaky feature alone. Only datasets that have one are scored.
 
 Task i uses dataset `synthetic.dataset_seed(i, secret, split)`, as in the
@@ -40,12 +43,17 @@ def submissions(seed: int) -> dict[str, tuple[str, float]]:
         Baseline name to alpha code and claimed net Sharpe.
     """
     syn = synthetic.generate(seed)
+    truth = syn.truth
+    interactions = (
+        {truth.interaction: truth.interaction_weight} if truth.interaction else {}
+    )
     codes = {
         "naive": baselines.naive(syn.panel)[0],
-        "oracle": baselines.weighted_code(syn.truth.weights),
+        "template": baselines.template_code(list(syn.panel.schema.features)),
+        "oracle": baselines.weighted_code(truth.weights, interactions),
     }
-    if syn.truth.leaky is not None:
-        codes["leaky"] = baselines.column_code(syn.truth.leaky)
+    if truth.leaky is not None:
+        codes["leaky"] = baselines.column_code(truth.leaky)
     visible = functools.partial(synthetic.visible_data, seed)
     return {
         name: (code, scoring.backtest(code, visible).sharpe)

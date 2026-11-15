@@ -112,7 +112,8 @@ def test_feature_roles_are_shuffled_across_seeds():
 
 
 def test_seed_without_leak_has_fourth_real_feature():
-    data = synthetic.generate(_seed_without_leak())
+    # PLAIN: with every realism mechanism off, a feature scores its planted IC.
+    data = synthetic.generate(_seed_without_leak(), synthetic.PLAIN)
     name = next(k for k, v in data.truth.planted_ic.items() if v == 0.06)
     assert _ic(baselines.column_code(name), data.panel) == pytest.approx(0.06, abs=0.01)
 
