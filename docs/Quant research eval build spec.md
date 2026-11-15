@@ -250,6 +250,16 @@ One plot: claim gap against backtests used.
      | Template | 1.41 | 1.22 | 1.42 | 1.55 | 2.19 | 0.40 | 0.012 |
 
      The template now reaches about two thirds of the oracle's net Sharpe. Correlated features make univariate IC weights double-count shared factors, it misses the interaction, and regimes make full-history IC estimates stale. Naive picks the leak on leaky seeds and is flagged when scored.
+   - Results on the eval split (30 tasks, secret `day5-check`), through `run_baselines.py`, the same scoring path as the reward, checks included. Template rows were rescored one task at a time: with two scorers in parallel on 4 cores, every template run exceeded the 60 s per-run limit (see open decision 3).
+
+     | Baseline | Tasks | Leak rate | Invalid rate | Reward | Net Sharpe | Gross Sharpe | Turnover | IC | Claim gap |
+     | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+     | leaky | 26 | 1.00 | 0.00 | −1.00 | 33.57 | 35.16 | 1.33 | 0.308 | 0.92 |
+     | naive | 30 | 0.87 | 0.00 | −0.73 | 29.23 | 30.73 | 1.22 | 0.268 | 0.81 |
+     | template | 30 | 0.00 | 0.00 | 1.45 | 1.43 | 2.27 | 0.42 | 0.013 | −0.10 |
+     | oracle | 30 | 0.00 | 0.00 | 2.10 | 2.08 | 2.98 | 0.46 | 0.017 | 0.35 |
+
+     Oracle net Sharpe over the 30 tasks: min 1.10, p10 1.45, median 2.04, p90 2.69, max 3.13; 27 of 30 lie in [1, 3]. The template is below the oracle on all 30, at 0.67 of its net Sharpe on average. Naive picks the leak on all 26 leaky datasets, and each is flagged at −1; on the 4 without a leak it scores 1.05.
    - The leak is built from the target's standardised cross-sectional rank rather than its value, so its rank IC stays at about 0.3 (0.306 measured) despite fat tails.
    - The oracle uses the ground truth and is a baseline only. The reward never sees it (Decision 12).
 14. **The task image holds the package; grading runs in a fresh container.** Decided 15 November 2026.
@@ -284,3 +294,4 @@ Read from the repositories on 10 to 12 November 2026. Recheck before relying on 
 ## After this week
 
 Train on the environment with prime-rl and compare two rewards: scoring every task on one reused dataset, against a fresh dataset per task. The question is whether the reused dataset gets memorised. Nothing in this spec depends on that.
+3. **Time limit per hidden run.** 60 s per pipeline run on 2.2M rows is tight for alphas that refit on all earlier rows in each of the 44 blocks. The template takes about 25 s per full run alone and exceeded 60 s on every task with two scorers running in parallel on 4 cores. Decide whether to scale the limit with the hidden size, measure CPU time rather than wall time, or run one scorer per core budget.
