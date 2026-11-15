@@ -136,3 +136,66 @@ def test_dataset_seeds_depend_on_the_secret():
     assert a != synthetic.dataset_seed(0, "b")
     assert a != synthetic.dataset_seed(1, "a")
     assert a >= 2**64
+
+
+_WALK = (
+    "        import os\n"
+    "        found = []\n"
+    "        for root, dirs, files in os.walk('/'):\n"
+    "            dirs[:] = [d for d in dirs if root != '/' or d not in ('proc', 'sys')]\n"
+    "            {action}\n"
+)
+
+
+@needs_root
+def test_no_writable_dir_carries_files_between_runs():
+    # Run 1 drops a marker in every directory it can write; run 2 looks for
+    # them everywhere. Any survivor could carry predictions between the
+    # checks' runs.
+    marker = "quantenv-persist-marker"
+    write = (
+        "try:\n"
+        f"                open(os.path.join(root, {marker!r}), 'w').write('x')\n"
+        "                found.append(root)\n"
+        "            except OSError:\n"
+        "                pass\n"
+        "        open(os.path.join(os.getcwd(), " + repr(marker) + "), 'w').write('x')\n"
+        "        assert found, 'nothing writable'\n"
+        "        return pl.col('f00')\n"
+    )
+    look = (
+        f"found += [root for f in files if f == {marker!r}]\n"
+        "        assert not found, found\n"
+        "        return pl.col('f00')\n"
+    )
+    _backtest(_WALK.format(action=write), user="nobody")
+    _backtest(_WALK.format(action=look), user="nobody")
+
+
+@needs_root
+def test_sandbox_user_has_no_root_group():
+    directory = Path("/tmp/quantenv-group-test")
+    directory.mkdir(mode=0o755, exist_ok=True)
+    directory.chmod(0o755)
+    private = directory / "group-only.txt"
+    private.write_text("seed")
+    os.chown(private, 0, 0)
+    private.chmod(0o640)
+    try:
+        body = f"        open({str(private)!r}).read()\n        return pl.col('f00')\n"
+        with pytest.raises(AlphaError, match="PermissionError"):
+            _backtest(body, user="nobody")
+    finally:
+        shutil.rmtree(directory)
+
+
+@needs_root
+def test_resource_limits_apply():
+    body = (
+        "        import resource\n"
+        "        for limit in ('RLIMIT_AS', 'RLIMIT_NPROC', 'RLIMIT_FSIZE'):\n"
+        "            soft, hard = resource.getrlimit(getattr(resource, limit))\n"
+        "            assert hard != resource.RLIM_INFINITY, limit\n"
+        "        return pl.col('f00')\n"
+    )
+    _backtest(body, user="nobody")

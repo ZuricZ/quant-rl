@@ -11,11 +11,16 @@ the trusted parent over its stdin and stdout:
   then each block's newly realised targets just before that block.
 - A fresh process per session: no state carries from one run to another, so
   the checks, which compare runs, compare independent runs.
-- An empty environment, so the code sees none of the caller's variables.
-- Optionally a dedicated unprivileged user, which needs root. That user
-  cannot read the caller's memory, environment or private files. After each
-  session every process of that user is killed and its files in the shared
-  temporary directories are removed, so nothing persists between runs.
+- An empty environment, so the code sees none of the caller's variables,
+  and a private working directory, also its TMPDIR and HOME.
+- Optionally a dedicated unprivileged user, which needs root. The child
+  takes that user's primary group and no supplementary groups, so it cannot
+  read the caller's memory, environment or private files, including those
+  readable by root's group. After each session every process of that user
+  is killed and every file it owns, in any directory it can write, is
+  removed, so nothing persists between runs.
+- Resource limits on address space, processes and file size, set by the
+  child itself before it loads the agent's code (POSIX only).
 
 Not covered: network access and System V IPC.
 
@@ -25,11 +30,13 @@ Run as `python -m quantenv.sandbox`; `Sandbox` starts it.
 import concurrent.futures
 import contextlib
 import dataclasses
+import functools
 import io
 import os
 import pickle
 import shutil
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -46,7 +53,9 @@ from quantenv.walkforward import Block, Executor, Session
 _OK, _ERROR = b"0", b"1"
 _HEADER = struct.Struct("<cQ")  # Status, payload length.
 _MAX_ERROR = 2000
-_SHARED_TEMP = ("/tmp", "/var/tmp", "/dev/shm")
+_GiB = 2**30
+# Not walked for writable directories: kernel interfaces, not storage.
+_PSEUDO_FS = ("/proc", "/sys")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -58,13 +67,31 @@ class Sandbox:
         time_limit: Seconds per session, start-up included; the child is
             killed past it.
         user: Run the child as this user, or None for the caller's. The user
-            should be dedicated to this: all its processes are killed after
-            each session. Needs root.
+            should be dedicated to this: all its processes are killed and all
+            its files removed after each session. Needs root.
+        memory_bytes: RLIMIT_AS, the child's address space.
+        max_processes: RLIMIT_NPROC: processes and threads of the user's,
+            system-wide. polars starts one thread per core.
+        max_file_bytes: RLIMIT_FSIZE, the largest file the child can write.
     """
 
     code: str
     time_limit: float
     user: str | None = None
+    memory_bytes: int = 16 * _GiB
+    max_processes: int = dataclasses.field(
+        default_factory=lambda: max(256, 8 * (os.cpu_count() or 1))
+    )
+    max_file_bytes: int = _GiB
+
+    @property
+    def limits(self) -> dict[str, int]:
+        """The child's resource limits, by `resource` constant name."""
+        return {
+            "RLIMIT_AS": self.memory_bytes,
+            "RLIMIT_NPROC": self.max_processes,
+            "RLIMIT_FSIZE": self.max_file_bytes,
+        }
 
     @contextlib.contextmanager
     def session(self, timestamp: str) -> Iterator[Session]:
@@ -80,20 +107,30 @@ class Sandbox:
             AlphaError: If the code fails to compile or a step fails.
             AlphaTimeout: If the session runs past its time limit.
         """
-        proc = subprocess.Popen(
-            [sys.executable, "-I", "-m", "quantenv.sandbox"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            env={},
-            cwd=tempfile.gettempdir(),
-            user=self.user,
-            start_new_session=True,
-        )
+        workdir = tempfile.mkdtemp(prefix="quantenv-session-")
+        identity = {}
+        if self.user is not None:
+            uid, gid = _ids(self.user)
+            os.chown(workdir, uid, gid)
+            identity = {"user": uid, "group": gid, "extra_groups": []}
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-I", "-m", "quantenv.sandbox"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                env={"TMPDIR": workdir, "HOME": workdir},
+                cwd=workdir,
+                start_new_session=True,
+                **identity,
+            )
+        except BaseException:
+            shutil.rmtree(workdir, ignore_errors=True)
+            raise
         io_thread = concurrent.futures.ThreadPoolExecutor(1)
         child = _Child(proc, io_thread, time.monotonic() + self.time_limit)
         try:
-            child.request(("start", self.code, timestamp))
+            child.request(("start", self.code, timestamp, self.limits))
             yield child
         finally:
             io_thread.shutdown(wait=False, cancel_futures=True)
@@ -101,6 +138,7 @@ class Sandbox:
             proc.wait()
             if self.user is not None:
                 _clean_up(self.user)
+            shutil.rmtree(workdir, ignore_errors=True)
 
 
 class _Child:
@@ -168,8 +206,57 @@ def _read_exactly(stream: BinaryIO, n: int) -> bytes:
     return data
 
 
+def _ids(user: str) -> tuple[int, int]:
+    """The uid and primary gid of `user`."""
+    import pwd  # POSIX only, like running as another user.
+
+    entry = pwd.getpwnam(user)
+    return entry.pw_uid, entry.pw_gid
+
+
+def _permits(st: os.stat_result, uid: int, gid: int, mode: int) -> bool:
+    """Whether `uid` with only group `gid` has every bit of `mode` (an rwx
+    triple, e.g. 0o3 for write and search) on a file."""
+    if st.st_uid == uid:
+        shift = 6
+    elif st.st_gid == gid:
+        shift = 3
+    else:
+        shift = 0
+    return (st.st_mode >> shift) & mode == mode
+
+
+@functools.cache
+def _writable_dirs(uid: int, gid: int) -> tuple[str, ...]:
+    """Every directory `uid` can reach and create entries in.
+
+    These are the only places a child running as `uid` can leave a file.
+    Walks the whole file system once per process, pruning what the user
+    cannot enter. Directories the user creates later lie inside these, so
+    sweeping these removes them too.
+    """
+    found = []
+    for root, dirs, _ in os.walk("/"):
+        keep = []
+        for name in dirs:
+            path = os.path.join(root, name)
+            if path in _PSEUDO_FS:
+                continue
+            try:
+                st = os.lstat(path)
+            except OSError:
+                continue
+            if not stat.S_ISDIR(st.st_mode) or not _permits(st, uid, gid, 0o1):
+                continue
+            keep.append(name)
+            if _permits(st, uid, gid, 0o3):
+                found.append(path)
+        dirs[:] = keep
+    return tuple(found)
+
+
 def _clean_up(user: str) -> None:
-    """Kills every process of `user` and removes its shared temporary files."""
+    """Kills every process of `user` and removes every file it owns."""
     subprocess.run(
         [sys.executable, "-I", "-c", "import os, signal; os.kill(-1, signal.SIGKILL)"],
         env={},
@@ -178,19 +265,32 @@ def _clean_up(user: str) -> None:
         stderr=subprocess.DEVNULL,
         check=False,
     )
-    import pwd  # POSIX only, like running as another user.
-
-    uid = pwd.getpwnam(user).pw_uid
-    for directory in {tempfile.gettempdir(), *_SHARED_TEMP}:
-        with contextlib.suppress(FileNotFoundError), os.scandir(directory) as entries:
-            for entry in entries:
+    uid, gid = _ids(user)
+    for directory in _writable_dirs(uid, gid):
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
                 if entry.stat(follow_symlinks=False).st_uid != uid:
                     continue
                 if entry.is_dir(follow_symlinks=False):
                     shutil.rmtree(entry.path, ignore_errors=True)
                 else:
-                    with contextlib.suppress(FileNotFoundError):
-                        os.unlink(entry.path)
+                    os.unlink(entry.path)
+            except FileNotFoundError:
+                continue
+
+
+def _limit(limits: dict[str, int]) -> None:
+    """Lowers this process's soft and hard resource limits (POSIX only)."""
+    if os.name != "posix":
+        return
+    import resource
+
+    for name, value in limits.items():
+        resource.setrlimit(getattr(resource, name), (value, value))
 
 
 def _reply(out: BinaryIO, status: bytes, payload: bytes) -> None:
@@ -219,7 +319,8 @@ def _serve(requests: BinaryIO, out: BinaryIO) -> None:
             return
         try:
             if op == "start":
-                code, timestamp = args
+                code, timestamp, limits = args
+                _limit(limits)
                 executor = Executor(compile_alpha(code), timestamp)
                 result = None
             else:
