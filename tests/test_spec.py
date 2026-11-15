@@ -162,3 +162,26 @@ def test_screening_alpha_is_not_flagged_and_leaky_baseline_is(seed):
         )
     leak = _local(baselines.column_code(leaky))
     assert checks.column_dependence(leak, syn.panel, [leaky], WF, seed=1)
+
+
+def test_alpha_gets_a_seeded_generator_and_is_not_flagged(data):
+    # Alphas should draw randomness from self.rng, seeded per step by the
+    # environment, rather than from global RNGs.
+    real = data.truth.real[0]
+    code = (
+        "class Noisy(Alpha):\n"
+        "    def features(self, df):\n"
+        "        return df.with_columns(jitter=pl.Series(self.rng.normal(size=df.height)))\n"
+        "    def fit(self, train):\n"
+        "        self.scale = 0.1 + 0.01 * self.rng.random()\n"
+        "    def predict(self, df):\n"
+        f"        noise = pl.Series(self.rng.normal(size=df.height))\n"
+        f"        return pl.col({real!r}) + self.scale * (pl.col('jitter') + noise)\n"
+    )
+    runner = _local(code)
+    first = walkforward.run(runner, data.panel, WF).predictions
+    assert walkforward.run(runner, data.panel, WF).predictions.equals(first)
+    assert not checks.column_dependence(
+        runner, data.panel, [data.truth.leaky], WF, seed=0
+    )
+    assert not checks.truncation(runner, data.panel, WF, seed=0)

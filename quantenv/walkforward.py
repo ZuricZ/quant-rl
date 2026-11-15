@@ -122,8 +122,9 @@ class Executor:
         self._labels: list[pl.Series] = []
 
     def features(self, observable: pl.DataFrame) -> pl.DataFrame:
-        _seed(0)
-        out = _call(self._cls().features, observable)
+        alpha = self._cls()
+        _seed(alpha, 0)
+        out = _call(alpha.features, observable)
         if not isinstance(out, pl.DataFrame):
             raise AlphaError(
                 f"features must return pl.DataFrame, got {type(out).__name__}"
@@ -143,9 +144,9 @@ class Executor:
             pl.concat(self._labels)
         )
         model = self._cls()
-        _seed(block.index + 1)
+        _seed(model, block.index + 1)
         _call(model.fit, train)
-        _seed(block.index + 1)
+        _seed(model, block.index + 1)
         rows = between(self._engineered, ts, block.start, block.end)
         out = _call(model.predict, rows)
         try:
@@ -310,9 +311,16 @@ def _call(method, df: pl.DataFrame):
         raise AlphaError(f"{method.__name__} raised: {e!r}") from e
 
 
-def _seed(n: int) -> None:
-    # Agent code may draw from either global RNG, the stdlib's or numpy's.
-    # Seeding per step keeps every step's draws identical across reruns, even
-    # when an earlier step drew a different amount (as on a truncated panel).
+def _seed(alpha: Alpha, n: int) -> None:
+    """Gives `alpha` a fresh generator seeded with `n`, for the next step.
+
+    Seeding per step keeps every step's draws identical across reruns, even
+    when an earlier step drew a different amount (as on a truncated panel).
+    Agent code should draw from `alpha.rng`. The global generators, stdlib's
+    and numpy's, are reseeded too, as a fallback for code that uses them
+    anyway; this runs in the sandbox's own process (or the caller's, with
+    `Local`), not the environment's.
+    """
+    alpha.rng = np.random.default_rng(n)
     random.seed(n)
     np.random.seed(n)

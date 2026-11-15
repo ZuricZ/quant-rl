@@ -2,6 +2,7 @@
 
 from typing import Any
 
+import numpy as np
 import polars as pl
 
 
@@ -19,7 +20,15 @@ class Alpha:
     The environment calls `features` once on the whole panel, then, for each
     walk-forward block, makes a fresh instance, calls `fit` on past rows and
     `predict` on the block.
+
+    Attributes:
+        rng: Random generator for the current step, set by the environment
+            before each of `features`, `fit` and `predict` and seeded from the
+            step, so every rerun draws the same numbers. Draw randomness from
+            it rather than from global generators.
     """
+
+    rng: np.random.Generator
 
     def features(self, df: pl.DataFrame) -> pl.DataFrame:
         """Feature engineering.

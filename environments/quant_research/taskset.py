@@ -80,6 +80,8 @@ before t.
 `fwd_return`. Keep fitted state on `self`.
 - `predict(df)` gets the engineered rows of one block and returns one score \
 per row, in row order, as a `pl.Series` or a `pl.Expr` evaluated on `df`.
+- For randomness, use `self.rng`, a `numpy.random.Generator` that the \
+environment seeds before each call, so reruns draw the same numbers.
 
 The environment runs the alpha walk-forward: `features` once, then for each \
 block of {refit_every} timestamps a fresh instance is fit on all earlier rows \

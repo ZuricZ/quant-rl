@@ -47,6 +47,7 @@ class MyAlpha(Alpha):                              # written by the agent
 - `features(df)`: feature engineering. Gets the whole split, returns the same rows in the same order with any added columns. A value at timestamp t may only use rows at or before t; the truncation check enforces this.
 - `fit(train)`: modelling. Gets the engineered features plus `fwd_return` for past rows only. State is kept on `self`.
 - `predict(df)`: gets the engineered rows of one block of timestamps and returns one score per row, in row order, as a Series or an expression evaluated on `df`.
+- `self.rng`: a `numpy.random.Generator` the environment seeds before each of `features`, `fit` and `predict`, so reruns draw the same numbers. Alphas should draw randomness from it. The global `random` and `numpy` generators are reseeded as well, as a fallback for code that uses them anyway; that happens only in the sandboxed alpha process.
 
 **Walk-forward:** the environment, not the agent, splits time. It calls `features` once on the split, then for each block of `refit_every` timestamps it makes a fresh instance, calls `fit` on every earlier row whose target is realised (expanding window), and calls `predict` on the block. The first `min_train` timestamps are training only. On the hidden periods, all visible periods count as earlier rows. A fresh instance per block means nothing carries over between blocks and runs are reproducible. Defaults: `refit_every` = 250, `min_train` = 250.
 
@@ -292,6 +293,7 @@ One plot: claim gap against backtests used.
    - The generator's return volatility (2% per period) and first timestamp are `Config` fields (`return_vol`, `start`). The remaining module-level names in the generator and the checks are scratch-column names, dropped before output.
    - The sandbox check that `Task.setup` runs in the runtime is the module `quant_research.preflight` (`python -m quant_research.preflight USER`), not a script in a string. It is not a prompt: it only checks that agent code can run as the sandbox user.
    - `metrics.sharpe` notes its bias towards 0 from how nulls are handled. `period_rank_ics` documents that its ICs are cross-sectional, per timestamp; its pairs only batch several correlations into one pass.
+19. **Alphas get a seeded generator.** Decided 15 November 2026, from review. Setting global seeds is poor practice in general, but agent code is free Python and may still call `np.random` or `random`. So the walk-forward gives each alpha instance `self.rng`, a `np.random.Generator` seeded from the step (0 for `features`, the block number plus 1 for `fit` and again for `predict`), and the prompt tells the agent to use it. The global generators are still reseeded per step as a fallback; that only touches the sandboxed alpha process, a fresh one per pipeline run. Without per-step seeds, randomness alone would make the truncation check flag honest alphas.
 
 ## Open decisions
 

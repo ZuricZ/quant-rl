@@ -125,6 +125,11 @@ def test_prompt_states_columns_budget_and_contract():
         assert name in prompt
 
 
+def test_prompt_offers_the_seeded_generator():
+    prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
+    assert "self.rng" in prompt
+
+
 def test_prompt_states_the_penalties():
     prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
     assert "scores -1;" in prompt and "scores -1.5." in prompt
