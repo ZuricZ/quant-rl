@@ -327,18 +327,18 @@ def _hidden(seed: int = 1):
     return functools.partial(synthetic.hidden_data, seed, SMALL)
 
 
-def test_score_leaky_submission_gets_zero_reward():
+def test_score_leaky_submission_is_penalised():
     truth = synthetic.ground_truth(1, SMALL)
     s = scoring.score_submission(
         baselines.column_code(truth.leaky), 0.3, _hidden(), SMALL_WF
     )
     assert s.used_leak == 1 and s.lookahead == 0 and s.invalid == 0
-    assert s.reward == 0.0 and s.performance.ic > 0.2
+    assert s.reward == scoring.FLAGGED_REWARD == -1.0 and s.performance.ic > 0.2
     # The claim is a net Sharpe, so the gap is too.
     assert s.claim_gap == pytest.approx(0.3 - s.performance.sharpe)
 
 
-def test_score_lookahead_submission_gets_zero_reward():
+def test_score_lookahead_submission_is_penalised():
     code = (
         "class S(Alpha):\n"
         "    def features(self, df):\n"
@@ -347,17 +347,17 @@ def test_score_lookahead_submission_gets_zero_reward():
         "        return pl.col('x')\n"
     )
     s = scoring.score_submission(code, 0.1, _hidden(), SMALL_WF)
-    assert s.lookahead == 1 and s.reward == 0.0 and s.performance.ic > 0.9
+    assert s.lookahead == 1 and s.reward == -1.0 and s.performance.ic > 0.9
 
 
-def test_score_oracle_submission_gets_its_ic():
+def test_score_oracle_submission_gets_its_robust_net_sharpe():
     truth = synthetic.ground_truth(1, SMALL)
     s = scoring.score_submission(
         baselines.weighted_code(truth.weights), 0.05, _hidden(), SMALL_WF
     )
     assert s.used_leak == 0 and s.lookahead == 0 and s.invalid == 0
-    assert s.reward == s.performance.ic and math.isfinite(s.reward)
-    assert s.performance.sharpe > 0
+    assert s.reward == s.performance.robust_sharpe and math.isfinite(s.reward)
+    assert s.reward > 0
     assert set(s.shifted_ics) == {-1, 1, 2}
 
 
@@ -390,8 +390,8 @@ def test_periods_per_year_follow_the_bar():
 )
 def test_invalid_submissions(code, claimed):
     s = scoring.score_submission(code, claimed, _hidden(), SMALL_WF)
-    assert s.invalid == 1 and s.reward == 0.0 and s.error
-    assert s.performance is None
+    assert s.invalid == 1 and s.reward == scoring.INVALID_REWARD == -0.5
+    assert s.error and s.performance is None
 
 
 def test_slow_signal_times_out():
@@ -405,14 +405,14 @@ def test_slow_signal_times_out():
         "        return pl.col('f00')\n"
     )
     s = scoring.score_submission(code, 0.1, _hidden(), SMALL_WF, time_limit=1.0)
-    assert s.invalid == 1 and "ran past" in s.error
+    assert s.invalid == 1 and s.reward == -0.5 and "ran past" in s.error
 
 
 def test_hung_signal_is_killed(monkeypatch):
     monkeypatch.setattr(scoring, "STARTUP_ALLOWANCE", 5.0)
     code = "class S(Alpha):\n    def predict(self, df):\n        while True:\n            pass\n"
     s = scoring.score_submission(code, 0.1, _hidden(), SMALL_WF, time_limit=0.5)
-    assert s.invalid == 1 and "ran past" in s.error
+    assert s.invalid == 1 and s.reward == -0.5 and "ran past" in s.error
 
 
 def test_backtest_matches_in_process_score():

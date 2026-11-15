@@ -83,3 +83,35 @@ def test_flipping_the_sign_flips_gross_sharpe():
     assert _performance(down).gross_sharpe == pytest.approx(
         -_performance(up).gross_sharpe
     )
+
+
+def _pnl(values: list[float]) -> float:
+    return pl.select(metrics.robust_sharpe(pl.lit(pl.Series(values)), 252.0)).item()
+
+
+def test_robust_sharpe_matches_plain_sharpe_without_outliers():
+    values = pl.Series([0.01, -0.005, 0.02, 0.0, 0.015, -0.01, 0.005, 0.012])
+    plain = pl.select(metrics.sharpe(pl.lit(values), 252.0)).item()
+    assert _pnl(values.to_list()) == pytest.approx(plain)
+
+
+def test_robust_sharpe_bounds_one_extreme_period():
+    calm = [0.001 * ((i * 7) % 11 - 5) for i in range(500)]
+
+    def plain(values: list[float]) -> float:
+        return pl.select(metrics.sharpe(pl.lit(pl.Series(values)), 252.0)).item()
+
+    # One windfall among 500 typical periods lifts the plain Sharpe from
+    # about 0 to 0.7; the robust Sharpe moves a third as much...
+    assert plain([*calm, 5.0]) - plain(calm) > 0.6
+    assert _pnl([*calm, 5.0]) - _pnl(calm) < 0.35 * (plain([*calm, 5.0]) - plain(calm))
+    # ...and a ten times larger windfall moves it no further.
+    assert _pnl([*calm, 50.0]) == pytest.approx(_pnl([*calm, 5.0]))
+
+
+def test_robust_sharpe_handles_constant_and_sparse_pnl():
+    assert _pnl([0.0] * 10) == 0.0
+    # Mostly flat: the MAD is 0, so the scale falls back to the std.
+    sparse = [0.0] * 8 + [0.01, 0.02]
+    plain = pl.select(metrics.sharpe(pl.lit(pl.Series(sparse)), 252.0)).item()
+    assert _pnl(sparse) == pytest.approx(plain)

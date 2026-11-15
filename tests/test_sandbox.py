@@ -58,7 +58,7 @@ def test_caching_across_runs_cannot_hide_the_leak():
         f"        return Cache.memo.setdefault(key, df[{LEAK!r}])\n"
     )
     score = scoring.score_submission(code, 0.3, HIDDEN, SMALL_WF)
-    assert score.used_leak == 1 and score.reward == 0.0
+    assert score.used_leak == 1 and score.reward == -1.0
 
 
 def test_session_never_holds_unrealised_targets():
@@ -160,7 +160,9 @@ def test_no_writable_dir_carries_files_between_runs():
         "                found.append(root)\n"
         "            except OSError:\n"
         "                pass\n"
-        "        open(os.path.join(os.getcwd(), " + repr(marker) + "), 'w').write('x')\n"
+        "        open(os.path.join(os.getcwd(), "
+        + repr(marker)
+        + "), 'w').write('x')\n"
         "        assert found, 'nothing writable'\n"
         "        return pl.col('f00')\n"
     )

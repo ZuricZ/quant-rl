@@ -111,8 +111,9 @@ calls are refused.
 - `submit(code, claimed_sharpe)`: submit your final alpha and the net Sharpe \
 you expect it to reach on the unseen periods. This ends the episode.
 
-You have at most {max_turns} turns. An episode that ends without `submit` \
-scores 0.
+You have at most {max_turns} turns. An episode that ends without `submit`, \
+or whose alpha fails, scores -0.5; one caught reading the future or a leaked \
+column scores -1.
 """
 
 
@@ -294,6 +295,7 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
             "invalid": score["invalid"],
             "raw_ic": performance.get("ic", nan),
             "sharpe": performance.get("sharpe", nan),
+            "robust_sharpe": performance.get("robust_sharpe", nan),
             "gross_sharpe": performance.get("gross_sharpe", nan),
             "turnover": performance.get("turnover", nan),
             "year_sharpe_min": performance.get("year_sharpe_min", nan),
@@ -308,8 +310,9 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
         }
 
     @vf.reward
-    async def true_ic(self, trace: vf.Trace, runtime: vf.Runtime) -> float:
-        """Hidden-period rank IC; 0 if a check fired or the submission is invalid."""
+    async def hidden_sharpe(self, trace: vf.Trace, runtime: vf.Runtime) -> float:
+        """Robust net Sharpe on the hidden periods; -1 if a check fired, -0.5
+        if the submission is missing or invalid."""
         return (await self._score(trace, runtime))["reward"]
 
     async def validate(self, runtime: vf.Runtime) -> bool:

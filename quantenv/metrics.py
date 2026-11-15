@@ -7,6 +7,10 @@ import polars as pl
 
 _WEIGHT = "_weight"
 _PNL = "_pnl"
+# Robust Sharpe: P&L is winsorised at the median plus or minus this many
+# robust standard deviations (1.4826 x MAD, the std for Gaussian data).
+WINSOR_SIGMAS = 5.0
+_MAD_TO_SD = 1.4826
 
 
 def period_rank_ics(
@@ -86,6 +90,7 @@ class Performance:
     Attributes:
         ic: Mean per-period rank IC (see `mean_rank_ics`).
         sharpe: Net of costs.
+        robust_sharpe: Net of costs, on winsorised P&L (see `robust_sharpe`).
         gross_sharpe: Before costs.
         turnover: Mean per-period turnover, sum of |weight change|; 2 is a
             full reversal of a unit-gross book.
@@ -98,6 +103,7 @@ class Performance:
 
     ic: float
     sharpe: float
+    robust_sharpe: float
     gross_sharpe: float
     turnover: float
     year_sharpe_min: float
@@ -130,6 +136,29 @@ def sharpe(pnl: pl.Expr, periods_per_year: float) -> pl.Expr:
     """Annualised Sharpe ratio of per-period P&L; 0 if it does not vary."""
     ratio = pnl.mean() / pnl.std() * math.sqrt(periods_per_year)
     return ratio.fill_nan(0.0).fill_null(0.0)
+
+
+def robust_sharpe(pnl: pl.Expr, periods_per_year: float) -> pl.Expr:
+    """Annualised Sharpe ratio of winsorised per-period P&L.
+
+    P&L is clipped to the median plus or minus `WINSOR_SIGMAS` robust
+    standard deviations (1.4826 x the median absolute deviation, or the plain
+    standard deviation when that is 0, as for mostly flat P&L). For Gaussian
+    P&L this clips almost nothing and equals `sharpe`; with fat tails, a few
+    extreme periods cannot carry the mean or the spread.
+
+    Args:
+        pnl: Per-period P&L.
+        periods_per_year: For annualising.
+
+    Returns:
+        The robust Sharpe ratio; 0 if the clipped P&L does not vary.
+    """
+    median = pnl.median()
+    mad = (pnl - median).abs().median()
+    scale = pl.when(mad > 0).then(_MAD_TO_SD * mad).otherwise(pnl.std())
+    bound = WINSOR_SIGMAS * scale
+    return sharpe(pnl.clip(median - bound, median + bound), periods_per_year)
 
 
 def performance(
@@ -193,6 +222,7 @@ def performance(
     totals = periods.select(
         pl.col("ic").mean(),
         sharpe(pl.col(_PNL), periods_per_year).alias("sharpe"),
+        robust_sharpe(pl.col(_PNL), periods_per_year).alias("robust_sharpe"),
         sharpe(pl.col("gross"), periods_per_year).alias("gross_sharpe"),
         pl.col("turnover").mean(),
         (cumulative.cum_max().clip(lower_bound=0.0) - cumulative)

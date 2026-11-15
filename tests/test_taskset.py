@@ -186,7 +186,7 @@ def test_no_submission_is_invalid(task):
     trace = _trace(task, ResearchState(backtests_used=3))
     # Nothing to grade, so no runtime is needed.
     metrics = asyncio.run(task.outcome(trace, None))
-    assert asyncio.run(task.true_ic(trace, None)) == 0.0
+    assert asyncio.run(task.hidden_sharpe(trace, None)) == -0.5
     assert metrics["invalid"] == 1
     assert metrics["backtests_used"] == 3
     assert math.isnan(metrics["sharpe"]) and math.isnan(metrics["claim_gap"])
