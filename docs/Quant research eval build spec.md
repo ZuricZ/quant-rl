@@ -279,6 +279,7 @@ One plot: claim gap against backtests used.
 
 1. ~~**Truncation cut points.**~~ Settled by Decision 7.
 2. **Bias in rank IC.** The current estimate shrinks towards 0 (empty or constant periods count as 0; per-period correlations are attenuated). Decide whether to average over valid periods only, weight by asset count, or report coverage alongside.
+3. **Time limit per hidden run.** 60 s per pipeline run on 2.2M rows is tight for alphas that refit on all earlier rows in each of the 44 blocks. The template takes about 25 s per full run alone and exceeded 60 s on every task with two scorers running in parallel on 4 cores. Decide whether to scale the limit with the hidden size, measure CPU time rather than wall time, or run one scorer per core budget.
 
 ## Stack notes
 
@@ -294,4 +295,3 @@ Read from the repositories on 10 to 12 November 2026. Recheck before relying on 
 ## After this week
 
 Train on the environment with prime-rl and compare two rewards: scoring every task on one reused dataset, against a fresh dataset per task. The question is whether the reused dataset gets memorised. Nothing in this spec depends on that.
-3. **Time limit per hidden run.** 60 s per pipeline run on 2.2M rows is tight for alphas that refit on all earlier rows in each of the 44 blocks. The template takes about 25 s per full run alone and exceeded 60 s on every task with two scorers running in parallel on 4 cores. Decide whether to scale the limit with the hidden size, measure CPU time rather than wall time, or run one scorer per core budget.
