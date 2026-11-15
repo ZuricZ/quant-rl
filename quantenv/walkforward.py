@@ -29,6 +29,10 @@ from quantenv.alpha import Alpha, AlphaError
 from quantenv.panel import Panel, between
 
 PREDICTION = "prediction"
+# Rank IC drops null predictions, so an alpha that predicts only where it is
+# confident would be scored on its best rows alone. A run may leave at most
+# this share of its rows null (NaN and inf count as null).
+MAX_NULL_SHARE = 0.1
 
 
 @dataclasses.dataclass(frozen=True)
@@ -260,7 +264,8 @@ def run(
         The engineered frame and the predictions.
 
     Raises:
-        AlphaError: If any step raises or returns a bad value.
+        AlphaError: If any step raises or returns a bad value, or more than
+            `MAX_NULL_SHARE` of the predictions are null.
     """
     s = panel.schema
     start = start_timestamp(panel, wf, start)
@@ -270,6 +275,11 @@ def run(
         else:
             session.use(engineered)
         out = predict_blocks(session, panel, blocks(panel, wf, start))
+    if out.null_count() > MAX_NULL_SHARE * out.len():
+        raise AlphaError(
+            f"{out.null_count() / out.len():.0%} of predictions are null; "
+            f"at most {MAX_NULL_SHARE:.0%} may be"
+        )
     stamps = between(panel.frame.select(s.timestamp), s.timestamp, start)
     return Run(start, engineered, stamps.with_columns(out))
 

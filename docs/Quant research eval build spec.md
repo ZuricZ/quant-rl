@@ -27,7 +27,7 @@ Build a verifiers environment where an agent researches a trading alpha on a sim
 
 The episode also ends after 30 turns. An episode that ends without `submit` is invalid.
 
-**Data format:** polars, long format, one row per (timestamp, asset), sorted by timestamp then asset. `timestamp` is a Date for daily bars or a Datetime for intraday bars. Columns the agent sees: `timestamp`, `asset`, the features, and `ret`, the return realised at that timestamp (from the previous period to this one), which is known at that time. The target, `fwd_return` (from this period to the next), is shown only to `fit`, and only for rows whose target was already realised.
+**Data format:** polars, long format, one row per (timestamp, asset), sorted by timestamp then asset, with every asset at every timestamp. `Panel` rejects anything else (Decision 9). `timestamp` is a Date for daily bars or a Datetime for intraday bars. Columns the agent sees: `timestamp`, `asset`, the features, and `ret`, the return realised at that timestamp (from the previous period to this one), which is known at that time. The target, `fwd_return` (from this period to the next), is shown only to `fit`, and only for rows whose target was already realised.
 
 **Alpha format:** the code defines one subclass of the predefined base class `Alpha`:
 
@@ -216,6 +216,9 @@ One plot: claim gap against backtests used.
    | Leak alone | 0.30 | 0.30 | ≥ 83 | 100% |
 
    The z-score alone is not enough. It grows with the square root of the number of periods, so on 10,000 hidden periods a systematic 0.7% dilution from an honest screen could reach z ≈ 6. The relative floor is what protects honest alphas. The 5% floor sits about seven times above the largest honest drop measured and three times below the smallest leak blend measured. The cost: a leak blended in so lightly that it improves IC by less than 5% goes unflagged, and the alpha keeps that small gain.
+9. **Panels are dense grids, and predictions must cover them.** Decided 15 November 2026. The generator (`shift(n_assets)` for `ret`), scoring and the checks line frames up by row position. Until now `Panel` checked only that the timestamps were sorted, so a ragged or duplicated panel from real data would have been scored silently wrong.
+   - `Panel.__post_init__` now checks, in one lazy pass, that keys strictly increase in (timestamp, asset) order, which also makes them unique, and that rows = timestamps × assets. Otherwise it raises `ValueError`. This costs 13 ms on the 2.2M-row hidden panel; a score builds about 10 panels (the full panel, the 8 truncations and the permuted copy), so about 0.1 s per score.
+   - Predictions: the walk-forward driver already required one value per row. A run may now leave at most `MAX_NULL_SHARE` = 10% of its predictions null (NaN and inf count as null), or it fails as invalid. Rank IC drops null rows, so without a cap an alpha could predict only where it is confident and be scored on those rows alone. Ten percent leaves room for warm-up nulls from rolling features. All-null and all-NaN alphas are now invalid rather than scoring 0.
 
 ## Open decisions
 

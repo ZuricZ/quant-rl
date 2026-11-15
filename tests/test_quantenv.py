@@ -53,6 +53,34 @@ def test_panel_rejects_unsorted_frame():
         Panel(frame, Schema(features=()))
 
 
+@pytest.mark.parametrize(
+    "timestamps, assets, problem",
+    [
+        ([1, 1, 2, 2], ["a", "a", "a", "b"], "duplicate"),
+        ([1, 1, 2, 2], ["b", "a", "a", "b"], "assets out of order"),
+        ([1, 1, 2], ["a", "b", "a"], "missing row"),
+    ],
+)
+def test_panel_requires_a_dense_sorted_grid(timestamps, assets, problem):
+    frame = pl.DataFrame({"timestamp": timestamps, "asset": assets})
+    with pytest.raises(ValueError):
+        Panel(frame, Schema(features=()))
+
+
+def test_dense_grid_is_accepted():
+    frame = pl.DataFrame({"timestamp": [1, 1, 2, 2], "asset": ["a", "b", "a", "b"]})
+    assert Panel(frame, Schema(features=())).frame.height == 4
+
+
+def test_run_with_mostly_null_predictions_is_rejected(data):
+    # Rank IC drops nulls, so an alpha could score only where it is confident.
+    code = _predict_code(
+        "pl.when(pl.col('f00') > 1.5).then(pl.col('f00')).otherwise(None)"
+    )
+    with pytest.raises(AlphaError, match="null"):
+        walkforward.run(_local(code), data.panel, WF)
+
+
 def test_until_is_a_prefix(data):
     cut = data.panel.timestamps[10]
     short = data.panel.until(cut)
@@ -119,17 +147,21 @@ def test_negative_seed_rejected():
 # Walk-forward.
 
 
+def test_constant_predictions_score_zero(data):
+    assert _ic(_predict_code("pl.lit(1.0)"), data.panel) == 0.0
+
+
 @pytest.mark.parametrize(
     "body",
     [
-        "pl.lit(1.0)",
         "pl.lit(None, dtype=pl.Float64)",
         "pl.col('f00') * float('inf')",
         "pl.col('f00') * float('nan')",
     ],
 )
-def test_degenerate_predictions_score_zero(body, data):
-    assert _ic(_predict_code(body), data.panel) == 0.0
+def test_non_finite_predictions_are_rejected(body, data):
+    with pytest.raises(AlphaError, match="null"):
+        _ic(_predict_code(body), data.panel)
 
 
 def test_series_and_expression_outputs_agree(data):
