@@ -23,7 +23,6 @@ from typing import Any, Literal
 
 import verifiers.v1 as vf
 from pydantic import Field, SecretStr, field_validator
-from verifiers.v1.mcp.launch import _install_in_sandbox
 
 from quant_research.servers.research import (
     ResearchConfig,
@@ -41,7 +40,8 @@ MAX_TURNS = 30
 EVAL_TASKS = 30
 # What pydantic writes in place of a SecretStr when dumping.
 _MASK = "**********"
-IMAGE = "python:3.12-slim"
+# Built from the repository's Dockerfile; holds this package.
+IMAGE = "quant-research:0.1.0"
 SCORING_TIMEOUT = 900.0
 _SCORE = "score"
 
@@ -150,12 +150,12 @@ async def grade(
 ) -> dict[str, Any]:
     """Scores a submission on the hidden periods inside `runtime`.
 
-    The grader runs in the Python environment the toolset was installed into,
-    which holds this package. Installing is a no-op once the toolset has run.
+    The grader runs with the task image's own `python`, which has this
+    package installed (see the repository's Dockerfile).
 
     Args:
-        tools: The toolset's config, to locate that environment.
-        runtime: The rollout's runtime.
+        tools: The toolset's config, for the sandbox user.
+        runtime: A runtime of the task image.
         seed: Dataset seed.
         code: Alpha code.
         claimed_sharpe: The claimed net Sharpe on unseen data.
@@ -167,7 +167,6 @@ async def grade(
         RuntimeError: If the grader itself fails. Bad alpha code does not
             raise; it scores as invalid.
     """
-    python = await _install_in_sandbox(ResearchToolset(tools), runtime)
     stem = f"/tmp/vf-grade-{uuid.uuid4().hex}"
     request = {
         "seed": seed,
@@ -177,7 +176,8 @@ async def grade(
     }
     await runtime.write(f"{stem}.json", json.dumps(request).encode())
     result = await runtime.run(
-        [python, "-m", "quant_research.grade", f"{stem}.json", f"{stem}.out.json"], {}
+        ["python", "-m", "quant_research.grade", f"{stem}.json", f"{stem}.out.json"],
+        {},
     )
     if result.exit_code != 0:
         raise RuntimeError(f"grader failed: {(result.stderr or result.stdout)[-2000:]}")
@@ -191,11 +191,15 @@ class QuantResearchTaskConfig(vf.TaskConfig):
         tools: The research toolset's settings, including the backtest budget.
         max_turns: Model turns per episode.
         secret: The taskset's secret; the taskset sets it on every task.
+        image: Task image, built from the repository's Dockerfile, which
+            installs this package; for a remote runtime, a registry
+            reference to it.
     """
 
     tools: ResearchConfig = ResearchConfig()
     max_turns: int = Field(MAX_TURNS, gt=0)
     secret: SecretStr | None = None
+    image: str = IMAGE
 
 
 class QuantResearchConfig(vf.TasksetConfig):
@@ -205,7 +209,8 @@ class QuantResearchConfig(vf.TasksetConfig):
         task: Settings passed to every task.
         split: "eval" is a fixed set of `EVAL_TASKS` tasks; "train" is
             infinite. Their datasets never coincide.
-        secret: Required. Dataset seeds are drawn from it, see
+        secret: Required; the taskset will not build without it. Dataset
+            seeds are drawn from it, see
             `synthetic.dataset_seed`. Runs that must share datasets, such as
             several models and `scripts/run_baselines.py --secret`, set the
             same value. Dumps show it masked; never show it to the agent.
@@ -213,14 +218,16 @@ class QuantResearchConfig(vf.TasksetConfig):
 
     task: QuantResearchTaskConfig = QuantResearchTaskConfig()
     split: Literal["train", "eval"] = "eval"
-    secret: SecretStr
+    # Optional only because verifiers' CLI builds this config with defaults
+    # before it reads the flags; the taskset refuses to build without it.
+    secret: SecretStr | None = None
 
     @field_validator("secret")
     @classmethod
-    def _not_masked(cls, secret: SecretStr) -> SecretStr:
+    def _not_masked(cls, secret: SecretStr | None) -> SecretStr | None:
         # A dumped config read back holds the mask, which would silently
         # become everyone's secret.
-        if not secret.get_secret_value() or secret.get_secret_value() == _MASK:
+        if secret is not None and secret.get_secret_value() in ("", _MASK):
             raise ValueError("secret is empty or masked; pass the real secret")
         return secret
 
@@ -332,6 +339,14 @@ class QuantResearchTaskset(vf.Taskset[QuantResearchTask, QuantResearchConfig]):
     """Task i of a split uses `synthetic.dataset_seed(i, secret, split)`. The
     eval split is tasks 0 to `EVAL_TASKS` - 1; the train split is infinite."""
 
+    def __init__(self, config: QuantResearchConfig) -> None:
+        if config.secret is None:
+            raise ValueError(
+                "the taskset needs a secret: set --env.taskset.secret "
+                "(--taskset.secret for vf-validate)"
+            )
+        super().__init__(config)
+
     @property
     def INFINITE(self) -> bool:  # noqa: N802 - the name verifiers reads.
         return self.config.split == "train"
@@ -352,7 +367,10 @@ class QuantResearchTaskset(vf.Taskset[QuantResearchTask, QuantResearchConfig]):
                     prompt=prompt(
                         description, task_config.tools.budget, task_config.max_turns
                     ),
-                    image=IMAGE,
+                    image=task_config.image,
+                    # Grade in a fresh container of the image, which agent
+                    # code never touched; the inputs come from the trace.
+                    scoring=vf.ScoringConfig(mode="isolated"),
                     timeout=vf.TaskTimeout(scoring=SCORING_TIMEOUT),
                 )
             )

@@ -5,6 +5,10 @@ import dataclasses
 import functools
 import json
 import math
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -14,7 +18,7 @@ pytest.importorskip("fcntl")
 
 import verifiers.v1 as vf  # noqa: E402
 
-from quant_research import grade  # noqa: E402
+from quant_research import grade, taskset  # noqa: E402
 from quant_research.servers.research import (  # noqa: E402
     ResearchConfig,
     ResearchData,
@@ -84,8 +88,11 @@ def test_eval_split_is_30_named_tasks_and_train_is_infinite():
 
 
 def test_secret_is_required_and_masked():
-    with pytest.raises(ValidationError):
-        QuantResearchConfig()
+    # verifiers' CLI builds the config with defaults before reading flags, so
+    # the field may be unset; the taskset refuses to build without it.
+    config = QuantResearchConfig()
+    with pytest.raises(ValueError, match="secret"):
+        QuantResearchTaskset(config)
     config = _config()
     assert SECRET not in config.model_dump_json()
     # A masked dump read back must fail loudly, not run on the mask.
@@ -215,3 +222,56 @@ def test_trace_of_a_real_task_serialises(task):
     trace = _trace(task, ResearchState(submitted=True, code=COLUMN, claimed_sharpe=0.1))
     asyncio.run(task.setup(trace, None))
     assert json.loads(trace.to_json())["task"]["data"]["name"] == "eval-0"
+
+
+class _LocalRuntime:
+    """The parts of vf.Runtime that grade() uses, run on this machine, as the
+    task image would: `python` is an interpreter with this package."""
+
+    def __init__(self, tmp_path):
+        self.argv: list[str] = []
+        self._bin = tmp_path / "bin"
+        self._bin.mkdir()
+        python = self._bin / "python"
+        python.write_text(f'#!/bin/sh\nexec {sys.executable} "$@"\n')
+        python.chmod(0o755)
+
+    async def write(self, path: str, data: bytes) -> None:
+        Path(path).write_bytes(data)
+
+    async def run(self, argv: list[str], env: dict[str, str]):
+        self.argv = argv
+        path = f"{self._bin}:{os.environ['PATH']}"
+        done = subprocess.run(
+            argv, env={**os.environ, "PATH": path}, capture_output=True, text=True
+        )
+        return vf.ProgramResult(
+            exit_code=done.returncode, stdout=done.stdout, stderr=done.stderr
+        )
+
+    async def read(self, path: str) -> bytes:
+        return Path(path).read_bytes()
+
+
+def test_grade_runs_the_images_python(tmp_path):
+    runtime = _LocalRuntime(tmp_path)
+    tools = ResearchConfig(sandbox_user=None)
+    seed = synthetic.dataset_seed(0, SECRET, "eval")
+    score = asyncio.run(taskset.grade(tools, runtime, seed, COLUMN, 0.5))
+    assert runtime.argv[:3] == ["python", "-m", "quant_research.grade"]
+    assert score["invalid"] == 0 and score["performance"]["sharpe"] is not None
+
+
+def test_tasks_use_the_configured_image():
+    task = next(iter(QuantResearchTaskset(_config())))
+    assert task.data.image == taskset.IMAGE == "quant-research:0.1.0"
+    other = QuantResearchConfig(
+        secret=SECRET, task=QuantResearchTaskConfig(image="registry.example/qr:1")
+    )
+    assert next(iter(QuantResearchTaskset(other))).data.image == "registry.example/qr:1"
+
+
+def test_scoring_runs_in_a_fresh_container():
+    # The grader must not run where agent code ran during the episode.
+    task = next(iter(QuantResearchTaskset(_config())))
+    assert task.scoring.mode == "isolated"
