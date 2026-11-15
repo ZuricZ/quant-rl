@@ -10,8 +10,8 @@ walk-forward and the checks, and runs the agent's code only through
 import dataclasses
 import math
 import multiprocessing as mp
+import secrets
 from typing import Any, Callable
-
 
 from quantenv import checks, metrics, walkforward
 from quantenv.alpha import AlphaError, AlphaTimeout
@@ -24,8 +24,8 @@ SCORE_TIME_LIMIT = 60.0
 # Allowance on top of the alpha limits for process start-up and loading the
 # data, after which a hung worker is killed.
 STARTUP_ALLOWANCE = 60.0
-# Pipeline runs in a score: base, column dependence, one per truncation point.
-SCORE_RUNS = 2 + len(checks.TRUNCATION_POINTS)
+# Pipeline runs in a score: base, column dependence, one per truncation cut.
+SCORE_RUNS = 2 + checks.N_CUTS
 
 Loader = Callable[[], EvalData]
 
@@ -204,9 +204,10 @@ def _score_worker(
 ) -> tuple[float, bool, bool, dict[int, float]]:
     data = load()
     panel, start = data.panel, data.start
+    seed = data.check_seed if data.check_seed is not None else secrets.randbits(64)
     base = walkforward.run(sandbox, panel, wf, start)
     used_leak = checks.column_dependence(
-        sandbox, panel, list(data.suspects), wf, start, base
+        sandbox, panel, list(data.suspects), wf, start, base, seed=seed
     )
-    lookahead = checks.truncation(sandbox, panel, wf, start, base)
+    lookahead = checks.truncation(sandbox, panel, wf, start, base, seed=seed)
     return _ic(panel, base), used_leak, lookahead, checks.shifted_ics(panel, base)

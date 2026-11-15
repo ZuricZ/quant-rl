@@ -229,10 +229,10 @@ def test_checks_work_on_a_plain_panel(plain_panel):
     peeking = _local(_predict_code("pl.col('peek')"))
     future = _local(_predict_code("pl.col('x').shift(-1).over('id')"))
 
-    assert not checks.column_dependence(honest, plain_panel, ["peek"], wf)
-    assert not checks.truncation(honest, plain_panel, wf)
-    assert checks.column_dependence(peeking, plain_panel, ["peek"], wf)
-    assert checks.truncation(future, plain_panel, wf)
+    assert not checks.column_dependence(honest, plain_panel, ["peek"], wf, seed=0)
+    assert not checks.truncation(honest, plain_panel, wf, seed=0)
+    assert checks.column_dependence(peeking, plain_panel, ["peek"], wf, seed=0)
+    assert checks.truncation(future, plain_panel, wf, seed=0)
     shifted = checks.shifted_ics(plain_panel, walkforward.run(peeking, plain_panel, wf))
     assert shifted[1] > 0.5 and abs(shifted[2]) < 0.1
 
@@ -240,7 +240,7 @@ def test_checks_work_on_a_plain_panel(plain_panel):
 def test_shuffle_keeps_each_periods_values(data):
     leaky = data.truth.leaky
     frame = data.panel.frame
-    shuffled = checks.shuffle_within_periods(frame, [leaky], "timestamp")
+    shuffled = checks.shuffle_within_periods(frame, [leaky], "timestamp", seed=0)
     assert shuffled.drop(leaky).equals(frame.drop(leaky))
     assert not shuffled.get_column(leaky).equals(frame.get_column(leaky))
 
@@ -253,7 +253,7 @@ def test_shuffle_keeps_each_periods_values(data):
 def test_tiny_leak_weight_is_caught(data):
     real, leaky = data.truth.real[0], data.truth.leaky
     code = _predict_code(f"pl.col({real!r}) + 1e-6 * pl.col({leaky!r})")
-    assert checks.column_dependence(_local(code), data.panel, [leaky], WF)
+    assert checks.column_dependence(_local(code), data.panel, [leaky], WF, seed=0)
 
 
 def test_whole_sample_normalisation_is_lookahead(data):
@@ -264,12 +264,12 @@ def test_whole_sample_normalisation_is_lookahead(data):
         "    def predict(self, df):\n"
         "        return pl.col('z') * pl.col('f00')\n"
     )
-    assert checks.truncation(_local(code), data.panel, WF)
+    assert checks.truncation(_local(code), data.panel, WF, seed=0)
 
 
 def test_no_suspects_means_no_dependence_flag(data):
     runner = _local(baselines.column_code(data.truth.leaky))
-    assert not checks.column_dependence(runner, data.panel, [], WF)
+    assert not checks.column_dependence(runner, data.panel, [], WF, seed=0)
 
 
 # Baselines.
@@ -364,3 +364,34 @@ def test_backtest_matches_in_process_score():
     assert scoring.backtest(code, load, SMALL_WF) == pytest.approx(
         _ic(code, data.panel, SMALL_WF)
     )
+
+
+def _peek_except(dates: list[str]) -> str:
+    """Alpha code that reads the next period's return on every date but `dates`."""
+    return (
+        "class Peek(Alpha):\n"
+        "    def features(self, df):\n"
+        f"        honest = pl.col('timestamp').cast(pl.String).is_in({dates!r})\n"
+        "        future = pl.col('ret').shift(-1).over('asset')\n"
+        "        return df.with_columns(\n"
+        "            pl.when(honest).then(pl.col('ret')).otherwise(future).alias('x'))\n"
+        "    def predict(self, df):\n"
+        "        return pl.col('x')\n"
+    )
+
+
+def test_lookahead_except_on_any_fixed_dates_is_caught():
+    # An alpha that knows where the truncation check cuts can be honest on
+    # exactly those dates. Cuts must be unpredictable to agent code.
+    syn = synthetic.generate(1, SMALL, hidden=True)
+    stamps = syn.panel.timestamps
+    predicted = stamps.filter(stamps >= syn.hidden_start).cast(pl.String)
+    fixed_sets = [
+        [predicted[int(p * len(predicted))] for p in (0.3, 0.7)],  # Old public cuts.
+        predicted.gather_every(10).to_list(),
+        predicted.sample(40, seed=3).to_list(),
+    ]
+    for dates in fixed_sets:
+        s = scoring.score_submission(_peek_except(dates), 0.1, _hidden(), SMALL_WF)
+        assert s.invalid == 0, s.error
+        assert s.lookahead == 1, dates[:3]

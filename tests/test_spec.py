@@ -45,7 +45,7 @@ def test_leaky_feature_scores_high_and_is_caught(data):
     assert leaky is not None
     code = baselines.column_code(leaky)
     assert _ic(code, data) == pytest.approx(0.3, abs=0.02)
-    assert checks.column_dependence(_local(code), data.panel, [leaky], WF)
+    assert checks.column_dependence(_local(code), data.panel, [leaky], WF, seed=0)
 
 
 def test_signal_ignoring_leak_is_not_flagged(data):
@@ -63,8 +63,8 @@ def test_signal_ignoring_leak_is_not_flagged(data):
         f"        return pl.col({real!r}) + self.scale * pl.col('jitter')\n"
     )
     runner = _local(code)
-    assert not checks.column_dependence(runner, data.panel, [data.truth.leaky], WF)
-    assert not checks.truncation(runner, data.panel, WF)
+    assert not checks.column_dependence(runner, data.panel, [data.truth.leaky], WF, seed=0)
+    assert not checks.truncation(runner, data.panel, WF, seed=0)
 
 
 def test_reading_future_rows_is_caught_and_past_rows_are_not(data):
@@ -77,8 +77,8 @@ def test_reading_future_rows_is_caught_and_past_rows_are_not(data):
     )
     future = _local(template.format(k=-1))
     past = _local(template.format(k=1))
-    assert checks.truncation(future, data.panel, WF)
-    assert not checks.truncation(past, data.panel, WF)
+    assert checks.truncation(future, data.panel, WF, seed=0)
+    assert not checks.truncation(past, data.panel, WF, seed=0)
 
 
 def test_fit_never_sees_unrealised_targets(data):

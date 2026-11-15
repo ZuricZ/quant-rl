@@ -111,8 +111,13 @@ class EvalData:
         start: First scored timestamp; None means after the walk-forward's
             `min_train` periods.
         suspects: Columns for the column dependence check.
+        check_seed: Seed for the checks' random choices: where the
+            truncation check cuts and how the column dependence check
+            permutes. Agent code must not be able to learn it, or it can
+            special-case those choices. None draws a fresh one per score.
     """
 
     panel: Panel
     start: Any = None
     suspects: tuple[str, ...] = ()
+    check_seed: int | None = None

@@ -9,9 +9,12 @@
   statistical flag for leaks built into the data; not proof.
 
 The first two compare per-period ranks, not raw values, so floating-point
-noise that cannot change the score is ignored.
+noise that cannot change the score is ignored. Their random choices (cut
+dates, permutation) come from a seed that agent code must not know: an
+alpha that knew the cut dates could be honest on exactly those dates.
 """
 
+import hashlib
 from typing import Any
 
 import polars as pl
@@ -20,9 +23,50 @@ from quantenv import metrics, walkforward
 from quantenv.panel import Panel
 from quantenv.walkforward import PREDICTION, Run, Runner, WalkForward
 
-TRUNCATION_POINTS = (0.3, 0.7)
-SHUFFLE_SEED = 12345
+N_CUTS = 8
 _KEY = "_shuffle_key"
+_STRATUM = "_stratum"
+
+
+def subseed(seed: int, purpose: str) -> int:
+    """An independent 64-bit seed for one use of `seed`.
+
+    Args:
+        seed: The checks' seed.
+        purpose: What the result seeds.
+
+    Returns:
+        A seed in [0, 2**64).
+    """
+    digest = hashlib.sha256(f"{seed}\0{purpose}".encode()).digest()
+    return int.from_bytes(digest[:8], "big")
+
+
+def cut_points(timestamps: pl.Series, n: int, seed: int) -> list[Any]:
+    """Draws `n` cut dates, one at random from each of `n` equal strata.
+
+    Strata spread the cuts over the whole period; drawing within each keeps
+    them unpredictable without the seed.
+
+    Args:
+        timestamps: Candidate timestamps, ascending.
+        n: Number of cuts; at most `len(timestamps)`.
+        seed: Seed for the draw.
+
+    Returns:
+        The cut timestamps, ascending.
+    """
+    ts = timestamps.name
+    return (
+        timestamps.to_frame()
+        .lazy()
+        .with_columns((pl.int_range(pl.len()) * n // pl.len()).alias(_STRATUM))
+        .group_by(_STRATUM, maintain_order=True)
+        .agg(pl.col(ts).shuffle(seed).first())
+        .collect()
+        .get_column(ts)
+        .to_list()
+    )
 
 
 def same_period_ranks(timestamps: pl.Series, a: pl.Series, b: pl.Series) -> bool:
@@ -52,9 +96,11 @@ def truncation(
     wf: WalkForward,
     start: Any = None,
     base: Run | None = None,
-    points: tuple[float, ...] = TRUNCATION_POINTS,
+    *,
+    seed: int,
+    n_cuts: int = N_CUTS,
 ) -> bool:
-    """Reruns on the panel cut after a few timestamps and compares.
+    """Reruns on the panel cut after a few secret timestamps and compares.
 
     Each cut is one session. `features` reruns on the truncated panel. If its
     output up to the cut matches the full run, every block before the cut is
@@ -68,7 +114,8 @@ def truncation(
         wf: Walk-forward settings.
         start: First predicted timestamp, as for `walkforward.run`.
         base: The full run, if already computed.
-        points: Where to cut, as fractions of the predicted timestamps.
+        seed: Secret seed for the cut dates (see `cut_points`).
+        n_cuts: Number of cuts; each costs one pipeline run.
 
     Returns:
         True if any prediction at or before a cut changed: lookahead.
@@ -80,8 +127,8 @@ def truncation(
     if base is None:
         base = walkforward.run(runner, panel, wf, start)
     predicted = panel.timestamps.filter(panel.timestamps >= base.start)
-    for p in points:
-        cut = predicted[min(int(p * len(predicted)), len(predicted) - 1)]
+    cuts = cut_points(predicted, min(n_cuts, len(predicted)), subseed(seed, "cuts"))
+    for cut in cuts:
         short = panel.until(cut)
         until_cut = base.engineered.lazy().filter(pl.col(s.timestamp) <= cut)
         todo = walkforward.blocks(short, wf, base.start)
@@ -103,7 +150,7 @@ def truncation(
 
 
 def shuffle_within_periods(
-    frame: pl.DataFrame, columns: list[str], timestamp: str, seed: int = SHUFFLE_SEED
+    frame: pl.DataFrame, columns: list[str], timestamp: str, seed: int
 ) -> pl.DataFrame:
     """Permutes columns across assets within each timestamp.
 
@@ -136,6 +183,8 @@ def column_dependence(
     wf: WalkForward,
     start: Any = None,
     base: Run | None = None,
+    *,
+    seed: int,
 ) -> bool:
     """Reruns with `columns` permuted within each timestamp and compares.
 
@@ -150,6 +199,7 @@ def column_dependence(
         wf: Walk-forward settings.
         start: First predicted timestamp, as for `walkforward.run`.
         base: The unpermuted run, if already computed.
+        seed: Secret seed for the permutation.
 
     Returns:
         True if the predictions depend on any of `columns`. False if
@@ -163,7 +213,9 @@ def column_dependence(
     if base is None:
         base = walkforward.run(runner, panel, wf, start)
     shuffled = panel.with_frame(
-        shuffle_within_periods(panel.frame, columns, panel.schema.timestamp)
+        shuffle_within_periods(
+            panel.frame, columns, panel.schema.timestamp, subseed(seed, "shuffle")
+        )
     )
     out = walkforward.run(runner, shuffled, wf, base.start).predictions
     p = base.predictions

@@ -121,8 +121,13 @@ def dataset_seed(index: int, secret: str) -> int:
     Returns:
         A 128-bit seed.
     """
-    digest = hashlib.sha256(f"{secret}\0{index}".encode()).digest()
-    return int.from_bytes(digest[:16], "big")
+    return _hash_int(16, secret, index)
+
+
+def _hash_int(n_bytes: int, *parts: object) -> int:
+    """An integer of `n_bytes` bytes hashed from `parts`, NUL-separated."""
+    text = "\0".join(str(p) for p in parts)
+    return int.from_bytes(hashlib.sha256(text.encode()).digest()[:n_bytes], "big")
 
 
 def spearman_to_pearson(rho_s: float) -> float:
@@ -291,8 +296,11 @@ def hidden_data(seed: int, config: Config = DEFAULT_CONFIG) -> EvalData:
         config: Generator parameters.
 
     Returns:
-        The full panel, the first hidden timestamp and the suspect columns.
+        The full panel, the first hidden timestamp, the suspect columns and
+        a seed for the checks derived from `seed`.
     """
     syn = generate(seed, config, hidden=True)
     suspects = () if syn.truth.leaky is None else (syn.truth.leaky,)
-    return EvalData(syn.panel, syn.hidden_start, suspects)
+    # As secret as the dataset seed it is derived from.
+    check_seed = _hash_int(8, "checks", seed)
+    return EvalData(syn.panel, syn.hidden_start, suspects, check_seed)
