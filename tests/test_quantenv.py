@@ -574,3 +574,15 @@ def test_check_thresholds_are_configurable(data):
     assert not checks.column_dependence(
         runner, data.panel, [leaky], WF, seed=0, config=lenient
     )
+
+
+def test_same_period_ranks_forgives_rounding_swaps_only():
+    ts = pl.Series("timestamp", [1, 1, 1, 2, 2, 2])
+    a = pl.Series([0.1, 0.2, 0.2000001, 0.5, 0.1, 0.3])
+    rounded = pl.Series([0.1, 0.2000001, 0.2, 0.5, 0.1, 0.3])
+    swapped = pl.Series([0.2, 0.1, 0.2000001, 0.5, 0.1, 0.3])
+    with_null = pl.Series([0.1, 0.2, 0.2000001, None, 0.1, 0.3])
+    assert not checks.same_period_ranks(ts, a, rounded)
+    assert checks.same_period_ranks(ts, a, rounded, noise=1e-4)
+    assert not checks.same_period_ranks(ts, a, swapped, noise=1e-4)
+    assert not checks.same_period_ranks(ts, a, with_null, noise=1e-4)

@@ -10,8 +10,8 @@
   work: a backstop for lookahead the other checks miss, e.g. a leak built
   into the data. A statistical flag, not proof.
 
-Truncation compares per-period ranks, not raw values, so floating-point noise
-that cannot change the score is ignored. Column dependence compares rank IC,
+Truncation compares per-period ranks, not raw values, and forgives rank swaps
+of near-ties too small to be anything but floating-point noise. Column dependence compares rank IC,
 because predictions may change without the column being used: a data-driven
 screen that drops the suspect column as implausibly strong may admit it once
 it is permuted into noise. Their random choices (cut dates, permutation)
@@ -41,6 +41,8 @@ class CheckConfig:
 
     Attributes:
         n_cuts: Truncation cuts; each costs one pipeline run.
+        rank_noise: Truncation treats a changed rank as floating-point noise
+            when the prediction's per-period z-score moved by at most this.
         dependence_z: Column dependence flags a drop in mean rank IC larger
             than this many standard errors of the paired per-period
             difference...
@@ -53,6 +55,7 @@ class CheckConfig:
     """
 
     n_cuts: int = 8
+    rank_noise: float = 1e-4
     dependence_z: float = 4.0
     dependence_min_drop: float = 0.05
     max_ic: float = 0.2
@@ -85,23 +88,38 @@ def cut_points(timestamps: pl.Series, n: int, seed: int) -> list[Any]:
     )
 
 
-def same_period_ranks(timestamps: pl.Series, a: pl.Series, b: pl.Series) -> bool:
-    """Whether two outputs rank the assets identically in every period.
+def same_period_ranks(
+    timestamps: pl.Series, a: pl.Series, b: pl.Series, noise: float = 0.0
+) -> bool:
+    """Whether two outputs rank the assets identically in every period, up to
+    floating-point noise.
+
+    A row agrees if its rank within its period is the same in both, or its
+    per-period z-score differs by at most `noise`. The second clause forgives
+    near-ties that rounding swaps: reruns of the same alpha on the same rows
+    can differ in the last bits, e.g. when polars sums in parallel. A real
+    difference moves the z-score far more.
 
     Args:
         timestamps: Timestamp of each row.
         a: First output, one value per row.
         b: Second output, same rows.
+        noise: Largest z-score change still treated as noise; 0 for exact.
 
     Returns:
-        True if every period's ranks match, nulls included.
+        True if every row agrees, nulls included.
     """
     ts = timestamps.name
+
+    def z(col: str) -> pl.Expr:
+        c = pl.col(col)
+        return ((c - c.mean()) / c.std()).over(ts)
+
+    same_rank = pl.col("a").rank().over(ts).eq_missing(pl.col("b").rank().over(ts))
+    within_noise = ((z("a") - z("b")).abs() <= noise).fill_null(False)
     return (
         pl.DataFrame([timestamps, a.alias("a"), b.alias("b")])
-        .select(
-            pl.col("a").rank().over(ts).eq_missing(pl.col("b").rank().over(ts)).all()
-        )
+        .select((same_rank | within_noise).all())
         .item()
     )
 
@@ -160,7 +178,8 @@ def truncation(
             .collect()
         )
         stamps = expected.get_column(s.timestamp)
-        if not same_period_ranks(stamps, expected.get_column(PREDICTION), out):
+        expected_out = expected.get_column(PREDICTION)
+        if not same_period_ranks(stamps, expected_out, out, config.rank_noise):
             return True
     return False
 
