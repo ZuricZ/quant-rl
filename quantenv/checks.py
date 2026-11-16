@@ -5,8 +5,10 @@
 - column_dependence: does performance fall when columns are permuted across
   assets within each timestamp? Catches use of columns known or suspected to
   hold future information.
-- shifted_ics: rank IC against past, next and next-but-one returns. A
-  statistical flag for leaks built into the data; not proof.
+- shifted_ics: rank IC against past, next and next-but-one returns.
+  `implausible_ic` flags an IC against the next return too high for honest
+  work: a backstop for lookahead the other checks miss, e.g. a leak built
+  into the data. A statistical flag, not proof.
 
 Truncation compares per-period ranks, not raw values, so floating-point noise
 that cannot change the score is ignored. Column dependence compares rank IC,
@@ -44,11 +46,16 @@ class CheckConfig:
             difference...
         dependence_min_drop: ...and larger than this share of the base
             run's |IC|.
+        max_ic: `implausible_ic` flags a mean rank IC against the next
+            return with absolute value at or above this. Honest daily
+            equity alphas rarely reach 0.1; peeking at the target gives
+            close to 1.
     """
 
     n_cuts: int = 8
     dependence_z: float = 4.0
     dependence_min_drop: float = 0.05
+    max_ic: float = 0.2
 
 
 def cut_points(timestamps: pl.Series, n: int, seed: int) -> list[Any]:
@@ -287,3 +294,22 @@ def shifted_ics(panel: Panel, run: Run) -> dict[int, float]:
         s.timestamp,
     )
     return {int(k): v for k, v in ics.items()}
+
+
+def implausible_ic(
+    shifted: dict[int, float], config: CheckConfig = CheckConfig()
+) -> bool:
+    """Whether the IC against the next return is too high to be honest.
+
+    Only shift 1 is judged. Shift -1 is the return already realised at t,
+    which an honest alpha may track. Shift 2 says nothing on its own:
+    persistent honest signals predict it too.
+
+    Args:
+        shifted: Output of `shifted_ics`.
+        config: Check settings; uses `max_ic`.
+
+    Returns:
+        True if |IC at shift 1| >= `config.max_ic`. False for a NaN IC.
+    """
+    return abs(shifted[1]) >= config.max_ic

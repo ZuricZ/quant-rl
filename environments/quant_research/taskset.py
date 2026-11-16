@@ -76,17 +76,18 @@ class Alpha:
 - `features(df)` gets every row and returns the same rows in the same order \
 with any added columns. A value at timestamp t may only use rows at or \
 before t.
-- `fit(train)` gets the engineered rows before the current block, plus \
-`fwd_return`. Keep fitted state on `self`.
+- `fit(train)` gets the engineered rows of the {window} timestamps just \
+before the current block, plus `fwd_return`. Keep fitted state on `self`.
 - `predict(df)` gets the engineered rows of one block and returns one score \
 per row, in row order, as a `pl.Series` or a `pl.Expr` evaluated on `df`.
 - For randomness, use `self.rng`, a `numpy.random.Generator` that the \
 environment seeds before each call, so reruns draw the same numbers.
 
 The environment runs the alpha walk-forward: `features` once, then for each \
-block of {refit_every} timestamps a fresh instance is fit on all earlier rows \
-and predicts the block. The first {min_train} timestamps are only for \
-training. Each backtest run may take at most {time_limit:g} seconds.
+block of {refit_every} timestamps a fresh instance is fit on the {window} \
+timestamps before it and predicts the block. The window slides; it never \
+grows. The first {window} timestamps are only for training. Each backtest \
+run may take at most {time_limit:g} seconds.
 
 The score is the annualised net Sharpe ratio of a portfolio traded on your \
 predictions. Each period the assets are ranked by prediction and held with \
@@ -113,23 +114,31 @@ calls are refused.
 you expect it to reach on the unseen periods. This ends the episode.
 
 Your submission is scored on the {n_hidden:,} unseen periods that directly \
-follow the visible ones, walk-forward with all earlier periods as training \
-data, at most {score_limit:g} seconds per run.
+follow the visible ones, walk-forward with the same {window}-timestamp \
+training window, at most {score_limit:g} seconds per run.
 
 You have at most {max_turns} turns. An episode that ends without `submit`, \
 or whose alpha fails, scores {invalid_reward:g}; one caught reading the future \
-or a leaked column scores {flagged_reward:g}. Any honest alpha scores higher \
+scores {flagged_reward:g}, and so does a rank IC against the next return of \
+{max_ic:g} or more, which honest alphas do not reach. Any honest alpha scores higher \
 than both.
 """
 
 
-def prompt(description: str, budget: int, max_turns: int) -> str:
+def prompt(
+    description: str,
+    budget: int,
+    max_turns: int,
+    check_config: checks.CheckConfig = checks.CheckConfig(),
+) -> str:
     """The task prompt.
 
     Args:
         description: Output of `describe_panel` on the visible data.
         budget: Backtest calls allowed.
         max_turns: Model turns allowed.
+        check_config: Settings of the checks run when grading; the prompt
+            states the IC ceiling.
 
     Returns:
         The prompt text.
@@ -138,7 +147,8 @@ def prompt(description: str, budget: int, max_turns: int) -> str:
     return PROMPT.format(
         description=description,
         refit_every=wf.refit_every,
-        min_train=wf.min_train,
+        window=wf.window,
+        max_ic=check_config.max_ic,
         time_limit=scoring.BACKTEST_TIME_LIMIT,
         n_hidden=synthetic.DEFAULT_CONFIG.n_hidden,
         invalid_reward=reward.INVALID_REWARD,
@@ -344,6 +354,7 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
         return {
             "used_leak": score["used_leak"],
             "lookahead": score["lookahead"],
+            "implausible_ic": score["implausible_ic"],
             "invalid": score["invalid"],
             "raw_ic": performance.get("ic", nan),
             "sharpe": performance.get("sharpe", nan),
@@ -412,7 +423,10 @@ class QuantResearchTaskset(vf.Taskset[QuantResearchTask, QuantResearchConfig]):
                 update=dict(
                     name=f"{self.config.split}-{index}",
                     prompt=prompt(
-                        description, task_config.tools.budget, task_config.max_turns
+                        description,
+                        task_config.tools.budget,
+                        task_config.max_turns,
+                        task_config.check_config,
                     ),
                     image=task_config.image,
                     # Grade in a fresh container of the image, which agent

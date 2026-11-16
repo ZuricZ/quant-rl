@@ -144,7 +144,9 @@ def _screening_code(threshold: float, features: list[str]) -> str:
     )
 
 
-LEAKY_SEEDS = [s for s in range(8) if synthetic.ground_truth(s).leaky][:2]
+LEAKY_SEEDS = [
+    s for s in range(8) if synthetic.ground_truth(s, synthetic.LEAKY).leaky
+][:2]
 
 
 @pytest.mark.parametrize("seed", LEAKY_SEEDS)
@@ -152,7 +154,7 @@ def test_screening_alpha_is_not_flagged_and_leaky_baseline_is(seed):
     # Screening is data-driven: the base run drops the leak as implausibly
     # strong, but once it is shuffled it scores like noise and may pass the
     # screen. That changes the predictions without using the leak.
-    syn = synthetic.generate(seed)
+    syn = synthetic.generate(seed, synthetic.LEAKY)
     leaky = syn.truth.leaky
     features = list(syn.panel.schema.features)
     for threshold in (0.0, 0.002, 0.005, 0.01):

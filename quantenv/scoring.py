@@ -42,6 +42,8 @@ class Score:
         claim_gap: Claimed minus realised net Sharpe; NaN if invalid.
         used_leak: 1 if the column dependence check fired, else 0.
         lookahead: 1 if the truncation check fired, else 0.
+        implausible_ic: 1 if the IC against the next return was implausibly
+            high (`checks.implausible_ic`), else 0.
         invalid: 1 if the code errored, timed out or the claim was not a
             finite number, else 0.
         shifted_ics: Rank IC against returns at shifts -1, 1 and 2; empty if
@@ -53,6 +55,7 @@ class Score:
     claim_gap: float
     used_leak: int
     lookahead: int
+    implausible_ic: int
     invalid: int
     shifted_ics: dict[int, float] = dataclasses.field(default_factory=dict)
     error: str = ""
@@ -60,7 +63,7 @@ class Score:
 
 def invalid_score(error: str) -> Score:
     """The score of a submission that cannot be evaluated."""
-    return Score(None, float("nan"), 0, 0, 1, error=error)
+    return Score(None, float("nan"), 0, 0, 0, 1, error=error)
 
 
 def backtest(
@@ -141,6 +144,7 @@ def score_submission(
         claimed - performance.sharpe,
         int(used_leak),
         int(lookahead),
+        int(checks.implausible_ic(shifted, check_config)),
         0,
         shifted,
     )

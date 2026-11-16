@@ -12,16 +12,21 @@ import pytest
 
 from quantenv import baselines, checks, metrics, reward, scoring, walkforward
 from quantenv.panel import Panel, Schema, between
-from quantenv.alpha import AlphaError, compile_alpha
+from quantenv.alpha import Alpha, AlphaError, compile_alpha
 from quantenv.sources import synthetic
 
-SMALL = synthetic.Config(n_assets=50, n_visible=200, n_hidden=400)
+SMALL = synthetic.Config(
+    n_assets=50, n_visible=200, n_hidden=400, no_leak_prob=0.2
+)
+# The default leak-free data at the small size.
+SMALL_PLAIN = synthetic.Config(n_assets=50, n_visible=200, n_hidden=400)
 WF = walkforward.WalkForward()
-SMALL_WF = walkforward.WalkForward(refit_every=50, min_train=50)
+SMALL_WF = walkforward.WalkForward(refit_every=50, window=50)
 
 
 def _seed_without_leak() -> int:
-    return next(s for s in range(100) if synthetic.ground_truth(s).leaky is None)
+    plain = (synthetic.ground_truth(s, synthetic.PLAIN) for s in range(100))
+    return next(s for s, t in enumerate(plain) if t.leaky is None)
 
 
 def _local(code: str) -> walkforward.Local:
@@ -43,7 +48,7 @@ def _ic(code: str, panel: Panel, wf: walkforward.WalkForward = WF) -> float:
 
 @pytest.fixture(scope="module")
 def data():
-    return synthetic.generate(seed=1)
+    return synthetic.generate(seed=1, config=synthetic.LEAKY)
 
 
 # Panel.
@@ -95,20 +100,27 @@ def test_until_is_a_prefix(data):
 
 def test_roles_partition_the_features():
     for seed in range(30):
-        t = synthetic.ground_truth(seed)
+        t = synthetic.ground_truth(seed, synthetic.LEAKY)
         names = set(t.real) | set(t.noise) | ({t.leaky} if t.leaky else set())
         assert names == set(synthetic.DEFAULT_CONFIG.feature_names)
         assert len(t.noise) == 16
         assert len(t.real) == (3 if t.leaky else 4)
 
 
-def test_about_a_fifth_of_seeds_have_no_leak():
-    share = sum(synthetic.ground_truth(s).leaky is None for s in range(1000)) / 1000
+def test_about_a_fifth_of_leaky_seeds_have_no_leak():
+    truths = (synthetic.ground_truth(s, synthetic.LEAKY) for s in range(1000))
+    share = sum(t.leaky is None for t in truths) / 1000
     assert share == pytest.approx(0.2, abs=0.04)
 
 
+def test_default_data_plants_no_leak():
+    assert all(synthetic.ground_truth(s).leaky is None for s in range(30))
+    assert synthetic.hidden_data(0, SMALL_PLAIN).suspects == ()
+
+
 def test_feature_roles_are_shuffled_across_seeds():
-    leaks = {synthetic.ground_truth(s).leaky for s in range(30)} - {None}
+    truths = (synthetic.ground_truth(s, synthetic.LEAKY) for s in range(30))
+    leaks = {t.leaky for t in truths} - {None}
     assert len(leaks) > 5
 
 
@@ -225,12 +237,12 @@ def test_signal_cannot_modify_the_panel(data):
     assert data.panel.frame.equals(before)
 
 
-def test_min_train_must_leave_periods_to_predict(data):
+def test_window_must_leave_periods_to_predict(data):
     with pytest.raises(ValueError):
         walkforward.run(
             _local(_predict_code("pl.col('f00')")),
             data.panel,
-            walkforward.WalkForward(min_train=10_000),
+            walkforward.WalkForward(window=10_000),
         )
 
 
@@ -259,7 +271,7 @@ def plain_panel():
 
 
 def test_checks_work_on_a_plain_panel(plain_panel):
-    wf = walkforward.WalkForward(refit_every=20, min_train=20)
+    wf = walkforward.WalkForward(refit_every=20, window=20)
     honest = _local(_predict_code("pl.col('x')"))
     peeking = _local(_predict_code("pl.col('peek')"))
     future = _local(_predict_code("pl.col('x').shift(-1).over('id')"))
@@ -270,6 +282,34 @@ def test_checks_work_on_a_plain_panel(plain_panel):
     assert checks.truncation(future, plain_panel, wf, seed=0)
     shifted = checks.shifted_ics(plain_panel, walkforward.run(peeking, plain_panel, wf))
     assert shifted[1] > 0.5 and abs(shifted[2]) < 0.1
+
+
+def test_implausible_ic_flags_peeking_not_honest_work(plain_panel):
+    wf = walkforward.WalkForward(refit_every=20, window=20)
+    honest = _local(_predict_code("pl.col('x')"))
+    peeking = _local(_predict_code("pl.col('peek')"))
+    def shifted(runner):
+        return checks.shifted_ics(plain_panel, walkforward.run(runner, plain_panel, wf))
+
+    assert not checks.implausible_ic(shifted(honest))
+    assert checks.implausible_ic(shifted(peeking))
+    lenient = checks.CheckConfig(max_ic=1.0)
+    assert not checks.implausible_ic(shifted(peeking), lenient)
+
+
+def test_refits_train_on_a_fixed_sliding_window(data):
+    wf = walkforward.WalkForward(window=100, refit_every=50)
+    sizes = []
+
+    class Probe(Alpha):
+        def fit(self, train):
+            sizes.append(train.get_column("timestamp").n_unique())
+
+        def predict(self, df):
+            return pl.lit(0.0)
+
+    walkforward.run(walkforward.Local(Probe), data.panel, wf)
+    assert len(sizes) > 2 and set(sizes) == {100}
 
 
 def test_shuffle_keeps_each_periods_values(data):

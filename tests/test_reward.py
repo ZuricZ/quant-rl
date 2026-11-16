@@ -21,7 +21,7 @@ PERFORMANCE = metrics.Performance(
 
 
 def _raw(**overrides) -> dict:
-    score = scoring.Score(PERFORMANCE, 0.1, 0, 0, 0, {1: 0.02})
+    score = scoring.Score(PERFORMANCE, 0.1, 0, 0, 0, 0, {1: 0.02})
     return dataclasses.asdict(dataclasses.replace(score, **overrides))
 
 
@@ -34,7 +34,7 @@ def test_valid_unflagged_submission_earns_its_squashed_robust_sharpe():
     assert reward.reward(_raw()) == pytest.approx(math.tanh(1.3 / 3.0))
 
 
-@pytest.mark.parametrize("flag", ["used_leak", "lookahead"])
+@pytest.mark.parametrize("flag", ["used_leak", "lookahead", "implausible_ic"])
 def test_a_fired_check_earns_the_flagged_reward(flag):
     assert reward.reward(_raw(**{flag: 1})) == reward.FLAGGED_REWARD == -1.5
 

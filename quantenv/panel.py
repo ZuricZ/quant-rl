@@ -137,7 +137,7 @@ class EvalData:
     Attributes:
         panel: The data. Timestamps before `start` are used only for training.
         start: First scored timestamp; None means after the walk-forward's
-            `min_train` periods.
+            first training window.
         suspects: Columns for the column dependence check.
         check_seed: Seed for the checks' random choices: where the
             truncation check cuts and how the column dependence check

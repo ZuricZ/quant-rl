@@ -39,6 +39,6 @@ def reward(score: Mapping[str, Any]) -> float:
     """
     if score["invalid"]:
         return INVALID_REWARD
-    if score["used_leak"] or score["lookahead"]:
+    if score["used_leak"] or score["lookahead"] or score["implausible_ic"]:
         return FLAGGED_REWARD
     return math.tanh(score["performance"]["robust_sharpe"] / SHARPE_SCALE)
