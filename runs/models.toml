@@ -11,7 +11,24 @@
 #
 # Qwen3 sampling follows Qwen's recommendation for thinking mode.
 
-# Hosted: OpenRouter serves Qwen3 behind an OpenAI-compatible API.
+# Hosted: OpenRouter serves Qwen behind an OpenAI-compatible API.
+#
+# Training candidates: Qwen3.6-35B-A3B (MoE, 3B active) is the model to
+# train; Qwen3.5-9B (dense) is the cheaper one to debug the pipeline on.
+# Both are instruct models with a thinking mode and tool calling on
+# OpenRouter. Sampling as for Qwen3 below.
+[models.qwen3_6-35b-a3b]
+model = "qwen/qwen3.6-35b-a3b"
+base_url = "https://openrouter.ai/api/v1"
+api_key_var = "OPENROUTER_API_KEY"
+sampling = { temperature = 0.6, top_p = 0.95, max_tokens = 8192 }
+
+[models.qwen3_5-9b]
+model = "qwen/qwen3.5-9b"
+base_url = "https://openrouter.ai/api/v1"
+api_key_var = "OPENROUTER_API_KEY"
+sampling = { temperature = 0.6, top_p = 0.95, max_tokens = 8192 }
+
 [models.qwen3-8b]
 model = "qwen/qwen3-8b"
 base_url = "https://openrouter.ai/api/v1"
