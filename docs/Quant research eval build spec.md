@@ -114,11 +114,19 @@ quantenv/                 core package, no verifiers import
   checks.py               truncation, column dependence, shifted IC; generic over Panel
   scoring.py              backtest and final score in an isolated process with time limits
   baselines.py            naive and oracle alphas
+  reward.py               the reward rule, applied on the host
+  report.py               the results table, one row per agent
 environments/quant_research/
   taskset.py              verifiers taskset, reward, metrics, stop
   servers/research.py     toolset: describe, backtest, submit
   grade.py                scores a submission on the hidden days, inside the runtime
-scripts/run_baselines.py  naive, oracle and leaky baselines on the eval tasks
+scripts/
+  run_baselines.py        naive, oracle and leaky baselines on the eval tasks
+  run_models.py           runs models from runs/models.toml with vf-run
+  results.py              results table and claim-gap plot from runs and baselines
+  stub_model.py           scripted OpenAI-compatible server for smoke tests
+  serve_vllm.sh           serves Qwen3 with vLLM and tool calling
+runs/models.toml          model registry: endpoint, key variable, sampling
 tests/
 ```
 
@@ -301,6 +309,12 @@ One plot: claim gap against backtests used.
    - The scoring worker learns the limit only once it has loaded the data, which the host never sees. `scoring.run_isolated` therefore lets the worker move its own deadline: after loading, it allows (runs × the full run's limit) + 60 s. Every run of a score, check runs included, gets the full run's limit, the largest. The verifiers grading timeout follows: (2 + `n_cuts`) × 256 s + 180 s = 2,740 s with the default checks (it was 900 s).
    - Measured 16 November 2026 on 4 cores, eval task 0 and 1 (secret `day5-check`): scoring the template, all ten runs, took 62 s alone; two scorers in parallel took 102 s and 149 s. Both were valid; under the 60 s limit every such run had timed out.
    - Wall time, not CPU time: polars is multi-threaded, so CPU time would penalise parallel code, and a limit has to bound the time the grader waits. Contention between scorers on one machine is still the operator's to avoid.
+
+21. **Model runs go through a registry and `vf-run`.** Decided 16 November 2026, to start Day 6 with small Qwen3 models.
+   - `runs/models.toml` names each model's OpenAI-compatible endpoint, API key variable and sampling. It holds hosted entries (Qwen3-8B and 14B on OpenRouter) and local ones (Qwen3-4B and 8B on vLLM, served by `scripts/serve_vllm.sh` with the Hermes tool parser and the Qwen3 reasoning parser). A local entry has no key variable; the runner sends a dummy one. Sampling is Qwen's thinking-mode recommendation: temperature 0.6, top-p 0.95, at most 8,192 tokens per response.
+   - `scripts/run_models.py` runs one `vf-run` per model into `outputs/models/<name>/`, 30 tasks and 3 rollouts by default, on the Docker runtime (`--env.agent.runtime.type docker`; verifiers' default is Prime's hosted runtime, available with `--runtime prime` and a pushed `--image`). The model server is reached from the host, through verifiers' interception server, so `localhost` endpoints work while episodes run in containers.
+   - `scripts/results.py` reads the traces and, optionally, `run_baselines.py --out` rows, and prints one table for both, from `quantenv.report.table`, which `run_baselines.py` now uses too. Performance means cover valid submissions only; rates and the reward cover every episode. Episodes with an infrastructure error (trace not `ok`) are left out and counted. It also prints how episodes ended and draws claim gap against backtests used. The table extends the one under "Runs and results" with the columns of Decision 13; the reward replaces "True IC = mean reward", since the reward is no longer an IC (Decisions 11 and 17).
+   - `scripts/stub_model.py` scripts describe, backtest and submit, so the whole path runs without a model. Verified 16 November 2026 with Docker in this session: 2 tasks, both `stop=submitted`, rewards −0.053 and −0.072, the first matching Decision 14.
 
 ## Open decisions
 

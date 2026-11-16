@@ -1,0 +1,147 @@
+"""The model-run scaffold: registry, vf-run command, stub model, results."""
+
+import importlib.util
+import math
+import subprocess
+import sys
+from pathlib import Path
+
+import polars as pl
+import pytest
+
+from quantenv import report
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _script(name: str):
+    spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+run_models = _script("run_models")
+results = _script("results")
+stub_model = _script("stub_model")
+
+
+def _args(**overrides):
+    defaults = dict(
+        secret="s3cret",
+        split="eval",
+        tasks=30,
+        rollouts=3,
+        concurrency=4,
+        runtime="docker",
+        image=None,
+        out=Path("outputs/models"),
+        dry_run=False,
+    )
+    return type("Args", (), defaults | overrides)()
+
+
+def _flag(cmd: list[str], name: str) -> str:
+    return cmd[cmd.index(name) + 1]
+
+
+def test_registry_entries_are_complete():
+    models = run_models.load_models()
+    assert {"qwen3-8b", "qwen3-4b-vllm", "stub"} <= models.keys()
+    for entry in models.values():
+        assert entry["model"] and entry["base_url"].endswith("/v1")
+
+
+def test_command_runs_the_taskset_with_the_entry():
+    entry = run_models.load_models()["qwen3-8b"]
+    cmd = run_models.command("qwen3-8b", entry, _args())
+    assert cmd[:2] == ["vf-run", "quant-research"]
+    assert _flag(cmd, "--model") == "qwen/qwen3-8b"
+    assert _flag(cmd, "--client.api-key-var") == "OPENROUTER_API_KEY"
+    assert _flag(cmd, "--env.taskset.secret") == "s3cret"
+    assert _flag(cmd, "--env.agent.runtime.type") == "docker"
+    assert _flag(cmd, "--run.name") == "qwen3-8b"
+    assert _flag(cmd, "--sampling.top-p") == "0.95"
+    assert (_flag(cmd, "--select.limit"), _flag(cmd, "--num-rollouts")) == ("30", "3")
+
+
+def test_local_entry_gets_the_dummy_key_variable():
+    entry = run_models.load_models()["qwen3-4b-vllm"]
+    cmd = run_models.command("qwen3-4b-vllm", entry, _args())
+    assert _flag(cmd, "--client.api-key-var") == run_models.LOCAL_KEY_VAR
+
+
+def test_vf_run_accepts_every_registry_entry(tmp_path):
+    pytest.importorskip("fcntl")
+    names = list(run_models.load_models())
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "run_models.py"), *names]
+        + ["--secret", "x", "--dry-run", "--out", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    written = {
+        p.parent.parent.parent.name for p in tmp_path.glob("*/configs/*/run.json")
+    }
+    assert written == set(names)
+
+
+def test_stub_calls_describe_backtest_submit_in_turn():
+    tools = [
+        {"type": "function", "function": {"name": f"research_{n}"}}
+        for n in ("describe", "backtest", "submit")
+    ]
+    messages = [{"role": "user", "content": "go"}]
+    names = []
+    for _ in range(3):
+        message = stub_model.reply({"messages": messages, "tools": tools})
+        names.append(message["tool_calls"][0]["function"]["name"])
+        messages += [message, {"role": "tool", "content": "ok"}]
+    assert names == ["research_describe", "research_backtest", "research_submit"]
+    assert stub_model.reply({"messages": messages, "tools": tools})["content"]
+
+
+def _trace(index: int, **metrics) -> dict:
+    return {
+        "task": {"data": {"index": index}},
+        "rewards": {"hidden_sharpe": {"score": metrics.pop("reward"), "weight": 1.0}},
+        "metrics": metrics,
+        "ok": True,
+        "stop_condition": "submitted",
+        "errors": [],
+    }
+
+
+def test_episode_row_reads_the_trace():
+    trace = _trace(
+        4, reward=0.3, raw_ic=0.02, sharpe=1.0, claim_gap=0.5, backtests_used=3.0
+    )
+    row = results.episode_row("m", trace)
+    assert (row["agent"], row["task"], row["reward"], row["ic"]) == ("m", 4, 0.3, 0.02)
+    assert row["backtests_used"] == 3.0 and row["stop"] == "submitted"
+
+
+def test_table_means_performance_over_valid_episodes_only():
+    nan = float("nan")
+    rows = pl.DataFrame(
+        {
+            "agent": ["a", "a", "b"],
+            "task": [0, 1, 0],
+            "reward": [0.5, -1.0, -1.5],
+            "sharpe": [2.0, nan, 30.0],
+            "gross_sharpe": [3.0, None, 31.0],
+            "turnover": [0.4, None, 1.2],
+            "ic": [0.02, None, 0.3],
+            "claim_gap": [0.1, None, 0.9],
+            "used_leak": [0, 0, 1],
+            "lookahead": [0, 0, 0],
+            "invalid": [0, 1, 0],
+            "backtests_used": [2, 5, 1],
+        }
+    )
+    a = report.table(rows).row(0, named=True)
+    assert a["Agent"] == "a" and a["Episodes"] == 2
+    assert a["Net Sharpe"] == 2.0 and a["Invalid rate"] == 0.5
+    assert math.isclose(a["Reward"], -0.25) and a["Backtests used"] == 3.5
