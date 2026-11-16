@@ -210,6 +210,21 @@ def test_fresh_instance_per_block(data):
     walkforward.run(_local(code), data.panel, WF)
 
 
+@pytest.mark.parametrize("start", [None, "hidden"])
+def test_run_rows_counts_the_rows_handed_to_agent_code(start):
+    data = synthetic.hidden_data(1, SMALL)
+    panel = data.panel
+    start = data.start if start == "hidden" else None
+    first = walkforward.start_timestamp(panel, SMALL_WF, start)
+    ts = panel.schema.timestamp
+    handed = panel.frame.height + sum(
+        between(panel.frame, ts, end=b.start).height
+        + between(panel.frame, ts, b.start, b.end).height
+        for b in walkforward.blocks(panel, SMALL_WF, first)
+    )
+    assert walkforward.run_rows(panel, SMALL_WF, start) == handed
+
+
 def test_signal_cannot_modify_the_panel(data):
     before = data.panel.frame.clone()
     code = (
@@ -415,7 +430,8 @@ def test_slow_signal_times_out():
         "    def predict(self, df):\n"
         "        return pl.col('f00')\n"
     )
-    s = scoring.score_submission(code, 0.1, _hidden(), SMALL_WF, time_limit=1.0)
+    limit = scoring.TimeLimit(per_million_rows=0.0, minimum=1.0)
+    s = scoring.score_submission(code, 0.1, _hidden(), SMALL_WF, limit=limit)
     assert (
         s.invalid == 1 and _reward(s) == reward.INVALID_REWARD and "ran past" in s.error
     )
@@ -424,10 +440,43 @@ def test_slow_signal_times_out():
 def test_hung_signal_is_killed(monkeypatch):
     monkeypatch.setattr(scoring, "STARTUP_ALLOWANCE", 5.0)
     code = "class S(Alpha):\n    def predict(self, df):\n        while True:\n            pass\n"
-    s = scoring.score_submission(code, 0.1, _hidden(), SMALL_WF, time_limit=0.5)
+    limit = scoring.TimeLimit(per_million_rows=0.0, minimum=0.5)
+    s = scoring.score_submission(code, 0.1, _hidden(), SMALL_WF, limit=limit)
     assert (
         s.invalid == 1 and _reward(s) == reward.INVALID_REWARD and "ran past" in s.error
     )
+
+
+def test_time_limit_scales_with_rows_above_its_minimum():
+    limit = scoring.TimeLimit(per_million_rows=5.0, minimum=30.0)
+    assert limit.seconds(1_000_000) == 30.0
+    assert limit.seconds(10_000_000) == 50.0
+    assert limit.seconds(20_000_000) == 2 * limit.seconds(10_000_000)
+
+
+def test_slow_signal_passes_when_its_data_allows_it():
+    code = (
+        "import time\n"
+        "class S(Alpha):\n"
+        "    def features(self, df):\n"
+        "        time.sleep(1.5)\n"
+        "        return df\n"
+        "    def predict(self, df):\n"
+        "        return pl.col('f00')\n"
+    )
+    panel = synthetic.hidden_data(1, SMALL).panel
+    rows = walkforward.run_rows(panel, SMALL_WF, synthetic.hidden_data(1, SMALL).start)
+    # The same rate gives the run 3 s on this data, 0.3 s on a tenth of it.
+    limit = scoring.TimeLimit(per_million_rows=3.0e6 / rows, minimum=0.0)
+    s = scoring.score_submission(
+        code,
+        0.1,
+        _hidden(),
+        SMALL_WF,
+        limit=limit,
+        check_config=checks.CheckConfig(n_cuts=1),
+    )
+    assert s.invalid == 0, s.error
 
 
 def test_backtest_matches_in_process_score():

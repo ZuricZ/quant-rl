@@ -186,6 +186,42 @@ def start_timestamp(panel: Panel, wf: WalkForward, start: Any = None) -> Any:
     return panel.timestamps[wf.min_train]
 
 
+def pipeline_rows(
+    n_timestamps: int, n_assets: int, n_warmup: int, refit_every: int
+) -> int:
+    """Rows a full run hands to agent code; time limits scale with it.
+
+    `features` gets every row, each block's `fit` every row before the
+    block, and its `predict` the block's rows. Refitting on all earlier rows
+    makes this grow with the square of the number of timestamps. It depends
+    only on the panel's shape, so a limit can be stated before the data
+    exists.
+
+    Args:
+        n_timestamps: Timestamps in the panel.
+        n_assets: Assets per timestamp.
+        n_warmup: Timestamps before the first predicted one.
+        refit_every: Timestamps per block.
+
+    Returns:
+        The number of rows.
+    """
+    block_starts = range(n_warmup, n_timestamps, refit_every)
+    return n_assets * (2 * n_timestamps - n_warmup + sum(block_starts))
+
+
+def run_rows(panel: Panel, wf: WalkForward, start: Any = None) -> int:
+    """`pipeline_rows` of a run over `panel`, as for `run`."""
+    start = start_timestamp(panel, wf, start)
+    n_timestamps = len(panel.timestamps)
+    return pipeline_rows(
+        n_timestamps,
+        panel.frame.height // n_timestamps,
+        (panel.timestamps < start).sum(),
+        wf.refit_every,
+    )
+
+
 def blocks(panel: Panel, wf: WalkForward, start: Any) -> list[Block]:
     """The blocks from `start` to the end of the panel."""
     starts = panel.timestamps.filter(panel.timestamps >= start)

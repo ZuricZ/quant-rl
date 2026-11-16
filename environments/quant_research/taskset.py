@@ -41,7 +41,6 @@ EVAL_TASKS = 30
 _MASK = "**********"
 # Built from the repository's Dockerfile; holds this package.
 IMAGE = "quant-research:0.1.0"
-SCORING_TIMEOUT = 900.0
 _SCORE = "score"
 
 PROMPT = """\
@@ -86,7 +85,13 @@ environment seeds before each call, so reruns draw the same numbers.
 The environment runs the alpha walk-forward: `features` once, then for each \
 block of {refit_every} timestamps a fresh instance is fit on all earlier rows \
 and predicts the block. The first {min_train} timestamps are only for \
-training. Each backtest run may take at most {time_limit:g} seconds.
+training.
+
+Time limits scale with the rows a run hands to your code: `features` gets \
+every row, each block's `fit` every earlier row, and its `predict` the \
+block's rows. A run may take {per_million_rows:g} seconds per million such \
+rows, and at least {minimum:g} seconds. A backtest run hands over \
+{backtest_rows:.2f}M rows, so it may take {backtest_limit:.0f} seconds.
 
 The score is the annualised net Sharpe ratio of a portfolio traded on your \
 predictions. Each period the assets are ranked by prediction and held with \
@@ -114,13 +119,37 @@ you expect it to reach on the unseen periods. This ends the episode.
 
 Your submission is scored on the {n_hidden:,} unseen periods that directly \
 follow the visible ones, walk-forward with all earlier periods as training \
-data, at most {score_limit:g} seconds per run.
+data. A scored run hands over {score_rows:.1f}M rows, so it may take \
+{score_limit:.0f} seconds. The backtest limit is mostly its floor: at the \
+per-row rate a backtest would get {backtest_rate_limit:.2f} seconds, and an \
+alpha whose backtest takes much longer than that may time out when scored.
 
 You have at most {max_turns} turns. An episode that ends without `submit`, \
 or whose alpha fails, scores {invalid_reward:g}; one caught reading the future \
 or a leaked column scores {flagged_reward:g}. Any honest alpha scores higher \
 than both.
 """
+
+
+def run_rows(hidden: bool, wf: WalkForward = WalkForward()) -> int:
+    """Rows a run hands to agent code (`walkforward.pipeline_rows`): a
+    backtest on the visible periods, or a scored run on the hidden ones."""
+    config = synthetic.DEFAULT_CONFIG
+    if hidden:
+        n_timestamps, n_warmup = config.n_visible + config.n_hidden, config.n_visible
+    else:
+        n_timestamps, n_warmup = config.n_visible, wf.min_train
+    return walkforward.pipeline_rows(
+        n_timestamps, config.n_assets, n_warmup, wf.refit_every
+    )
+
+
+def scoring_timeout(check_config: checks.CheckConfig) -> float:
+    """Seconds verifiers allows the grader: every pipeline run at the scored
+    run's limit, plus start-up for the container and the scoring worker."""
+    runs = 2 + check_config.n_cuts
+    seconds = scoring.TimeLimit().seconds(run_rows(hidden=True))
+    return runs * seconds + 3 * scoring.STARTUP_ALLOWANCE
 
 
 def prompt(description: str, budget: int, max_turns: int) -> str:
@@ -135,15 +164,22 @@ def prompt(description: str, budget: int, max_turns: int) -> str:
         The prompt text.
     """
     wf = WalkForward()
+    limit = scoring.TimeLimit()
+    backtest_rows, score_rows = run_rows(hidden=False), run_rows(hidden=True)
     return PROMPT.format(
         description=description,
         refit_every=wf.refit_every,
         min_train=wf.min_train,
-        time_limit=scoring.BACKTEST_TIME_LIMIT,
+        per_million_rows=limit.per_million_rows,
+        minimum=limit.minimum,
+        backtest_rows=backtest_rows / 1e6,
+        backtest_limit=limit.seconds(backtest_rows),
+        backtest_rate_limit=limit.per_million_rows * backtest_rows / 1e6,
+        score_rows=score_rows / 1e6,
         n_hidden=synthetic.DEFAULT_CONFIG.n_hidden,
         invalid_reward=reward.INVALID_REWARD,
         flagged_reward=reward.FLAGGED_REWARD,
-        score_limit=scoring.SCORE_TIME_LIMIT,
+        score_limit=limit.seconds(score_rows),
         cost_bp=synthetic.DEFAULT_CONFIG.cost * 1e4,
         max_null=walkforward.MAX_NULL_SHARE,
         budget=budget,
@@ -418,7 +454,9 @@ class QuantResearchTaskset(vf.Taskset[QuantResearchTask, QuantResearchConfig]):
                     # Grade in a fresh container of the image, which agent
                     # code never touched; the inputs come from the trace.
                     scoring=vf.ScoringConfig(mode="isolated"),
-                    timeout=vf.TaskTimeout(scoring=SCORING_TIMEOUT),
+                    timeout=vf.TaskTimeout(
+                        scoring=scoring_timeout(task_config.check_config)
+                    ),
                 )
             )
             yield QuantResearchTask(data, task_config)

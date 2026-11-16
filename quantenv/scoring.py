@@ -11,6 +11,7 @@ import dataclasses
 import math
 import multiprocessing as mp
 import secrets
+import time
 from typing import Any, Callable
 
 from quantenv import checks, metrics, walkforward
@@ -19,16 +20,39 @@ from quantenv.panel import EvalData, between
 from quantenv.sandbox import Sandbox, SandboxError
 from quantenv.walkforward import PREDICTION, Run, WalkForward
 
-BACKTEST_TIME_LIMIT = 30.0
-SCORE_TIME_LIMIT = 60.0
-# Allowance on top of the alpha limits for process start-up and loading the
-# data, after which a hung worker is killed.
+# Allowance for process start-up and loading the data, and again on top of
+# the alpha's runs, after which a hung worker is killed.
 STARTUP_ALLOWANCE = 60.0
 
 Loader = Callable[[], EvalData]
+# What a worker calls to set its own deadline, in seconds from now.
+Allow = Callable[[float], None]
 
-# What a worker reports: a result, the alpha's failure, or the scoring's own.
-_OK, _ALPHA_ERROR, _SCORING_ERROR = "ok", "alpha", "scoring"
+# What a worker reports: a new deadline, a result, the alpha's failure, or the
+# scoring's own.
+_ALLOW, _OK, _ALPHA_ERROR, _SCORING_ERROR = "allow", "ok", "alpha", "scoring"
+
+
+@dataclasses.dataclass(frozen=True)
+class TimeLimit:
+    """Wall-clock limit of one pipeline run, scaled with the data.
+
+    The limit grows with the rows the run hands to agent code
+    (`walkforward.pipeline_rows`), so an alpha that fits in its backtest
+    limit and costs the same per row also fits in the scored run's. See the
+    spec, Decision 20, for the measurements behind the defaults.
+
+    Attributes:
+        per_million_rows: Seconds per million rows.
+        minimum: Floor in seconds, for start-up, which does not scale.
+    """
+
+    per_million_rows: float = 5.0
+    minimum: float = 30.0
+
+    def seconds(self, rows: int) -> float:
+        """The limit of a run that hands `rows` rows to agent code."""
+        return max(self.minimum, self.per_million_rows * rows / 1e6)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -67,7 +91,7 @@ def backtest(
     code: str,
     load: Loader,
     wf: WalkForward = WalkForward(),
-    time_limit: float = BACKTEST_TIME_LIMIT,
+    limit: TimeLimit = TimeLimit(),
     user: str | None = None,
 ) -> metrics.Performance:
     """Walk-forward performance of alpha code.
@@ -76,7 +100,7 @@ def backtest(
         code: Alpha code.
         load: Picklable callable returning the data.
         wf: Walk-forward settings.
-        time_limit: Limit in seconds for the pipeline run.
+        limit: Time limit of the pipeline run.
         user: Run the alpha as this dedicated user; see `Sandbox`.
 
     Returns:
@@ -89,8 +113,8 @@ def backtest(
     """
     return run_isolated(
         _backtest_worker,
-        (Sandbox(code, time_limit, user), load, wf),
-        time_limit + STARTUP_ALLOWANCE,
+        (_Pipeline(code, user, limit, STARTUP_ALLOWANCE), load, wf),
+        STARTUP_ALLOWANCE,
     )
 
 
@@ -99,7 +123,7 @@ def score_submission(
     claimed_sharpe: Any,
     load: Loader,
     wf: WalkForward = WalkForward(),
-    time_limit: float = SCORE_TIME_LIMIT,
+    limit: TimeLimit = TimeLimit(),
     user: str | None = None,
     check_config: checks.CheckConfig = checks.CheckConfig(),
 ) -> Score:
@@ -110,7 +134,8 @@ def score_submission(
         claimed_sharpe: The net Sharpe the agent expects on unseen data.
         load: Picklable callable returning the data.
         wf: Walk-forward settings.
-        time_limit: Limit in seconds per pipeline run; each check adds runs.
+        limit: Time limit of each pipeline run; each check adds runs. All
+            runs get the limit of the full one, the largest.
         user: Run the alpha as this dedicated user; see `Sandbox`.
         check_config: Settings of the lookahead checks.
 
@@ -130,9 +155,8 @@ def score_submission(
     try:
         performance, used_leak, lookahead, shifted = run_isolated(
             _score_worker,
-            (Sandbox(code, time_limit, user), load, wf, check_config),
-            # Pipeline runs: base, column dependence, one per truncation cut.
-            (2 + check_config.n_cuts) * time_limit + STARTUP_ALLOWANCE,
+            (_Pipeline(code, user, limit, STARTUP_ALLOWANCE), load, wf, check_config),
+            STARTUP_ALLOWANCE,
         )
     except AlphaError as e:
         return invalid_score(str(e))
@@ -149,19 +173,24 @@ def score_submission(
 def run_isolated(target: Callable[..., Any], args: tuple, timeout: float) -> Any:
     """Runs a function in a fresh process and returns its result.
 
-    The process is killed if it runs past `timeout`. `target` must be a
-    module-level function so that it can be pickled.
+    The process is killed if it runs past its deadline: `timeout` seconds
+    after the start, or what the target last set. `target` is called as
+    `target(allow, *args)`; `allow(seconds)` moves the deadline to that many
+    seconds from now, for a target that only learns how long it needs once
+    it has loaded its data. `target` must be a module-level function so that
+    it can be pickled.
 
     Args:
         target: Function to call.
-        args: Positional arguments, all picklable.
-        timeout: Wall-clock limit in seconds.
+        args: Positional arguments after `allow`, all picklable.
+        timeout: Wall-clock limit in seconds until the target first calls
+            `allow`.
 
     Returns:
         Whatever `target` returns.
 
     Raises:
-        AlphaTimeout: If the process runs past `timeout`.
+        AlphaTimeout: If the process runs past its deadline.
         AlphaError: If `target` raises AlphaError, or the process dies.
         SandboxError: If `target` raises anything else: a problem with the
             scoring itself, not with the alpha.
@@ -171,10 +200,16 @@ def run_isolated(target: Callable[..., Any], args: tuple, timeout: float) -> Any
     proc = ctx.Process(target=_child, args=(child, target, args), daemon=True)
     proc.start()
     child.close()
+    started = time.monotonic()
+    deadline = started + timeout
     try:
-        if not parent.poll(timeout):
-            raise AlphaTimeout(f"ran past {timeout:g} s")
-        kind, payload = parent.recv()
+        while True:
+            if not parent.poll(max(deadline - time.monotonic(), 0.0)):
+                raise AlphaTimeout(f"ran past {deadline - started:.0f} s")
+            kind, payload = parent.recv()
+            if kind != _ALLOW:
+                break
+            deadline = time.monotonic() + payload
     except EOFError as e:
         raise AlphaError("worker process died") from e
     finally:
@@ -190,8 +225,11 @@ def run_isolated(target: Callable[..., Any], args: tuple, timeout: float) -> Any
 
 
 def _child(conn, target: Callable[..., Any], args: tuple) -> None:
+    def allow(seconds: float) -> None:
+        conn.send((_ALLOW, seconds))
+
     try:
-        result = (_OK, target(*args))
+        result = (_OK, target(allow, *args))
     except AlphaError as e:
         result = (_ALPHA_ERROR, str(e))
     except Exception as e:
@@ -216,18 +254,45 @@ def _performance(data: EvalData, run: Run) -> metrics.Performance:
     )
 
 
+@dataclasses.dataclass(frozen=True)
+class _Pipeline:
+    """What a worker needs to build its sandbox once the data is loaded."""
+
+    code: str
+    user: str | None
+    limit: TimeLimit
+    # Deadline slack on top of the runs, for checks and metrics.
+    slack: float
+
+    def sandbox(
+        self, allow: Allow, data: EvalData, wf: WalkForward, runs: int
+    ) -> Sandbox:
+        """A sandbox whose limit fits a full run on `data`; sets the deadline
+        for `runs` such runs."""
+        seconds = self.limit.seconds(walkforward.run_rows(data.panel, wf, data.start))
+        allow(runs * seconds + self.slack)
+        return Sandbox(self.code, seconds, self.user)
+
+
 def _backtest_worker(
-    sandbox: Sandbox, load: Loader, wf: WalkForward
+    allow: Allow, pipeline: _Pipeline, load: Loader, wf: WalkForward
 ) -> metrics.Performance:
     data = load()
+    sandbox = pipeline.sandbox(allow, data, wf, runs=1)
     run = walkforward.run(sandbox, data.panel, wf, data.start)
     return _performance(data, run)
 
 
 def _score_worker(
-    sandbox: Sandbox, load: Loader, wf: WalkForward, config: checks.CheckConfig
+    allow: Allow,
+    pipeline: _Pipeline,
+    load: Loader,
+    wf: WalkForward,
+    config: checks.CheckConfig,
 ) -> tuple[metrics.Performance, bool, bool, dict[int, float]]:
     data = load()
+    # Pipeline runs: base, column dependence, one per truncation cut.
+    sandbox = pipeline.sandbox(allow, data, wf, runs=2 + config.n_cuts)
     panel, start = data.panel, data.start
     seed = data.check_seed if data.check_seed is not None else secrets.randbits(64)
     base = walkforward.run(sandbox, panel, wf, start)

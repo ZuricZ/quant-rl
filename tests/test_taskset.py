@@ -31,7 +31,7 @@ from quant_research.taskset import (  # noqa: E402
     QuantResearchTaskConfig,
     QuantResearchTaskset,
 )
-from quantenv import baselines, reward, scoring  # noqa: E402
+from quantenv import baselines, checks, reward, scoring, walkforward  # noqa: E402
 from quantenv.sources import synthetic  # noqa: E402
 
 COLUMN = baselines.column_code("f00")
@@ -138,7 +138,25 @@ def test_prompt_states_the_penalties():
 def test_prompt_states_the_hidden_run_and_its_time_limit():
     prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
     assert "10,000 unseen periods" in prompt
-    assert f"{scoring.SCORE_TIME_LIMIT:g} seconds per run" in prompt
+    seconds = scoring.TimeLimit().seconds(taskset.run_rows(hidden=True))
+    assert f"so it may take {seconds:.0f} seconds. The backtest" in prompt
+    assert "so it may take 30 seconds." in prompt
+
+
+@pytest.mark.parametrize("hidden", [False, True])
+def test_prompt_rows_match_the_data(hidden):
+    seed = synthetic.dataset_seed(0, "x", "eval")
+    load = synthetic.hidden_data if hidden else synthetic.visible_data
+    data = load(seed)
+    assert taskset.run_rows(hidden) == walkforward.run_rows(
+        data.panel, walkforward.WalkForward(), data.start
+    )
+
+
+def test_grading_timeout_covers_every_scored_run():
+    config = checks.CheckConfig()
+    seconds = scoring.TimeLimit().seconds(taskset.run_rows(hidden=True))
+    assert taskset.scoring_timeout(config) > (2 + config.n_cuts) * seconds
 
 
 def test_describe_lists_visible_data_only():

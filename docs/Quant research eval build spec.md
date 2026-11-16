@@ -85,7 +85,7 @@ All computed on the hidden periods.
 - **Claim gap** = claimed minus realised net Sharpe. Logged, not rewarded.
 - **Backtests used.** Logged.
 - **Failure:** code that errors or times out, a claim that is not a finite number, or no submission gives reward −1 and `invalid = 1`.
-- **Time limits:** 30 s per `backtest` call, 60 s per pipeline run on the hidden periods (each check below adds runs). Starting values, to be tuned in tests.
+- **Time limits:** per pipeline run, scaled with the rows the run hands to agent code: 5 s per million rows, at least 30 s. That is 30 s per `backtest` call and 256 s per pipeline run on the hidden periods (each check below adds runs). See Decision 20.
 
 Rewards must be finite numbers.
 
@@ -251,7 +251,7 @@ One plot: claim gap against backtests used.
      | Template | 1.41 | 1.22 | 1.42 | 1.55 | 2.19 | 0.40 | 0.012 |
 
      The template now reaches about two thirds of the oracle's net Sharpe. Correlated features make univariate IC weights double-count shared factors, it misses the interaction, and regimes make full-history IC estimates stale. Naive picks the leak on leaky seeds and is flagged when scored.
-   - Results on the eval split (30 tasks, secret `day5-check`), through `run_baselines.py`, the same scoring path as the reward, checks included. Template rows were rescored one task at a time: with two scorers in parallel on 4 cores, every template run exceeded the 60 s per-run limit (see open decision 3).
+   - Results on the eval split (30 tasks, secret `day5-check`), through `run_baselines.py`, the same scoring path as the reward, checks included. Template rows were rescored one task at a time: with two scorers in parallel on 4 cores, every template run exceeded the 60 s per-run limit (see Decision 20).
 
      | Baseline | Tasks | Leak rate | Invalid rate | Reward | Net Sharpe | Gross Sharpe | Turnover | IC | Claim gap |
      | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -271,7 +271,7 @@ One plot: claim gap against backtests used.
    - The tool server is still installed by verifiers into its own virtual environment in the container, from PyPI, on every rollout. That is verifiers' mechanism and needs the container to reach a package index.
 15. **Smaller fixes.** Decided 15 November 2026.
    - The turn-limit stop is named `max_turns` (it was `turn_limit`), so an episode it ends is a truncation to verifiers.
-   - The prompt states the hidden run: 10,000 unseen periods directly after the visible ones, walk-forward with all earlier periods as training, at most 60 s per run.
+   - The prompt states the hidden run: 10,000 unseen periods directly after the visible ones, walk-forward with all earlier periods as training, at most 60 s per run. Decision 20 replaced the limit with one scaled with the data.
    - `Task.setup` checks, inside the runtime, that the sandbox user exists and the process is root, and fails setup otherwise. Errors in the sandbox or scoring machinery (an unknown user, missing privileges, `OSError` starting the child, any non-`AlphaError` in the scoring worker) raise `sandbox.SandboxError`. They no longer become an invalid score of −0.5, because the agent is not to blame.
    - Each session's clean-up kills every process of the sandbox user, so two concurrent sessions of one user killed each other. A test reproduced this, with "alpha process died" in the slower run. Sessions of a sandbox user now take an exclusive lock on a root-owned file (`quantenv-sandbox-<user>.lock`, mode 0600, in the temp directory), so one pipeline runs per user and container at a time. The toolset already ran backtests one at a time; the lock also covers separate processes.
    - The project is named `quant-research` in `pyproject.toml`.
@@ -294,12 +294,19 @@ One plot: claim gap against backtests used.
    - The sandbox check that `Task.setup` runs in the runtime is the module `quant_research.preflight` (`python -m quant_research.preflight USER`), not a script in a string. It is not a prompt: it only checks that agent code can run as the sandbox user.
    - `metrics.sharpe` notes its bias towards 0 from how nulls are handled. `period_rank_ics` documents that its ICs are cross-sectional, per timestamp; its pairs only batch several correlations into one pass.
 19. **Alphas get a seeded generator.** Decided 15 November 2026, from review. Setting global seeds is poor practice in general, but agent code is free Python and may still call `np.random` or `random`. So the walk-forward gives each alpha instance `self.rng`, a `np.random.Generator` seeded from the step (0 for `features`, the block number plus 1 for `fit` and again for `predict`), and the prompt tells the agent to use it. The global generators are still reseeded per step as a fallback; that only touches the sandboxed alpha process, a fresh one per pipeline run. Without per-step seeds, randomness alone would make the truncation check flag honest alphas.
+20. **Time limits scale with the data.** Decided 16 November 2026; settles open decision 3.
+   - Each pipeline run may take `scoring.TimeLimit`: `per_million_rows` (5 s) per million rows the run hands to agent code, and at least `minimum` (30 s). Those rows (`walkforward.pipeline_rows`) are every row for `features`, every row before each block for its `fit`, and the block's rows for its `predict`. They depend only on the panel's shape, so the prompt states both limits before the data exists. Refitting on all earlier rows makes the count grow with the square of the number of timestamps.
+   - Rows, not periods, because the cost of an alpha follows the rows it gets. The template took 0.7 s on the visible panel (0.65M rows) and 42.5 s on the full one (51.2M rows), about 1 s per million rows in both. Scaling by timestamps alone (11×) would have left it 60× short.
+   - So a backtest gets 30 s (the floor; the rate alone gives 3.25 s), and a hidden run gets 256 s, 6 times the template's run time alone. The prompt states the rule, both row counts and both limits, and warns that a backtest far over 3.25 s may time out when scored.
+   - The scoring worker learns the limit only once it has loaded the data, which the host never sees. `scoring.run_isolated` therefore lets the worker move its own deadline: after loading, it allows (runs × the full run's limit) + 60 s. Every run of a score, check runs included, gets the full run's limit, the largest. The verifiers grading timeout follows: (2 + `n_cuts`) × 256 s + 180 s = 2,740 s with the default checks (it was 900 s).
+   - Measured 16 November 2026 on 4 cores, eval task 0 and 1 (secret `day5-check`): scoring the template, all ten runs, took 62 s alone; two scorers in parallel took 102 s and 149 s. Both were valid; under the 60 s limit every such run had timed out.
+   - Wall time, not CPU time: polars is multi-threaded, so CPU time would penalise parallel code, and a limit has to bound the time the grader waits. Contention between scorers on one machine is still the operator's to avoid.
 
 ## Open decisions
 
 1. ~~**Truncation cut points.**~~ Settled by Decision 7.
 2. **Bias in rank IC.** The current estimate shrinks towards 0 (empty or constant periods count as 0; per-period correlations are attenuated). Decide whether to average over valid periods only, weight by asset count, or report coverage alongside.
-3. **Time limit per hidden run.** 60 s per pipeline run on 2.2M rows is tight for alphas that refit on all earlier rows in each of the 44 blocks. The template takes about 25 s per full run alone and exceeded 60 s on every task with two scorers running in parallel on 4 cores. Decide whether to scale the limit with the hidden size, measure CPU time rather than wall time, or run one scorer per core budget.
+3. ~~**Time limit per hidden run.**~~ Settled by Decision 20.
 
 ## Stack notes
 
