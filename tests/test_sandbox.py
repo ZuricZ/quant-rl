@@ -16,8 +16,10 @@ from quantenv.alpha import AlphaError, compile_alpha
 from quantenv.sandbox import Sandbox
 from quantenv.sources import synthetic
 
-SMALL = synthetic.Config(n_assets=50, n_visible=200, n_hidden=400)
-SMALL_WF = walkforward.WalkForward(refit_every=50, min_train=50)
+SMALL = synthetic.Config(
+    n_assets=50, n_visible=200, n_hidden=400, no_leak_prob=0.2
+)
+SMALL_WF = walkforward.WalkForward(refit_every=50, window=50)
 SEED = next(s for s in range(100) if synthetic.ground_truth(s, SMALL).leaky)
 LEAK = synthetic.ground_truth(SEED, SMALL).leaky
 VISIBLE = functools.partial(synthetic.visible_data, SEED, SMALL)

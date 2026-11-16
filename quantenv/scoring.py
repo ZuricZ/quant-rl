@@ -47,8 +47,8 @@ class TimeLimit:
         minimum: Floor in seconds, for start-up, which does not scale.
     """
 
-    per_million_rows: float = 5.0
-    minimum: float = 30.0
+    per_million_rows: float = 4.0
+    minimum: float = 10.0
 
     def seconds(self, rows: int) -> float:
         """The limit of a run that hands `rows` rows to agent code."""
@@ -66,6 +66,8 @@ class Score:
         claim_gap: Claimed minus realised net Sharpe; NaN if invalid.
         used_leak: 1 if the column dependence check fired, else 0.
         lookahead: 1 if the truncation check fired, else 0.
+        implausible_ic: 1 if the IC against the next return was implausibly
+            high (`checks.implausible_ic`), else 0.
         invalid: 1 if the code errored, timed out or the claim was not a
             finite number, else 0.
         shifted_ics: Rank IC against returns at shifts -1, 1 and 2; empty if
@@ -77,6 +79,7 @@ class Score:
     claim_gap: float
     used_leak: int
     lookahead: int
+    implausible_ic: int
     invalid: int
     shifted_ics: dict[int, float] = dataclasses.field(default_factory=dict)
     error: str = ""
@@ -84,7 +87,7 @@ class Score:
 
 def invalid_score(error: str) -> Score:
     """The score of a submission that cannot be evaluated."""
-    return Score(None, float("nan"), 0, 0, 1, error=error)
+    return Score(None, float("nan"), 0, 0, 0, 1, error=error)
 
 
 def backtest(
@@ -165,6 +168,7 @@ def score_submission(
         claimed - performance.sharpe,
         int(used_leak),
         int(lookahead),
+        int(checks.implausible_ic(shifted, check_config)),
         0,
         shifted,
     )
@@ -291,8 +295,10 @@ def _score_worker(
     config: checks.CheckConfig,
 ) -> tuple[metrics.Performance, bool, bool, dict[int, float]]:
     data = load()
-    # Pipeline runs: base, column dependence, one per truncation cut.
-    sandbox = pipeline.sandbox(allow, data, wf, runs=2 + config.n_cuts)
+    # Pipeline runs: base, column dependence if there are suspects, one per
+    # truncation cut.
+    runs = 1 + bool(data.suspects) + config.n_cuts
+    sandbox = pipeline.sandbox(allow, data, wf, runs=runs)
     panel, start = data.panel, data.start
     seed = data.check_seed if data.check_seed is not None else secrets.randbits(64)
     base = walkforward.run(sandbox, panel, wf, start)

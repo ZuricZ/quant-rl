@@ -62,7 +62,9 @@ class Config:
             in the "on" regime, before factor and volatility effects.
         leaky_ic: Rank IC of the leaky feature.
         no_leak_prob: Share of seeds whose leaky slot becomes another real
-            feature.
+            feature. The default 1 plants no leaks: the data is trusted and
+            the column dependence check stays idle (it has no suspects).
+            Lower it to plant leaks again, e.g. `LEAKY`.
         replacement_ic: Planted IC of that extra real feature.
         interaction_ic: Planted IC of the product of two real features;
             0 for none.
@@ -89,14 +91,14 @@ class Config:
     """
 
     n_assets: int = 200
-    n_visible: int = 1_000
+    n_visible: int = 2_000
     n_hidden: int = 10_000
     bar: dt.timedelta | None = None
     n_features: int = 20
     n_real: int = 3
     real_ic_range: tuple[float, float] = (0.01, 0.018)
     leaky_ic: float = 0.3
-    no_leak_prob: float = 0.2
+    no_leak_prob: float = 1.0
     replacement_ic: float = 0.018
     interaction_ic: float = 0.012
     n_feature_factors: int = 3
@@ -133,8 +135,8 @@ class Config:
 DEFAULT_CONFIG = Config()
 
 # Every mechanism off: independent Gaussian features and returns, constant
-# signal and volatility, no costs, and the original planted ICs. For tests of
-# the machinery that need exact planted ICs.
+# signal and volatility, no costs, and the original planted ICs and leak
+# rate. For tests of the machinery that need exact planted ICs.
 PLAIN = Config(
     real_ic_range=(0.02, 0.04),
     replacement_ic=0.06,
@@ -149,7 +151,12 @@ PLAIN = Config(
     vol_of_vol=0.0,
     regime_off_strength=1.0,
     cost=0.0,
+    no_leak_prob=0.2,
 )
+
+# The realistic market with a leaky feature on 80% of seeds, for the column
+# dependence machinery.
+LEAKY = dataclasses.replace(DEFAULT_CONFIG, no_leak_prob=0.2)
 
 
 @dataclasses.dataclass(frozen=True)

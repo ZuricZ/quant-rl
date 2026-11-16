@@ -137,6 +137,7 @@ def test_table_means_performance_over_valid_episodes_only():
             "claim_gap": [0.1, None, 0.9],
             "used_leak": [0, 0, 1],
             "lookahead": [0, 0, 0],
+            "implausible_ic": [0, 0, 0],
             "invalid": [0, 1, 0],
             "backtests_used": [2, 5, 1],
         }

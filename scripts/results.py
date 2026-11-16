@@ -30,6 +30,7 @@ METRICS = {
     "claim_gap": "claim_gap",
     "used_leak": "used_leak",
     "lookahead": "lookahead",
+    "implausible_ic": "implausible_ic",
     "invalid": "invalid",
     "backtests_used": "backtests_used",
 }

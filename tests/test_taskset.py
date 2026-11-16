@@ -132,7 +132,8 @@ def test_prompt_offers_the_seeded_generator():
 
 def test_prompt_states_the_penalties():
     prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
-    assert "scores -1;" in prompt and "scores -1.5." in prompt
+    assert "scores -1;" in prompt and "scores -1.5, and so does" in prompt
+    assert "next return of 0.2 or more" in prompt
 
 
 def test_prompt_states_the_hidden_run_and_its_time_limit():
@@ -140,7 +141,7 @@ def test_prompt_states_the_hidden_run_and_its_time_limit():
     assert "10,000 unseen periods" in prompt
     seconds = scoring.TimeLimit().seconds(taskset.run_rows(hidden=True))
     assert f"so it may take {seconds:.0f} seconds. The backtest" in prompt
-    assert "so it may take 30 seconds." in prompt
+    assert "so it may take 10 seconds." in prompt
 
 
 @pytest.mark.parametrize("hidden", [False, True])
@@ -162,7 +163,7 @@ def test_grading_timeout_covers_every_scored_run():
 def test_describe_lists_visible_data_only():
     text = _toolset().describe()
     assert "fwd_return" not in text
-    assert "timestamps: 1000" in text
+    assert "timestamps: 2000" in text
     assert "assets: 200" in text
 
 

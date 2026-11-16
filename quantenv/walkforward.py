@@ -1,15 +1,18 @@
 """Runs an Alpha walk-forward over a panel.
 
 The environment, not the alpha, decides what each step sees: `features`
-gets the observable columns, `fit` gets only rows before the block (whose
-targets are realised by the block's first timestamp), and `predict` gets only
-the block. Blocks are timestamp ranges; rows are selected with lazy filters.
+gets the observable columns, `fit` gets only the rows of a fixed-length
+window just before the block (whose targets are realised by the block's
+first timestamp), and `predict` gets only the block. The window slides with
+the blocks and never grows, so every refit costs the same and a run is
+linear in the panel's length. Blocks are timestamp ranges; rows are selected
+with lazy filters.
 
 The work is split in two. A trusted driver (`run`, `engineer`,
 `predict_blocks`) owns the panel, decides the blocks and validates every
 output. A session runs the agent's steps. It only ever holds the observable
 columns and the targets realised before the block it is predicting: the
-driver sends each block's newly realised targets just before asking for that
+driver sends each block's training targets just before asking for that
 block. A `Runner` opens sessions: `Local` runs them in this process, and
 `quantenv.sandbox.Sandbox` runs each in a fresh, isolated process.
 
@@ -40,25 +43,30 @@ class WalkForward:
     """Walk-forward settings.
 
     Attributes:
+        window: Timestamps each refit trains on: the `window` timestamps just
+            before its block. Also the timestamps before the first predicted
+            one when no start is given.
         refit_every: Timestamps per block; the model is refit before each.
-        min_train: Timestamps used only for training when no start is given.
     """
 
+    window: int = 1000
     refit_every: int = 250
-    min_train: int = 250
 
 
 @dataclasses.dataclass(frozen=True)
 class Block:
-    """One walk-forward block: timestamps from `start` up to `end`.
+    """One walk-forward block: trains on timestamps from `train_start` up to
+    `start`, predicts those from `start` up to `end`.
 
     Attributes:
         index: Block number, from 0. Seeds the random state of its calls.
+        train_start: First timestamp of the block's training window.
         start: First timestamp of the block.
         end: First timestamp after the block, or None for the last block.
     """
 
     index: int
+    train_start: Any
     start: Any
     end: Any = None
 
@@ -90,11 +98,11 @@ class Session(Protocol):
         """Takes an already validated `features` output instead."""
 
     def predict(self, block: Block, labels: pl.Series) -> pl.Series:
-        """Fits a fresh instance on the rows before the block and predicts it.
+        """Fits a fresh instance on the block's training window and predicts
+        the block.
 
-        `labels` holds the targets realised since the previous call, in row
-        order: together, the calls so far hold the target of every row
-        before `block.start`.
+        `labels` holds the targets of the training window's rows
+        (`block.train_start` <= timestamp < `block.start`), in row order.
         """
 
 
@@ -119,7 +127,6 @@ class Executor:
         self._cls = cls
         self._timestamp = timestamp
         self._engineered: pl.DataFrame | None = None
-        self._labels: list[pl.Series] = []
 
     def features(self, observable: pl.DataFrame) -> pl.DataFrame:
         alpha = self._cls()
@@ -138,11 +145,10 @@ class Executor:
     def predict(self, block: Block, labels: pl.Series) -> pl.Series:
         if self._engineered is None:
             raise AlphaError("predict before features")
-        self._labels.append(labels)
         ts = self._timestamp
-        train = between(self._engineered, ts, end=block.start).with_columns(
-            pl.concat(self._labels)
-        )
+        train = between(
+            self._engineered, ts, block.train_start, block.start
+        ).with_columns(labels)
         model = self._cls()
         _seed(model, block.index + 1)
         _call(model.fit, train)
@@ -175,39 +181,52 @@ class Local:
 
 
 def start_timestamp(panel: Panel, wf: WalkForward, start: Any = None) -> Any:
-    """The first predicted timestamp: `start`, or the one after `min_train`."""
-    if start is not None:
-        return start
-    if wf.min_train >= len(panel.timestamps):
+    """The first predicted timestamp: `start`, or the one after `wf.window`.
+
+    Raises:
+        ValueError: If fewer than `wf.window` timestamps precede it, or
+            none follow.
+    """
+    stamps = panel.timestamps
+    if start is None:
+        if wf.window >= len(stamps):
+            raise ValueError(
+                f"window ({wf.window}) leaves nothing to predict "
+                f"out of {len(stamps)} timestamps"
+            )
+        return stamps[wf.window]
+    history = (stamps < start).sum()
+    if history < wf.window:
         raise ValueError(
-            f"min_train ({wf.min_train}) leaves nothing to predict "
-            f"out of {len(panel.timestamps)} timestamps"
+            f"{history} timestamps precede start {start}; the window needs "
+            f"{wf.window}"
         )
-    return panel.timestamps[wf.min_train]
+    return start
 
 
 def pipeline_rows(
-    n_timestamps: int, n_assets: int, n_warmup: int, refit_every: int
+    n_timestamps: int, n_assets: int, n_warmup: int, wf: WalkForward
 ) -> int:
     """Rows a full run hands to agent code; time limits scale with it.
 
-    `features` gets every row, each block's `fit` every row before the
-    block, and its `predict` the block's rows. Refitting on all earlier rows
-    makes this grow with the square of the number of timestamps. It depends
-    only on the panel's shape, so a limit can be stated before the data
-    exists.
+    `features` gets every row, each block's `fit` the rows of its window, and
+    its `predict` the block's rows. The window never grows, so this is linear
+    in the number of timestamps. It depends only on the panel's shape, so a
+    limit can be stated before the data exists.
 
     Args:
         n_timestamps: Timestamps in the panel.
         n_assets: Assets per timestamp.
-        n_warmup: Timestamps before the first predicted one.
-        refit_every: Timestamps per block.
+        n_warmup: Timestamps before the first predicted one; at least
+            `wf.window`.
+        wf: Walk-forward settings.
 
     Returns:
         The number of rows.
     """
-    block_starts = range(n_warmup, n_timestamps, refit_every)
-    return n_assets * (2 * n_timestamps - n_warmup + sum(block_starts))
+    n_predicted = n_timestamps - n_warmup
+    n_blocks = len(range(0, n_predicted, wf.refit_every))
+    return n_assets * (n_timestamps + n_blocks * wf.window + n_predicted)
 
 
 def run_rows(panel: Panel, wf: WalkForward, start: Any = None) -> int:
@@ -218,16 +237,36 @@ def run_rows(panel: Panel, wf: WalkForward, start: Any = None) -> int:
         n_timestamps,
         panel.frame.height // n_timestamps,
         (panel.timestamps < start).sum(),
-        wf.refit_every,
+        wf,
     )
 
 
 def blocks(panel: Panel, wf: WalkForward, start: Any) -> list[Block]:
-    """The blocks from `start` to the end of the panel."""
-    starts = panel.timestamps.filter(panel.timestamps >= start)
-    starts = starts.gather_every(wf.refit_every).to_list()
+    """The blocks from `start` to the end of the panel, with their windows.
+
+    Args:
+        panel: The data.
+        wf: Walk-forward settings.
+        start: First predicted timestamp, with at least `wf.window`
+            timestamps before it.
+
+    Returns:
+        The blocks in time order.
+    """
+    ts = panel.schema.timestamp
+    rows = (
+        panel.timestamps.to_frame(ts)
+        .with_columns(pl.col(ts).shift(wf.window).alias("train_start"))
+        .filter(pl.col(ts) >= start)
+        .gather_every(wf.refit_every)
+    )
+    starts = rows.get_column(ts).to_list()
     ends = [*starts[1:], None]
-    return [Block(i, s, e) for i, (s, e) in enumerate(zip(starts, ends))]
+    windows = rows.get_column("train_start").to_list()
+    return [
+        Block(i, train_start, s, e)
+        for i, (train_start, s, e) in enumerate(zip(windows, starts, ends))
+    ]
 
 
 def engineer(session: Session, panel: Panel) -> pl.DataFrame:
@@ -252,7 +291,7 @@ def engineer(session: Session, panel: Panel) -> pl.DataFrame:
 
 
 def predict_blocks(session: Session, panel: Panel, todo: list[Block]) -> pl.Series:
-    """Predicts blocks in time order, sending each one's realised targets first.
+    """Predicts blocks in time order, sending each one's training targets first.
 
     Args:
         session: A session that has its engineered frame.
@@ -267,12 +306,13 @@ def predict_blocks(session: Session, panel: Panel, todo: list[Block]) -> pl.Seri
     """
     s = panel.schema
     parts = []
-    sent = None
     for block in todo:
         labels = between(
-            panel.frame.select(s.timestamp, s.target), s.timestamp, sent, block.start
+            panel.frame.select(s.timestamp, s.target),
+            s.timestamp,
+            block.train_start,
+            block.start,
         ).get_column(s.target)
-        sent = block.start
         out = session.predict(block, labels)
         height = between(
             panel.frame.select(s.timestamp), s.timestamp, block.start, block.end
@@ -294,7 +334,7 @@ def run(
         runner: Runs the alpha.
         panel: The data. Timestamps before `start` are used only for training.
         wf: Walk-forward settings.
-        start: First timestamp to predict; None means after `wf.min_train`.
+        start: First timestamp to predict; None means after `wf.window`.
         engineered: Output of `engineer` on this panel, if already computed.
 
     Returns:

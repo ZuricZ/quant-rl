@@ -16,6 +16,7 @@ COLUMNS = (
     "claim_gap",
     "used_leak",
     "lookahead",
+    "implausible_ic",
     "invalid",
     "backtests_used",
 )
@@ -52,6 +53,7 @@ def table(rows: pl.DataFrame, agent: str = "agent") -> pl.DataFrame:
             pl.len().alias("Episodes"),
             pl.col("used_leak").mean().alias("Leak rate"),
             pl.col("lookahead").mean().alias("Lookahead rate"),
+            pl.col("implausible_ic").mean().alias("Implausible IC rate"),
             pl.col("invalid").mean().alias("Invalid rate"),
             pl.col("reward").mean().alias("Reward"),
             pl.col("sharpe").mean().alias("Net Sharpe"),

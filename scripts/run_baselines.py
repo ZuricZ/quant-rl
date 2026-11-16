@@ -93,6 +93,7 @@ def score_task(index: int, secret: str, split: str) -> list[dict]:
                 "claim_gap": score.claim_gap,
                 "used_leak": score.used_leak,
                 "lookahead": score.lookahead,
+                "implausible_ic": score.implausible_ic,
                 "invalid": score.invalid,
                 "error": score.error,
                 "backtests_used": 1,
