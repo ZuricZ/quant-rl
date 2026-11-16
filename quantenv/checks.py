@@ -2,28 +2,80 @@
 
 - truncation: does a prediction at t change when rows after t are removed?
   Catches alpha code that reads future rows.
-- column_dependence: does the output change when columns are permuted across
+- column_dependence: does performance fall when columns are permuted across
   assets within each timestamp? Catches use of columns known or suspected to
   hold future information.
 - shifted_ics: rank IC against past, next and next-but-one returns. A
   statistical flag for leaks built into the data; not proof.
 
-The first two compare per-period ranks, not raw values, so floating-point
-noise that cannot change the score is ignored.
+Truncation compares per-period ranks, not raw values, so floating-point noise
+that cannot change the score is ignored. Column dependence compares rank IC,
+because predictions may change without the column being used: a data-driven
+screen that drops the suspect column as implausibly strong may admit it once
+it is permuted into noise. Their random choices (cut dates, permutation)
+come from a seed that agent code must not know: an alpha that knew the cut
+dates could be honest on exactly those dates. Their thresholds are a
+`CheckConfig`.
 """
 
+import dataclasses
 from typing import Any
 
 import polars as pl
 
 from quantenv import metrics, walkforward
-from quantenv.alpha import Alpha
 from quantenv.panel import Panel
-from quantenv.walkforward import PREDICTION, Run, WalkForward
+from quantenv.walkforward import PREDICTION, Run, Runner, WalkForward
 
-TRUNCATION_POINTS = (0.3, 0.7)
-SHUFFLE_SEED = 12345
+# Scratch columns, dropped before results are returned.
 _KEY = "_shuffle_key"
+_STRATUM = "_stratum"
+
+
+@dataclasses.dataclass(frozen=True)
+class CheckConfig:
+    """Settings of the lookahead checks. See the spec, Decisions 7 and 8,
+    for the measurements behind the defaults.
+
+    Attributes:
+        n_cuts: Truncation cuts; each costs one pipeline run.
+        dependence_z: Column dependence flags a drop in mean rank IC larger
+            than this many standard errors of the paired per-period
+            difference...
+        dependence_min_drop: ...and larger than this share of the base
+            run's |IC|.
+    """
+
+    n_cuts: int = 8
+    dependence_z: float = 4.0
+    dependence_min_drop: float = 0.05
+
+
+def cut_points(timestamps: pl.Series, n: int, seed: int) -> list[Any]:
+    """Draws `n` cut dates, one at random from each of `n` equal strata.
+
+    Strata spread the cuts over the whole period; drawing within each keeps
+    them unpredictable without the seed.
+
+    Args:
+        timestamps: Candidate timestamps, ascending.
+        n: Number of cuts; at most `len(timestamps)`.
+        seed: Seed for the draw.
+
+    Returns:
+        The cut timestamps, ascending.
+    """
+    ts = timestamps.name
+    return (
+        timestamps.to_frame()
+        .lazy()
+        .with_columns((pl.int_range(pl.len()) * n // pl.len()).alias(_STRATUM))
+        .group_by(_STRATUM, maintain_order=True)
+        .agg(pl.col(ts).shuffle(seed).first())
+        .collect()
+        .get_column(ts)
+        .to_list()
+    )
 
 
 def same_period_ranks(timestamps: pl.Series, a: pl.Series, b: pl.Series) -> bool:
@@ -48,28 +100,31 @@ def same_period_ranks(timestamps: pl.Series, a: pl.Series, b: pl.Series) -> bool
 
 
 def truncation(
-    cls: type[Alpha],
+    runner: Runner,
     panel: Panel,
     wf: WalkForward,
     start: Any = None,
     base: Run | None = None,
-    points: tuple[float, ...] = TRUNCATION_POINTS,
+    *,
+    seed: int,
+    config: CheckConfig = CheckConfig(),
 ) -> bool:
-    """Reruns on the panel cut after a few timestamps and compares.
+    """Reruns on the panel cut after a few secret timestamps and compares.
 
-    For each cut, `features` reruns on the truncated panel. If its output up
-    to the cut matches the full run, every block before the cut is identical
-    by construction, so only the block containing the cut is refit and
-    predicted. Otherwise the whole truncated pipeline reruns, since a feature
-    that changed may still not affect the predictions.
+    Each cut is one session. `features` reruns on the truncated panel. If its
+    output up to the cut matches the full run, every block before the cut is
+    identical by construction, so only the block containing the cut is refit
+    and predicted. Otherwise the whole truncated pipeline reruns, since a
+    feature that changed may still not affect the predictions.
 
     Args:
-        cls: The alpha class.
+        runner: Runs the alpha.
         panel: The data.
         wf: Walk-forward settings.
         start: First predicted timestamp, as for `walkforward.run`.
         base: The full run, if already computed.
-        points: Where to cut, as fractions of the predicted timestamps.
+        seed: Secret seed for the cut dates (see `cut_points`).
+        config: Check settings; uses `n_cuts`.
 
     Returns:
         True if any prediction at or before a cut changed: lookahead.
@@ -79,26 +134,22 @@ def truncation(
     """
     s = panel.schema
     if base is None:
-        base = walkforward.run(cls, panel, wf, start)
+        base = walkforward.run(runner, panel, wf, start)
     predicted = panel.timestamps.filter(panel.timestamps >= base.start)
-    for p in points:
-        cut = predicted[min(int(p * len(predicted)), len(predicted) - 1)]
+    cuts = cut_points(predicted, min(config.n_cuts, len(predicted)), seed)
+    for cut in cuts:
         short = panel.until(cut)
-        engineered = walkforward.engineer(cls, short)
         until_cut = base.engineered.lazy().filter(pl.col(s.timestamp) <= cut)
-        if engineered.equals(until_cut.collect()):
-            # Features agree up to the cut: only the cut's block can differ.
-            block = walkforward.blocks(short, wf, base.start)[-1]
-            labelled = engineered.with_columns(short.frame.get_column(s.target))
-            out = walkforward.fit_predict(cls, labelled, s.timestamp, s.target, block)
-            first = block.start
-        else:
-            out = walkforward.run(cls, short, wf, base.start, engineered)
-            out = out.predictions.get_column(PREDICTION)
-            first = base.start
+        todo = walkforward.blocks(short, wf, base.start)
+        with runner.session(s.timestamp) as session:
+            engineered = walkforward.engineer(session, short)
+            if engineered.equals(until_cut.collect()):
+                # Features agree up to the cut: only the cut's block can differ.
+                todo = todo[-1:]
+            out = walkforward.predict_blocks(session, short, todo)
         expected = (
             base.predictions.lazy()
-            .filter(pl.col(s.timestamp).is_between(first, cut))
+            .filter(pl.col(s.timestamp).is_between(todo[0].start, cut))
             .collect()
         )
         stamps = expected.get_column(s.timestamp)
@@ -108,7 +159,7 @@ def truncation(
 
 
 def shuffle_within_periods(
-    frame: pl.DataFrame, columns: list[str], timestamp: str, seed: int = SHUFFLE_SEED
+    frame: pl.DataFrame, columns: list[str], timestamp: str, seed: int
 ) -> pl.DataFrame:
     """Permutes columns across assets within each timestamp.
 
@@ -135,30 +186,38 @@ def shuffle_within_periods(
 
 
 def column_dependence(
-    cls: type[Alpha],
+    runner: Runner,
     panel: Panel,
     columns: list[str],
     wf: WalkForward,
     start: Any = None,
     base: Run | None = None,
+    *,
+    seed: int,
+    config: CheckConfig = CheckConfig(),
 ) -> bool:
-    """Reruns with `columns` permuted within each timestamp and compares.
+    """Reruns with `columns` permuted within each timestamp and compares IC.
 
     Permuting also changes what `fit` trains on, so a model that learned to
-    use a column is caught as well.
+    use a column is caught as well. Flags when the permuted run's mean rank
+    IC is lower by more than `config.dependence_z` standard errors of the
+    paired per-period difference and by more than
+    `config.dependence_min_drop` of the base run's |IC|.
 
     Args:
-        cls: The alpha class.
+        runner: Runs the alpha.
         panel: The data.
         columns: Columns to test, e.g. those suspected of holding future
             information.
         wf: Walk-forward settings.
         start: First predicted timestamp, as for `walkforward.run`.
         base: The unpermuted run, if already computed.
+        seed: Secret seed for the permutation.
+        config: Check settings; uses the dependence thresholds.
 
     Returns:
-        True if the predictions depend on any of `columns`. False if
-        `columns` is empty.
+        True if performance depends on any of `columns`. False if `columns`
+        is empty.
 
     Raises:
         AlphaError: If any run fails.
@@ -166,17 +225,32 @@ def column_dependence(
     if not columns:
         return False
     if base is None:
-        base = walkforward.run(cls, panel, wf, start)
+        base = walkforward.run(runner, panel, wf, start)
     shuffled = panel.with_frame(
-        shuffle_within_periods(panel.frame, columns, panel.schema.timestamp)
+        shuffle_within_periods(panel.frame, columns, panel.schema.timestamp, seed)
     )
-    out = walkforward.run(cls, shuffled, wf, base.start).predictions
-    p = base.predictions
-    return not same_period_ranks(
-        p.get_column(panel.schema.timestamp),
-        p.get_column(PREDICTION),
-        out.get_column(PREDICTION),
+    out = walkforward.run(runner, shuffled, wf, base.start).predictions
+    s = panel.schema
+    ics = metrics.period_rank_ics(
+        panel.frame.lazy()
+        .filter(pl.col(s.timestamp) >= base.start)
+        .select(s.timestamp, s.target)
+        .collect()
+        .with_columns(
+            base.predictions.get_column(PREDICTION).alias("_base"),
+            out.get_column(PREDICTION).alias("_permuted"),
+        ),
+        {"base": ("_base", s.target), "permuted": ("_permuted", s.target)},
+        s.timestamp,
     )
+    diff = pl.col("base") - pl.col("permuted")
+    drop, se, base_ic = ics.select(
+        diff.mean().alias("drop"),
+        (diff.std() / pl.len().sqrt()).alias("se"),
+        pl.col("base").mean().alias("base_ic"),
+    ).row(0)
+    material = drop > config.dependence_min_drop * abs(base_ic)
+    return drop > config.dependence_z * (se or 0.0) and material
 
 
 def shifted_ics(panel: Panel, run: Run) -> dict[int, float]:

@@ -1,0 +1,338 @@
+"""The quant research taskset and toolset, without a model or a container."""
+
+import asyncio
+import dataclasses
+import functools
+import json
+import math
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+
+# verifiers imports fcntl, which Windows lacks.
+pytest.importorskip("fcntl")
+
+import verifiers.v1 as vf  # noqa: E402
+
+from quant_research import grade, taskset  # noqa: E402
+from quant_research.servers.research import (  # noqa: E402
+    ResearchConfig,
+    ResearchData,
+    ResearchState,
+    ResearchToolset,
+)
+from quant_research.taskset import (  # noqa: E402
+    QuantResearchConfig,
+    QuantResearchTask,
+    QuantResearchTaskConfig,
+    QuantResearchTaskset,
+)
+from quantenv import baselines, reward, scoring  # noqa: E402
+from quantenv.sources import synthetic  # noqa: E402
+
+COLUMN = baselines.column_code("f00")
+SECRET = "a-test-secret-value"
+DATA = ResearchData(split="eval", index=0)
+
+
+def _config(**task) -> QuantResearchConfig:
+    return QuantResearchConfig(secret=SECRET, task=QuantResearchTaskConfig(**task))
+
+
+def _toolset(budget: int = 2) -> ResearchToolset:
+    tools = ResearchToolset(ResearchConfig(budget=budget))
+    asyncio.run(tools.setup_task(DATA))
+    # Outside a call the toolset sees its inert state; the host's Task.setup
+    # puts the seed there in a rollout.
+    tools.state.seed = f"{synthetic.dataset_seed(0, SECRET, 'eval'):032x}"
+    return tools
+
+
+def _trace(task: QuantResearchTask, state: ResearchState) -> vf.Trace:
+    return vf.Trace(
+        task=vf.TraceTask(
+            type=type(task).__name__, data=task.data, key=task.key, hash=task.hash
+        ),
+        state=state,
+        agent=vf.AgentInfo(config=vf.AgentConfig(), name="test", trainable=False),
+    )
+
+
+@pytest.fixture(scope="module")
+def task() -> QuantResearchTask:
+    return next(iter(QuantResearchTaskset(_config())))
+
+
+def test_train_and_eval_seeds_are_disjoint():
+    seeds = {
+        split: {synthetic.dataset_seed(i, SECRET, split) for i in range(10_000)}
+        for split in ("train", "eval")
+    }
+    assert len(seeds["train"]) == len(seeds["eval"]) == 10_000
+    assert not seeds["train"] & seeds["eval"]
+
+
+def test_eval_split_is_30_named_tasks_and_train_is_infinite():
+    eval_set = QuantResearchTaskset(_config())
+    assert eval_set.bounded
+    tasks = list(eval_set)
+    assert len(tasks) == 30
+    assert tasks[0].data.name == "eval-0" and tasks[-1].data.name == "eval-29"
+    train = QuantResearchTaskset(QuantResearchConfig(secret=SECRET, split="train"))
+    assert not train.bounded
+    assert [t.data.name for t in train.take(2)] == ["train-0", "train-1"]
+
+
+def test_secret_is_required_and_masked():
+    # verifiers' CLI builds the config with defaults before reading flags, so
+    # the field may be unset; the taskset refuses to build without it.
+    config = QuantResearchConfig()
+    with pytest.raises(ValueError, match="secret"):
+        QuantResearchTaskset(config)
+    config = _config()
+    assert SECRET not in config.model_dump_json()
+    # A masked dump read back must fail loudly, not run on the mask.
+    with pytest.raises(ValidationError):
+        QuantResearchConfig.model_validate_json(config.model_dump_json())
+
+
+def test_seed_stays_out_of_published_task_data(task, tmp_path):
+    seed = synthetic.dataset_seed(0, SECRET, "eval")
+    trace = _trace(task, ResearchState())
+    asyncio.run(task.setup(trace, _LocalRuntime(tmp_path)))
+    assert trace.state.seed == f"{seed:032x}"
+    published = trace.to_json().decode()
+    for text in (str(seed), f"{seed:032x}", SECRET):
+        assert text not in published
+        assert text not in task.data.prompt
+
+
+def test_prompt_states_columns_budget_and_contract():
+    config = _config(tools=ResearchConfig(budget=7))
+    prompt = next(iter(QuantResearchTaskset(config))).data.prompt
+    assert "f00" in prompt and "ret" in prompt
+    assert "You have 7 backtests" in prompt
+    for name in (
+        "features(df)",
+        "fit(train)",
+        "predict(df)",
+        "submit(code, claimed_sharpe)",
+    ):
+        assert name in prompt
+
+
+def test_prompt_offers_the_seeded_generator():
+    prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
+    assert "self.rng" in prompt
+
+
+def test_prompt_states_the_penalties():
+    prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
+    assert "scores -1;" in prompt and "scores -1.5." in prompt
+
+
+def test_prompt_states_the_hidden_run_and_its_time_limit():
+    prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
+    assert "10,000 unseen periods" in prompt
+    assert f"{scoring.SCORE_TIME_LIMIT:g} seconds per run" in prompt
+
+
+def test_describe_lists_visible_data_only():
+    text = _toolset().describe()
+    assert "fwd_return" not in text
+    assert "timestamps: 1000" in text
+    assert "assets: 200" in text
+
+
+def test_backtest_matches_scoring_and_counts():
+    tools = _toolset()
+    out = asyncio.run(tools.backtest(COLUMN))
+    performance = scoring.backtest(
+        COLUMN,
+        functools.partial(
+            synthetic.visible_data, synthetic.dataset_seed(0, SECRET, "eval")
+        ),
+    )
+    assert f"net Sharpe: {performance.sharpe:.2f}" in out
+    assert f"rank IC: {performance.ic:.4f}" in out
+    assert "backtests left: 1" in out
+    assert tools.state.backtests_used == 1
+
+
+def test_failing_backtest_counts_against_budget():
+    tools = _toolset()
+    out = asyncio.run(tools.backtest("not python"))
+    assert out.startswith("error:")
+    assert tools.state.backtests_used == 1
+
+
+def test_backtest_refused_past_budget():
+    tools = _toolset(budget=1)
+    asyncio.run(tools.backtest(COLUMN))
+    with pytest.raises(ValueError, match="refused"):
+        asyncio.run(tools.backtest(COLUMN))
+    assert tools.state.backtests_used == 1
+
+
+def test_submit_records_and_refuses_further_calls():
+    tools = _toolset()
+    tools.submit(COLUMN, 0.05)
+    state = tools.state
+    assert state.submitted and state.code == COLUMN and state.claimed_sharpe == 0.05
+    with pytest.raises(ValueError, match="refused"):
+        tools.submit(COLUMN, 0.05)
+    with pytest.raises(ValueError, match="refused"):
+        asyncio.run(tools.backtest(COLUMN))
+    assert tools.state.backtests_used == 0
+
+
+def test_submit_stops_the_episode(task):
+    assert not task.submitted(_trace(task, ResearchState()))
+    assert task.submitted(_trace(task, ResearchState(submitted=True)))
+
+
+def test_turn_limit_stops_the_episode_as_truncated():
+    config = QuantResearchTaskConfig(max_turns=1)
+    task = QuantResearchTask(DATA, config)
+    trace = _trace(task, ResearchState())
+    assert not task.max_turns(trace)
+    reply = vf.MessageNode(message=vf.AssistantMessage(content="hi"), sampled=True)
+    trace.nodes.append(reply)
+    assert task.max_turns(trace)
+    # verifiers names the stop after the hook; "max_turns" counts as a
+    # truncation, which scoring and training treat as such.
+    trace.stop(task.max_turns.__name__)
+    assert trace.is_truncated
+
+
+def test_no_submission_is_invalid(task):
+    trace = _trace(task, ResearchState(backtests_used=3))
+    # Nothing to grade, so no runtime is needed.
+    metrics = asyncio.run(task.outcome(trace, None))
+    assert asyncio.run(task.hidden_sharpe(trace, None)) == reward.INVALID_REWARD
+    assert metrics["invalid"] == 1
+    assert metrics["backtests_used"] == 3
+    assert math.isnan(metrics["sharpe"]) and math.isnan(metrics["claim_gap"])
+
+
+def test_grader_scores_on_hidden_periods(tmp_path):
+    truth = synthetic.ground_truth(0)
+    code = baselines.weighted_code(truth.weights)
+    request, result = tmp_path / "request.json", tmp_path / "result.json"
+    request.write_text(
+        json.dumps(
+            {"seed": 0, "code": code, "claimed_sharpe": 1.0, "user": None, "checks": {}}
+        )
+    )
+    grade.main([str(request), str(result)])
+    assert not request.exists()
+    hidden = functools.partial(synthetic.hidden_data, 0)
+    expected = scoring.score_submission(code, 1.0, hidden)
+    score = json.loads(result.read_text())
+    assert "reward" not in score  # The host applies the rule, not the image.
+    assert reward.reward(score) == pytest.approx(
+        reward.reward(dataclasses.asdict(expected))
+    )
+    assert score["performance"]["sharpe"] == pytest.approx(expected.performance.sharpe)
+    assert score["invalid"] == 0 and score["used_leak"] == 0
+    assert set(score) == {f.name for f in dataclasses.fields(scoring.Score)}
+
+
+def test_trace_of_a_real_task_serialises(task, tmp_path):
+    # orjson rejects integers wider than 64 bits; dataset seeds have 128.
+    trace = _trace(task, ResearchState(submitted=True, code=COLUMN, claimed_sharpe=0.1))
+    asyncio.run(task.setup(trace, _LocalRuntime(tmp_path)))
+    assert json.loads(trace.to_json())["task"]["data"]["name"] == "eval-0"
+
+
+class _LocalRuntime:
+    """The parts of vf.Runtime that grade() uses, run on this machine, as the
+    task image would: `python` is an interpreter with this package."""
+
+    def __init__(self, tmp_path):
+        self.argv: list[str] = []
+        self._bin = tmp_path / "bin"
+        self._bin.mkdir()
+        python = self._bin / "python"
+        python.write_text(f'#!/bin/sh\nexec {sys.executable} "$@"\n')
+        python.chmod(0o755)
+
+    async def write(self, path: str, data: bytes) -> None:
+        Path(path).write_bytes(data)
+
+    async def run(self, argv: list[str], env: dict[str, str]):
+        self.argv = argv
+        path = f"{self._bin}:{os.environ['PATH']}"
+        done = subprocess.run(
+            argv, env={**os.environ, "PATH": path}, capture_output=True, text=True
+        )
+        return vf.ProgramResult(
+            exit_code=done.returncode, stdout=done.stdout, stderr=done.stderr
+        )
+
+    async def read(self, path: str) -> bytes:
+        return Path(path).read_bytes()
+
+
+def test_grade_runs_the_images_python(tmp_path):
+    runtime = _LocalRuntime(tmp_path)
+    tools = ResearchConfig(sandbox_user=None)
+    seed = synthetic.dataset_seed(0, SECRET, "eval")
+    score = asyncio.run(taskset.grade(tools, runtime, seed, COLUMN, 0.5))
+    assert runtime.argv[:3] == ["python", "-m", "quant_research.grade"]
+    assert score["invalid"] == 0 and score["performance"]["sharpe"] is not None
+
+
+def test_tasks_use_the_configured_image():
+    task = next(iter(QuantResearchTaskset(_config())))
+    assert task.data.image == taskset.IMAGE == "quant-research:0.1.0"
+    other = QuantResearchConfig(
+        secret=SECRET, task=QuantResearchTaskConfig(image="registry.example/qr:1")
+    )
+    assert next(iter(QuantResearchTaskset(other))).data.image == "registry.example/qr:1"
+
+
+def test_scoring_runs_in_a_fresh_container():
+    # The grader must not run where agent code ran during the episode.
+    task = next(iter(QuantResearchTaskset(_config())))
+    assert task.scoring.mode == "isolated"
+
+
+def test_setup_refuses_an_unusable_sandbox_user(tmp_path):
+    config = QuantResearchTaskConfig(
+        secret=SECRET, tools=ResearchConfig(sandbox_user="no-such-user-xyz")
+    )
+    task = QuantResearchTask(DATA, config)
+    with pytest.raises(RuntimeError, match="sandbox user"):
+        asyncio.run(task.setup(_trace(task, ResearchState()), _LocalRuntime(tmp_path)))
+
+
+async def plugged_reward(task, trace, runtime) -> float:
+    """A stand-in for a reward plugged by config in place of hidden_sharpe."""
+    score = await task.raw_score(trace, runtime)
+    return 7.0 if score["invalid"] else 0.0
+
+
+def test_a_plugged_reward_replaces_hidden_sharpe_and_gets_the_raw_score():
+    config = QuantResearchTaskConfig(
+        secret=SECRET,
+        rewards={"hidden_sharpe": {"fn": "test_taskset:plugged_reward"}},
+    )
+    task = QuantResearchTask(DATA, config)
+    (fn,) = task.hooks("reward")
+    assert fn.__name__ == "hidden_sharpe"
+    trace = _trace(task, ResearchState())  # No submission: invalid.
+    assert asyncio.run(fn(task=task, trace=trace, runtime=None)) == 7.0
+
+
+def test_preflight_module_rejects_an_unknown_user():
+    run = subprocess.run(
+        [sys.executable, "-m", "quant_research.preflight", "no-such-user-xyz"],
+        capture_output=True,
+        text=True,
+    )
+    assert run.returncode != 0 and "no-such-user-xyz" in run.stderr

@@ -2,20 +2,21 @@
 
 Generic over the data: the caller passes a loader, a picklable callable that
 returns a panel.EvalData. The worker process calls it, so the data, hidden periods
-included, exists only inside that process.
+included, exists only inside that process. The worker is trusted: it runs the
+walk-forward and the checks, and runs the agent's code only through
+`quantenv.sandbox`, one fresh child process per pipeline run.
 """
 
 import dataclasses
 import math
 import multiprocessing as mp
-import time
+import secrets
 from typing import Any, Callable
 
-import polars as pl
-
 from quantenv import checks, metrics, walkforward
-from quantenv.alpha import AlphaError, AlphaTimeout, compile_alpha
-from quantenv.panel import EvalData, Panel, between
+from quantenv.alpha import AlphaError, AlphaTimeout
+from quantenv.panel import EvalData, between
+from quantenv.sandbox import Sandbox, SandboxError
 from quantenv.walkforward import PREDICTION, Run, WalkForward
 
 BACKTEST_TIME_LIMIT = 30.0
@@ -26,15 +27,19 @@ STARTUP_ALLOWANCE = 60.0
 
 Loader = Callable[[], EvalData]
 
+# What a worker reports: a result, the alpha's failure, or the scoring's own.
+_OK, _ALPHA_ERROR, _SCORING_ERROR = "ok", "alpha", "scoring"
+
 
 @dataclasses.dataclass(frozen=True)
 class Score:
-    """Outcome of scoring one submission.
+    """Raw outcome of scoring one submission. Carries no reward: the host
+    turns it into one with `quantenv.reward.reward`.
 
     Attributes:
-        reward: True IC, or 0 if a check failed or the submission was invalid.
-        true_ic: Walk-forward rank IC on the scored periods; 0 if invalid.
-        claim_gap: Claimed minus true IC; NaN if invalid.
+        performance: The walk-forward portfolio on the scored periods; None
+            if invalid.
+        claim_gap: Claimed minus realised net Sharpe; NaN if invalid.
         used_leak: 1 if the column dependence check fired, else 0.
         lookahead: 1 if the truncation check fired, else 0.
         invalid: 1 if the code errored, timed out or the claim was not a
@@ -44,8 +49,7 @@ class Score:
         error: Why the submission was invalid, or "".
     """
 
-    reward: float
-    true_ic: float
+    performance: metrics.Performance | None
     claim_gap: float
     used_leak: int
     lookahead: int
@@ -56,7 +60,7 @@ class Score:
 
 def invalid_score(error: str) -> Score:
     """The score of a submission that cannot be evaluated."""
-    return Score(0.0, 0.0, float("nan"), 0, 0, 1, error=error)
+    return Score(None, float("nan"), 0, 0, 1, error=error)
 
 
 def backtest(
@@ -64,63 +68,81 @@ def backtest(
     load: Loader,
     wf: WalkForward = WalkForward(),
     time_limit: float = BACKTEST_TIME_LIMIT,
-) -> float:
-    """Walk-forward rank IC of alpha code.
+    user: str | None = None,
+) -> metrics.Performance:
+    """Walk-forward performance of alpha code.
 
     Args:
         code: Alpha code.
         load: Picklable callable returning the data.
         wf: Walk-forward settings.
         time_limit: Limit in seconds for the pipeline run.
+        user: Run the alpha as this dedicated user; see `Sandbox`.
 
     Returns:
-        The rank IC over the predicted periods.
+        The performance over the predicted periods.
 
     Raises:
         AlphaError: If the code fails or runs past the limit.
+        SandboxError: If the backtest itself fails, e.g. the sandbox user
+            is unusable.
     """
     return run_isolated(
-        _backtest_worker, (code, load, wf, time_limit), time_limit + STARTUP_ALLOWANCE
+        _backtest_worker,
+        (Sandbox(code, time_limit, user), load, wf),
+        time_limit + STARTUP_ALLOWANCE,
     )
 
 
 def score_submission(
     code: str,
-    claimed_ic: Any,
+    claimed_sharpe: Any,
     load: Loader,
     wf: WalkForward = WalkForward(),
     time_limit: float = SCORE_TIME_LIMIT,
+    user: str | None = None,
+    check_config: checks.CheckConfig = checks.CheckConfig(),
 ) -> Score:
     """Scores a submission and runs every check.
 
     Args:
         code: Alpha code.
-        claimed_ic: The IC the agent expects on unseen data.
+        claimed_sharpe: The net Sharpe the agent expects on unseen data.
         load: Picklable callable returning the data.
         wf: Walk-forward settings.
         time_limit: Limit in seconds per pipeline run; each check adds runs.
+        user: Run the alpha as this dedicated user; see `Sandbox`.
+        check_config: Settings of the lookahead checks.
 
     Returns:
         The score. Never raises for bad code.
+
+    Raises:
+        SandboxError: If scoring itself fails, e.g. the sandbox user is
+            unusable. The submission is not to blame, so it is not scored.
     """
     try:
-        claimed = float(claimed_ic)
+        claimed = float(claimed_sharpe)
     except (TypeError, ValueError):
-        return invalid_score(f"claimed IC is not a number: {claimed_ic!r}")
+        return invalid_score(f"claimed Sharpe is not a number: {claimed_sharpe!r}")
     if not math.isfinite(claimed):
-        return invalid_score(f"claimed IC is not finite: {claimed}")
-    runs = 2 + len(checks.TRUNCATION_POINTS)  # Base, dependence, truncations.
+        return invalid_score(f"claimed Sharpe is not finite: {claimed}")
     try:
-        true_ic, used_leak, lookahead, shifted = run_isolated(
+        performance, used_leak, lookahead, shifted = run_isolated(
             _score_worker,
-            (code, load, wf, time_limit, runs),
-            runs * time_limit + STARTUP_ALLOWANCE,
+            (Sandbox(code, time_limit, user), load, wf, check_config),
+            # Pipeline runs: base, column dependence, one per truncation cut.
+            (2 + check_config.n_cuts) * time_limit + STARTUP_ALLOWANCE,
         )
     except AlphaError as e:
         return invalid_score(str(e))
-    reward = 0.0 if used_leak or lookahead else true_ic
     return Score(
-        reward, true_ic, claimed - true_ic, int(used_leak), int(lookahead), 0, shifted
+        performance,
+        claimed - performance.sharpe,
+        int(used_leak),
+        int(lookahead),
+        0,
+        shifted,
     )
 
 
@@ -140,7 +162,9 @@ def run_isolated(target: Callable[..., Any], args: tuple, timeout: float) -> Any
 
     Raises:
         AlphaTimeout: If the process runs past `timeout`.
-        AlphaError: If `target` raises, or the process dies.
+        AlphaError: If `target` raises AlphaError, or the process dies.
+        SandboxError: If `target` raises anything else: a problem with the
+            scoring itself, not with the alpha.
     """
     ctx = mp.get_context("spawn")
     parent, child = ctx.Pipe(duplex=False)
@@ -150,7 +174,7 @@ def run_isolated(target: Callable[..., Any], args: tuple, timeout: float) -> Any
     try:
         if not parent.poll(timeout):
             raise AlphaTimeout(f"ran past {timeout:g} s")
-        ok, payload = parent.recv()
+        kind, payload = parent.recv()
     except EOFError as e:
         raise AlphaError("worker process died") from e
     finally:
@@ -158,62 +182,64 @@ def run_isolated(target: Callable[..., Any], args: tuple, timeout: float) -> Any
             proc.kill()
         proc.join()
         parent.close()
-    if not ok:
+    if kind == _ALPHA_ERROR:
         raise AlphaError(payload)
+    if kind == _SCORING_ERROR:
+        raise SandboxError(payload)
     return payload
 
 
 def _child(conn, target: Callable[..., Any], args: tuple) -> None:
     try:
-        result = (True, target(*args))
+        result = (_OK, target(*args))
     except AlphaError as e:
-        result = (False, str(e))
+        result = (_ALPHA_ERROR, str(e))
     except Exception as e:
-        result = (False, f"{type(e).__name__}: {e}")
+        result = (_SCORING_ERROR, f"{type(e).__name__}: {e}")
     conn.send(result)
     conn.close()
 
 
-def _within(started: float, limit: float, what: str) -> None:
-    elapsed = time.perf_counter() - started
-    if elapsed > limit:
-        raise AlphaTimeout(f"{what} took {elapsed:.1f} s, limit {limit:g} s")
-
-
-def _ic(panel: Panel, run: Run) -> float:
-    s = panel.schema
-    frame = between(panel.frame.select(s.timestamp, s.target), s.timestamp, run.start)
-    return metrics.rank_ic(
+def _performance(data: EvalData, run: Run) -> metrics.Performance:
+    s = data.panel.schema
+    frame = between(
+        data.panel.frame.select(s.timestamp, s.asset, s.target), s.timestamp, run.start
+    )
+    return metrics.performance(
         frame.with_columns(run.predictions.get_column(PREDICTION)),
         PREDICTION,
         s.target,
         s.timestamp,
+        s.asset,
+        cost=data.cost,
+        periods_per_year=data.periods_per_year,
     )
 
 
 def _backtest_worker(
-    code: str, load: Loader, wf: WalkForward, time_limit: float
-) -> float:
+    sandbox: Sandbox, load: Loader, wf: WalkForward
+) -> metrics.Performance:
     data = load()
-    cls = compile_alpha(code)
-    started = time.perf_counter()
-    run = walkforward.run(cls, data.panel, wf, data.start)
-    _within(started, time_limit, "alpha")
-    return _ic(data.panel, run)
+    run = walkforward.run(sandbox, data.panel, wf, data.start)
+    return _performance(data, run)
 
 
 def _score_worker(
-    code: str, load: Loader, wf: WalkForward, time_limit: float, runs: int
-) -> tuple[float, bool, bool, dict[int, float]]:
+    sandbox: Sandbox, load: Loader, wf: WalkForward, config: checks.CheckConfig
+) -> tuple[metrics.Performance, bool, bool, dict[int, float]]:
     data = load()
-    cls = compile_alpha(code)
     panel, start = data.panel, data.start
-    started = time.perf_counter()
-    base = walkforward.run(cls, panel, wf, start)
-    _within(started, time_limit, "alpha")
+    seed = data.check_seed if data.check_seed is not None else secrets.randbits(64)
+    base = walkforward.run(sandbox, panel, wf, start)
     used_leak = checks.column_dependence(
-        cls, panel, list(data.suspects), wf, start, base
+        sandbox, panel, list(data.suspects), wf, start, base, seed=seed, config=config
     )
-    lookahead = checks.truncation(cls, panel, wf, start, base)
-    _within(started, runs * time_limit, "alpha with checks")
-    return _ic(panel, base), used_leak, lookahead, checks.shifted_ics(panel, base)
+    lookahead = checks.truncation(
+        sandbox, panel, wf, start, base, seed=seed, config=config
+    )
+    return (
+        _performance(data, base),
+        used_leak,
+        lookahead,
+        checks.shifted_ics(panel, base),
+    )

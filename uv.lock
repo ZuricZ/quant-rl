@@ -1160,7 +1160,7 @@ wheels = [
 ]
 
 [[package]]
-name = "quantenv"
+name = "quant-research"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
@@ -1178,7 +1178,7 @@ dev = [
 requires-dist = [
     { name = "numpy", specifier = ">=2.0" },
     { name = "polars", specifier = ">=2.1.0" },
-    { name = "verifiers", specifier = ">=0.4.1" },
+    { name = "verifiers", specifier = ">=0.4.1,<0.5" },
 ]
 
 [package.metadata.requires-dev]

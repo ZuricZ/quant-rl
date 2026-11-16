@@ -1,6 +1,8 @@
 """Long-format panels: one row per (timestamp, asset).
 
-Nothing here knows where the data came from. A panel from the simulator and
+A panel is a dense grid: every asset at every timestamp, exactly once, sorted
+by timestamp then asset. The generator, scoring and checks rely on this to
+line up frames by row position. Nothing here knows where the data came from. A panel from the simulator and
 one from real data look the same to the rest of the package. Time slices are
 lazy timestamp filters, which polars runs fast on the sorted timestamp column.
 """
@@ -64,20 +66,46 @@ class Panel:
     """A panel and its schema.
 
     Attributes:
-        frame: All columns, sorted by timestamp.
+        frame: All columns, one row per (timestamp, asset), sorted by
+            timestamp then asset.
         schema: Column roles.
 
     Raises:
-        ValueError: If the frame is not sorted by timestamp.
+        ValueError: If the rows are not a dense grid sorted by timestamp then
+            asset: a key repeats, keys are out of order, or some asset is
+            missing at some timestamp.
     """
 
     frame: pl.DataFrame
     schema: Schema
 
     def __post_init__(self) -> None:
+        ts, asset = pl.col(self.schema.timestamp), pl.col(self.schema.asset)
+        # Keys strictly increasing in (timestamp, asset) order means sorted
+        # and unique; then timestamps x assets rows means no gaps.
+        increasing, n_timestamps, n_assets = (
+            self.frame.lazy()
+            .select(
+                ((ts > ts.shift(1)) | ((ts == ts.shift(1)) & (asset > asset.shift(1))))
+                .slice(1)
+                .all()
+                .alias("increasing"),
+                ts.n_unique().alias("n_timestamps"),
+                asset.n_unique().alias("n_assets"),
+            )
+            .collect()
+            .row(0)
+        )
+        if not increasing:
+            raise ValueError(
+                "panel rows must be unique and sorted by timestamp then asset"
+            )
+        if n_timestamps * n_assets != self.frame.height:
+            raise ValueError(
+                f"panel must have every asset at every timestamp: {n_timestamps} "
+                f"timestamps x {n_assets} assets != {self.frame.height} rows"
+            )
         ts = self.schema.timestamp
-        if not self.frame.get_column(ts).is_sorted():
-            raise ValueError("panel must be sorted by timestamp")
         # Mark the column sorted so timestamp filters take polars' fast path.
         sorted_frame = self.frame.with_columns(pl.col(ts).set_sorted())
         object.__setattr__(self, "frame", sorted_frame)
@@ -111,8 +139,17 @@ class EvalData:
         start: First scored timestamp; None means after the walk-forward's
             `min_train` periods.
         suspects: Columns for the column dependence check.
+        check_seed: Seed for the checks' random choices: where the
+            truncation check cuts and how the column dependence check
+            permutes. Agent code must not be able to learn it, or it can
+            special-case those choices. None draws a fresh one per score.
+        cost: Trading cost per unit of turnover, in return units.
+        periods_per_year: Periods in a year, for annualising Sharpe ratios.
     """
 
     panel: Panel
     start: Any = None
     suspects: tuple[str, ...] = ()
+    check_seed: int | None = None
+    cost: float = 0.0
+    periods_per_year: float = 252.0
