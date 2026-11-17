@@ -19,7 +19,11 @@ Usage:
     uv run python scripts/run_models.py --secret S qwen3_5-9b [...]
         [--split eval] [--tasks 30] [--rollouts 3] [--concurrency 4]
         [--chunk 4] [--runtime docker] [--out outputs/models]
-        [--vf-config overrides.toml] [--dry-run]
+        [--budget N] [--vf-config overrides.toml] [--dry-run]
+
+`--budget N` sets the backtest budget (the taskset's default otherwise) and
+names the run `<model>-budget<N>`, so runs of one model at several budgets
+sit side by side; `results.py` pools them per model in its claim-gap plot.
 
 `--vf-config` passes a TOML file of vf-run settings, for those its flags
 cannot set, e.g. the check settings:
@@ -50,6 +54,11 @@ def load_models(path: Path = REGISTRY) -> dict[str, dict[str, Any]]:
     """The model entries of a registry file, by name."""
     with path.open("rb") as f:
         return tomllib.load(f)["models"]
+
+
+def run_name(name: str, budget: int | None) -> str:
+    """The run's name: the entry's, with the budget if one is set."""
+    return name if budget is None else f"{name}-budget{budget}"
 
 
 def chunk_dir(first: int, n: int) -> str:
@@ -109,9 +118,9 @@ def command(
         "--max-concurrent",
         str(args.concurrency),
         "--output-dir",
-        str(args.out / name),
+        str(args.out / run_name(name, args.budget)),
         "--run.name",
-        name,
+        run_name(name, args.budget),
         "--run.dir",
         chunk_dir(first, n),
         "--env.taskset.secret",
@@ -125,6 +134,8 @@ def command(
         cmd += [f"--sampling.{key.replace('_', '-')}", str(value)]
     if args.image:
         cmd += ["--env.taskset.task.image", args.image]
+    if args.budget is not None:
+        cmd += ["--env.taskset.task.tools.budget", str(args.budget)]
     if args.vf_config:
         cmd += ["@", str(args.vf_config)]
     if args.dry_run:
@@ -142,6 +153,7 @@ def main() -> None:
     parser.add_argument("--rollouts", type=int, default=3)
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--chunk", type=int, default=4, help="tasks per vf-run")
+    parser.add_argument("--budget", type=int, help="backtests allowed per episode")
     parser.add_argument("--runtime", choices=["docker", "prime"], default="docker")
     parser.add_argument("--image", help="task image reference; default the taskset's")
     parser.add_argument("--out", type=Path, default=ROOT / "outputs" / "models")
@@ -163,7 +175,7 @@ def main() -> None:
             sys.exit(f"{name}: set {key_var} to the endpoint's API key")
         for first in range(0, args.tasks, args.chunk):
             n = min(args.chunk, args.tasks - first)
-            path = args.out / name / chunk_dir(first, n)
+            path = args.out / run_name(name, args.budget) / chunk_dir(first, n)
             if not args.dry_run and chunk_done(path, n * args.rollouts):
                 print(f"{name} {path.name}: done, skipped", flush=True)
                 continue

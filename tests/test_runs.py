@@ -36,6 +36,7 @@ def _args(**overrides):
         runtime="docker",
         image=None,
         vf_config=None,
+        budget=None,
         out=Path("outputs/models"),
         dry_run=False,
     )
@@ -48,24 +49,24 @@ def _flag(cmd: list[str], name: str) -> str:
 
 def test_registry_entries_are_complete():
     models = run_models.load_models()
-    assert {"qwen3-8b", "qwen3-4b-vllm", "stub"} <= models.keys()
+    assert {"qwen3_5-9b", "qwen3-4b-vllm", "stub"} <= models.keys()
     for entry in models.values():
         assert entry["model"] and entry["base_url"].endswith("/v1")
 
 
 def test_command_runs_the_taskset_with_the_entry():
-    entry = run_models.load_models()["qwen3-8b"]
-    cmd = run_models.command("qwen3-8b", entry, _args(), first=8, n=4)
+    entry = run_models.load_models()["qwen3_5-9b"]
+    cmd = run_models.command("qwen3_5-9b", entry, _args(), first=8, n=4)
     assert cmd[:2] == ["vf-run", "quant-research"]
-    assert _flag(cmd, "--model") == "qwen/qwen3-8b"
+    assert _flag(cmd, "--model") == "qwen/qwen3.5-9b"
     assert _flag(cmd, "--client.api-key-var") == "OPENROUTER_API_KEY"
     assert _flag(cmd, "--env.taskset.secret") == "s3cret"
     assert _flag(cmd, "--env.agent.runtime.type") == "docker"
-    assert _flag(cmd, "--run.name") == "qwen3-8b"
+    assert _flag(cmd, "--run.name") == "qwen3_5-9b"
     assert _flag(cmd, "--sampling.top-p") == "0.95"
     assert (_flag(cmd, "--select.skip"), _flag(cmd, "--select.limit")) == ("8", "4")
     assert _flag(cmd, "--num-rollouts") == "3"
-    assert _flag(cmd, "--output-dir") == str(Path("outputs/models/qwen3-8b"))
+    assert _flag(cmd, "--output-dir") == str(Path("outputs/models/qwen3_5-9b"))
     assert _flag(cmd, "--run.dir") == "tasks-08-11"
 
 
@@ -166,3 +167,25 @@ def test_vf_config_file_is_passed_to_vf_run():
     args = _args(vf_config=Path("ic.toml"))
     cmd = run_models.command("stub", entry, args, first=0, n=1)
     assert cmd[-2:] == ["@", "ic.toml"]
+
+
+def test_budget_sets_the_flag_and_names_the_run():
+    entry = run_models.load_models()["qwen3_5-9b"]
+    cmd = run_models.command("qwen3_5-9b", entry, _args(budget=3), first=0, n=4)
+    assert _flag(cmd, "--env.taskset.task.tools.budget") == "3"
+    assert _flag(cmd, "--run.name") == "qwen3_5-9b-budget3"
+
+
+def test_claim_gap_pools_budgets_per_model():
+    rows = pl.DataFrame(
+        {
+            "agent": ["m", "m-budget1", "m-budget1", "b"],
+            "backtests_used": [10.0, 1.0, 1.0, 1.0],
+            "claim_gap": [1.0, 0.2, float("nan"), 0.5],
+        }
+    )
+    out = results.claim_gap_by_backtests(rows)
+    assert out.get_column("model").to_list() == ["b", "m", "m"]
+    m = out.filter(pl.col("model") == "m")
+    assert m.get_column("backtests_used").to_list() == [1.0, 10.0]
+    assert m.get_column("episodes").to_list() == [1, 1]

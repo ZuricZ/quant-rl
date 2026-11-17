@@ -29,12 +29,8 @@ base_url = "https://openrouter.ai/api/v1"
 api_key_var = "OPENROUTER_API_KEY"
 sampling = { temperature = 0.6, top_p = 0.95, max_tokens = 8192 }
 
-[models.qwen3-8b]
-model = "qwen/qwen3-8b"
-base_url = "https://openrouter.ai/api/v1"
-api_key_var = "OPENROUTER_API_KEY"
-sampling = { temperature = 0.6, top_p = 0.95, max_tokens = 8192 }
-
+# Qwen3-14B's context on OpenRouter is 40,960 tokens, short for 30 turns with
+# thinking. (OpenRouter dropped qwen/qwen3-8b in November 2026.)
 [models.qwen3-14b]
 model = "qwen/qwen3-14b"
 base_url = "https://openrouter.ai/api/v1"

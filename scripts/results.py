@@ -21,6 +21,8 @@ import polars as pl
 from quantenv import report
 
 REWARD = "hidden_sharpe"
+# Run names of one model at several budgets end like this (run_models.py).
+BUDGET_SUFFIX = r"-budget\d+$"
 # Trace metric names, by the column `report.table` reads.
 METRICS = {
     "sharpe": "sharpe",
@@ -72,8 +74,38 @@ def run_rows(run_dir: Path) -> pl.DataFrame:
     return pl.DataFrame(rows, infer_schema_length=None)
 
 
+def claim_gap_by_backtests(rows: pl.DataFrame) -> pl.DataFrame:
+    """Mean claim gap per model and number of backtests used.
+
+    Runs of one model at several budgets are pooled under the model's name.
+    Only valid submissions have a claim gap.
+
+    Args:
+        rows: Scored episodes with "agent", "backtests_used" and "claim_gap".
+
+    Returns:
+        One row per model and backtest count: episodes, mean claim gap and
+        its standard error.
+    """
+    return (
+        rows.lazy()
+        .with_columns(pl.col("claim_gap").cast(pl.Float64).fill_nan(None))
+        .filter(pl.col("claim_gap").is_not_null())
+        .with_columns(model=pl.col("agent").str.replace(BUDGET_SUFFIX, ""))
+        .group_by("model", "backtests_used")
+        .agg(
+            pl.len().alias("episodes"),
+            pl.col("claim_gap").mean().alias("claim_gap"),
+            (pl.col("claim_gap").std() / pl.len().sqrt()).alias("se"),
+        )
+        .sort("model", "backtests_used")
+        .collect()
+    )
+
+
 def plot(rows: pl.DataFrame, path: Path) -> None:
-    """Claim gap against backtests used: episodes as dots, means as lines.
+    """Claim gap against backtests used: episodes as dots, per-model means
+    with standard errors as lines. Budgets of one model share a colour.
 
     Args:
         rows: Scored episodes with "agent", "backtests_used" and "claim_gap".
@@ -85,31 +117,33 @@ def plot(rows: pl.DataFrame, path: Path) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    valid = rows.filter(pl.col("claim_gap").is_not_null())
-    agents = valid.get_column("agent").unique().sort().to_list()
+    valid = rows.with_columns(
+        pl.col("claim_gap").cast(pl.Float64).fill_nan(None),
+        model=pl.col("agent").str.replace(BUDGET_SUFFIX, ""),
+    ).filter(pl.col("claim_gap").is_not_null())
+    means = claim_gap_by_backtests(rows)
+    models = valid.get_column("model").unique().sort().to_list()
     fig, ax = plt.subplots(figsize=(7, 4.5), layout="constrained")
-    for i, agent in enumerate(agents):
-        mine = valid.filter(pl.col("agent") == agent)
-        # Spread agents sideways so equal backtest counts do not overlap.
-        offset = (i - (len(agents) - 1) / 2) * 0.08
+    for i, model in enumerate(models):
+        mine = valid.filter(pl.col("model") == model)
+        # Spread models sideways so equal backtest counts do not overlap.
+        offset = (i - (len(models) - 1) / 2) * 0.08
         ax.scatter(
             mine.get_column("backtests_used") + offset,
             mine.get_column("claim_gap"),
             s=14,
-            alpha=0.5,
+            alpha=0.4,
             color=f"C{i}",
         )
-        means = (
-            mine.group_by("backtests_used")
-            .agg(pl.col("claim_gap").mean())
-            .sort("backtests_used")
-        )
-        ax.plot(
-            means.get_column("backtests_used"),
-            means.get_column("claim_gap"),
+        line = means.filter(pl.col("model") == model)
+        ax.errorbar(
+            line.get_column("backtests_used") + offset,
+            line.get_column("claim_gap"),
+            yerr=line.get_column("se").fill_null(0.0),
             marker="o",
+            capsize=3,
             color=f"C{i}",
-            label=agent,
+            label=model,
         )
     ax.axhline(0.0, color="grey", linewidth=0.8)
     ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
@@ -149,6 +183,9 @@ def main() -> None:
         stops = scored.group_by("agent", "stop").len().sort("agent", "stop")
         print("\nHow episodes ended:")
         print(stops)
+    with pl.Config(**report.MARKDOWN):
+        print("\nClaim gap by backtests used (valid submissions):")
+        print(claim_gap_by_backtests(scored))
     if errored.height:
         print(f"\nLeft out, infrastructure errors: {errored.height} episodes")
         print(errored.group_by("agent").len().sort("agent"))
