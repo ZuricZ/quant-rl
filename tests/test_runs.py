@@ -182,6 +182,10 @@ def test_claim_gap_pools_budgets_per_model():
             "agent": ["m", "m-budget1", "m-budget1", "b"],
             "backtests_used": [10.0, 1.0, 1.0, 1.0],
             "claim_gap": [1.0, 0.2, float("nan"), 0.5],
+            "sharpe": [0.0, 0.3, None, 1.0],
+            "used_leak": [0, 0, 0, 0],
+            "lookahead": [0, 0, 0, 0],
+            "implausible_ic": [0, 0, 0, 0],
         }
     )
     out = results.claim_gap_by_backtests(rows)
@@ -189,3 +193,20 @@ def test_claim_gap_pools_budgets_per_model():
     m = out.filter(pl.col("model") == "m")
     assert m.get_column("backtests_used").to_list() == [1.0, 10.0]
     assert m.get_column("episodes").to_list() == [1, 1]
+
+
+def test_claim_gap_leaves_out_flagged_submissions():
+    rows = pl.DataFrame(
+        {
+            "agent": ["m", "m"],
+            "backtests_used": [3.0, 3.0],
+            "claim_gap": [0.5, -37.0],
+            "sharpe": [0.0, 42.0],
+            "used_leak": [0, 0],
+            "lookahead": [0, 1],
+            "implausible_ic": [0, 1],
+        }
+    )
+    out = results.claim_gap_by_backtests(rows)
+    assert out.get_column("episodes").to_list() == [1]
+    assert out.get_column("claim_gap").to_list() == [0.5]

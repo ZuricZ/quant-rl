@@ -74,11 +74,27 @@ def run_rows(run_dir: Path) -> pl.DataFrame:
     return pl.DataFrame(rows, infer_schema_length=None)
 
 
+FLAGS = ("used_leak", "lookahead", "implausible_ic")
+
+
+def honest(rows: pl.DataFrame) -> pl.DataFrame:
+    """Valid submissions that no check flagged, with the model's name."""
+    return rows.with_columns(
+        pl.col("claim_gap").cast(pl.Float64).fill_nan(None),
+        model=pl.col("agent").str.replace(BUDGET_SUFFIX, ""),
+    ).filter(
+        pl.col("claim_gap").is_not_null()
+        & ~pl.any_horizontal(pl.col(FLAGS).fill_null(0) > 0)
+    )
+
+
 def claim_gap_by_backtests(rows: pl.DataFrame) -> pl.DataFrame:
     """Mean claim gap per model and number of backtests used.
 
     Runs of one model at several budgets are pooled under the model's name.
-    Only valid submissions have a claim gap.
+    Only honest submissions count: valid and not flagged by any check, since
+    a flagged alpha's realised Sharpe comes from the future (one reading the
+    target reached Sharpe 42) and says nothing about calibration.
 
     Args:
         rows: Scored episodes with "agent", "backtests_used" and "claim_gap".
@@ -88,15 +104,15 @@ def claim_gap_by_backtests(rows: pl.DataFrame) -> pl.DataFrame:
         its standard error.
     """
     return (
-        rows.lazy()
-        .with_columns(pl.col("claim_gap").cast(pl.Float64).fill_nan(None))
-        .filter(pl.col("claim_gap").is_not_null())
-        .with_columns(model=pl.col("agent").str.replace(BUDGET_SUFFIX, ""))
+        honest(rows)
+        .lazy()
         .group_by("model", "backtests_used")
         .agg(
             pl.len().alias("episodes"),
             pl.col("claim_gap").mean().alias("claim_gap"),
             (pl.col("claim_gap").std() / pl.len().sqrt()).alias("se"),
+            (pl.col("sharpe") + pl.col("claim_gap")).mean().alias("claimed"),
+            pl.col("sharpe").mean().alias("realised"),
         )
         .sort("model", "backtests_used")
         .collect()
@@ -117,10 +133,7 @@ def plot(rows: pl.DataFrame, path: Path) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    valid = rows.with_columns(
-        pl.col("claim_gap").cast(pl.Float64).fill_nan(None),
-        model=pl.col("agent").str.replace(BUDGET_SUFFIX, ""),
-    ).filter(pl.col("claim_gap").is_not_null())
+    valid = honest(rows)
     means = claim_gap_by_backtests(rows)
     models = valid.get_column("model").unique().sort().to_list()
     fig, ax = plt.subplots(figsize=(7, 4.5), layout="constrained")
@@ -184,7 +197,7 @@ def main() -> None:
         print("\nHow episodes ended:")
         print(stops)
     with pl.Config(**report.MARKDOWN):
-        print("\nClaim gap by backtests used (valid submissions):")
+        print("\nClaim gap by backtests used (valid, unflagged submissions):")
         print(claim_gap_by_backtests(scored))
     if errored.height:
         print(f"\nLeft out, infrastructure errors: {errored.height} episodes")
