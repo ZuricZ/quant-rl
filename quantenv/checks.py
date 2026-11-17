@@ -49,16 +49,17 @@ class CheckConfig:
         dependence_min_drop: ...and larger than this share of the base
             run's |IC|.
         max_ic: `implausible_ic` flags a mean rank IC against the next
-            return with absolute value at or above this. Honest daily
-            equity alphas rarely reach 0.1; peeking at the target gives
-            close to 1.
+            return with absolute value at or above this. Honest alphas on
+            the default synthetic data reach about 0.03 at most (spec,
+            Decision 24); peeking at the target gives close to 1. Set it
+            per data source: real daily equity alphas rarely reach 0.1.
     """
 
     n_cuts: int = 8
     rank_noise: float = 1e-4
     dependence_z: float = 4.0
     dependence_min_drop: float = 0.05
-    max_ic: float = 0.2
+    max_ic: float = 0.05
 
 
 def cut_points(timestamps: pl.Series, n: int, seed: int) -> list[Any]:

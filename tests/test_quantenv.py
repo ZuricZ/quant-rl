@@ -306,8 +306,11 @@ def test_implausible_ic_flags_peeking_not_honest_work(plain_panel):
     def shifted(runner):
         return checks.shifted_ics(plain_panel, walkforward.run(runner, plain_panel, wf))
 
-    assert not checks.implausible_ic(shifted(honest))
-    assert checks.implausible_ic(shifted(peeking))
+    # This panel plants an honest IC of about 0.06, above the default ceiling
+    # tuned for the synthetic market, so it sets its own.
+    config = checks.CheckConfig(max_ic=0.2)
+    assert not checks.implausible_ic(shifted(honest), config)
+    assert checks.implausible_ic(shifted(peeking), config)
     lenient = checks.CheckConfig(max_ic=1.0)
     assert not checks.implausible_ic(shifted(peeking), lenient)
 

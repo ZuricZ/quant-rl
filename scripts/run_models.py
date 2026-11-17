@@ -18,7 +18,14 @@ and pass `--image` for `--runtime prime`.
 Usage:
     uv run python scripts/run_models.py --secret S qwen3_5-9b [...]
         [--split eval] [--tasks 30] [--rollouts 3] [--concurrency 4]
-        [--chunk 4] [--runtime docker] [--out outputs/models] [--dry-run]
+        [--chunk 4] [--runtime docker] [--out outputs/models]
+        [--vf-config overrides.toml] [--dry-run]
+
+`--vf-config` passes a TOML file of vf-run settings, for those its flags
+cannot set, e.g. the check settings:
+
+    [env.taskset.task.check_config]
+    max_ic = 0.1
 """
 
 import argparse
@@ -118,6 +125,8 @@ def command(
         cmd += [f"--sampling.{key.replace('_', '-')}", str(value)]
     if args.image:
         cmd += ["--env.taskset.task.image", args.image]
+    if args.vf_config:
+        cmd += ["@", str(args.vf_config)]
     if args.dry_run:
         cmd += ["--dry-run", "True"]
     return cmd
@@ -137,6 +146,7 @@ def main() -> None:
     parser.add_argument("--image", help="task image reference; default the taskset's")
     parser.add_argument("--out", type=Path, default=ROOT / "outputs" / "models")
     parser.add_argument("--registry", type=Path, default=REGISTRY)
+    parser.add_argument("--vf-config", type=Path, help="TOML of vf-run settings")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 

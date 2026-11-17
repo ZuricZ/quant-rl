@@ -35,6 +35,7 @@ def _args(**overrides):
         concurrency=4,
         runtime="docker",
         image=None,
+        vf_config=None,
         out=Path("outputs/models"),
         dry_run=False,
     )
@@ -158,3 +159,10 @@ def test_table_means_performance_over_valid_episodes_only():
     assert a["Agent"] == "a" and a["Episodes"] == 2
     assert a["Net Sharpe"] == 2.0 and a["Invalid rate"] == 0.5
     assert math.isclose(a["Reward"], -0.25) and a["Backtests used"] == 3.5
+
+
+def test_vf_config_file_is_passed_to_vf_run():
+    entry = run_models.load_models()["stub"]
+    args = _args(vf_config=Path("ic.toml"))
+    cmd = run_models.command("stub", entry, args, first=0, n=1)
+    assert cmd[-2:] == ["@", "ic.toml"]
