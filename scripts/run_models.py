@@ -1,9 +1,12 @@
 """Runs models from `runs/models.toml` on the taskset with `vf-run`.
 
-Each model gets one `vf-run` run, written to `<out>/<model>/` (`traces.jsonl`
-and the resolved configs). Models run one after another; episodes within a
-run go in parallel up to `--concurrency`. Summarise the runs with
-`scripts/results.py`.
+Each model's tasks run in chunks of `--chunk` tasks, one `vf-run` per chunk,
+written to `<out>/<model>/tasks-<first>-<last>/` (`traces.jsonl` and the
+resolved configs). Rerunning the same command resumes: chunks whose episodes
+all finished are skipped, and any other chunk is run again from scratch. vf-run
+cannot resume a run itself, so a crash loses at most one chunk. Models run one
+after another; episodes within a chunk go in parallel up to `--concurrency`.
+Summarise the runs with `scripts/results.py <out>/<model>`.
 
 The secret picks the datasets: pass the same one to every model and to
 `scripts/run_baselines.py` so they score the same tasks.
@@ -13,14 +16,16 @@ The task image must exist where the runtime looks for it: build it with
 and pass `--image` for `--runtime prime`.
 
 Usage:
-    uv run python scripts/run_models.py --secret S qwen3-8b [qwen3-14b ...]
+    uv run python scripts/run_models.py --secret S qwen3_5-9b [...]
         [--split eval] [--tasks 30] [--rollouts 3] [--concurrency 4]
-        [--runtime docker] [--out outputs/models] [--dry-run]
+        [--chunk 4] [--runtime docker] [--out outputs/models] [--dry-run]
 """
 
 import argparse
+import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -40,13 +45,41 @@ def load_models(path: Path = REGISTRY) -> dict[str, dict[str, Any]]:
         return tomllib.load(f)["models"]
 
 
-def command(name: str, entry: dict[str, Any], args: argparse.Namespace) -> list[str]:
-    """The `vf-run` command for one model.
+def chunk_dir(first: int, n: int) -> str:
+    """Directory name of the chunk of `n` tasks from task `first`."""
+    return f"tasks-{first:02d}-{first + n - 1:02d}"
+
+
+def chunk_done(path: Path, episodes: int) -> bool:
+    """Whether a chunk's run finished all its episodes without infrastructure
+    errors.
 
     Args:
-        name: The entry's name; also the run's name and directory.
+        path: The chunk's run directory.
+        episodes: Episodes the chunk should hold: tasks times rollouts.
+
+    Returns:
+        True if its `traces.jsonl` holds that many episodes, all `ok`.
+    """
+    traces = path / "traces.jsonl"
+    if not traces.exists():
+        return False
+    with traces.open() as f:
+        records = [json.loads(line) for line in f if line.strip()]
+    return len(records) == episodes and all(r["ok"] for r in records)
+
+
+def command(
+    name: str, entry: dict[str, Any], args: argparse.Namespace, first: int, n: int
+) -> list[str]:
+    """The `vf-run` command for one chunk of one model's tasks.
+
+    Args:
+        name: The entry's name; also the run's name and its directory.
         entry: The model's registry entry.
         args: Parsed command-line arguments.
+        first: First task of the chunk.
+        n: Tasks in the chunk.
 
     Returns:
         The argument list.
@@ -60,16 +93,20 @@ def command(name: str, entry: dict[str, Any], args: argparse.Namespace) -> list[
         entry["base_url"],
         "--client.api-key-var",
         entry.get("api_key_var", LOCAL_KEY_VAR),
+        "--select.skip",
+        str(first),
         "--select.limit",
-        str(args.tasks),
+        str(n),
         "--num-rollouts",
         str(args.rollouts),
         "--max-concurrent",
         str(args.concurrency),
         "--output-dir",
-        str(args.out),
+        str(args.out / name),
         "--run.name",
         name,
+        "--run.dir",
+        chunk_dir(first, n),
         "--env.taskset.secret",
         args.secret,
         "--env.taskset.split",
@@ -95,6 +132,7 @@ def main() -> None:
     parser.add_argument("--tasks", type=int, default=30)
     parser.add_argument("--rollouts", type=int, default=3)
     parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--chunk", type=int, default=4, help="tasks per vf-run")
     parser.add_argument("--runtime", choices=["docker", "prime"], default="docker")
     parser.add_argument("--image", help="task image reference; default the taskset's")
     parser.add_argument("--out", type=Path, default=ROOT / "outputs" / "models")
@@ -107,15 +145,27 @@ def main() -> None:
     if unknown:
         parser.error(f"not in {args.registry}: {', '.join(unknown)}")
     env = os.environ | {LOCAL_KEY_VAR: os.environ.get(LOCAL_KEY_VAR, "EMPTY")}
+    incomplete = []
     for name in args.models:
         entry = models[name]
         key_var = entry.get("api_key_var")
         if key_var and key_var not in os.environ and not args.dry_run:
             sys.exit(f"{name}: set {key_var} to the endpoint's API key")
-        cmd = command(name, entry, args)
-        shown = ["***" if c == args.secret else c for c in cmd]
-        print("$", shlex.join(shown), flush=True)
-        subprocess.run(cmd, env=env, check=True)
+        for first in range(0, args.tasks, args.chunk):
+            n = min(args.chunk, args.tasks - first)
+            path = args.out / name / chunk_dir(first, n)
+            if not args.dry_run and chunk_done(path, n * args.rollouts):
+                print(f"{name} {path.name}: done, skipped", flush=True)
+                continue
+            shutil.rmtree(path, ignore_errors=True)
+            cmd = command(name, entry, args, first, n)
+            shown = ["***" if c == args.secret else c for c in cmd]
+            print("$", shlex.join(shown), flush=True)
+            subprocess.run(cmd, env=env, check=False)
+            if not args.dry_run and not chunk_done(path, n * args.rollouts):
+                incomplete.append(f"{name} {path.name}")
+    if incomplete:
+        sys.exit("incomplete, rerun to retry: " + ", ".join(incomplete))
 
 
 if __name__ == "__main__":

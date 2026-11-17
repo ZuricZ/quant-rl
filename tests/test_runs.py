@@ -54,7 +54,7 @@ def test_registry_entries_are_complete():
 
 def test_command_runs_the_taskset_with_the_entry():
     entry = run_models.load_models()["qwen3-8b"]
-    cmd = run_models.command("qwen3-8b", entry, _args())
+    cmd = run_models.command("qwen3-8b", entry, _args(), first=8, n=4)
     assert cmd[:2] == ["vf-run", "quant-research"]
     assert _flag(cmd, "--model") == "qwen/qwen3-8b"
     assert _flag(cmd, "--client.api-key-var") == "OPENROUTER_API_KEY"
@@ -62,12 +62,15 @@ def test_command_runs_the_taskset_with_the_entry():
     assert _flag(cmd, "--env.agent.runtime.type") == "docker"
     assert _flag(cmd, "--run.name") == "qwen3-8b"
     assert _flag(cmd, "--sampling.top-p") == "0.95"
-    assert (_flag(cmd, "--select.limit"), _flag(cmd, "--num-rollouts")) == ("30", "3")
+    assert (_flag(cmd, "--select.skip"), _flag(cmd, "--select.limit")) == ("8", "4")
+    assert _flag(cmd, "--num-rollouts") == "3"
+    assert _flag(cmd, "--output-dir") == str(Path("outputs/models/qwen3-8b"))
+    assert _flag(cmd, "--run.dir") == "tasks-08-11"
 
 
 def test_local_entry_gets_the_dummy_key_variable():
     entry = run_models.load_models()["qwen3-4b-vllm"]
-    cmd = run_models.command("qwen3-4b-vllm", entry, _args())
+    cmd = run_models.command("qwen3-4b-vllm", entry, _args(), first=0, n=4)
     assert _flag(cmd, "--client.api-key-var") == run_models.LOCAL_KEY_VAR
 
 
@@ -76,16 +79,25 @@ def test_vf_run_accepts_every_registry_entry(tmp_path):
     names = list(run_models.load_models())
     done = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "run_models.py"), *names]
-        + ["--secret", "x", "--dry-run", "--out", str(tmp_path)],
+        + ["--secret", "x", "--dry-run", "--out", str(tmp_path), "--tasks", "2"],
         capture_output=True,
         text=True,
         check=False,
     )
     assert done.returncode == 0, done.stderr[-2000:]
-    written = {
-        p.parent.parent.parent.name for p in tmp_path.glob("*/configs/*/run.json")
-    }
+    written = {p.parents[3].name for p in tmp_path.glob("*/*/configs/*/run.json")}
     assert written == set(names)
+
+
+def test_chunk_is_done_only_when_every_episode_finished_ok(tmp_path):
+    record = '{"ok": %s, "traces": []}\n'
+    assert not run_models.chunk_done(tmp_path, 2)
+    (tmp_path / "traces.jsonl").write_text(record % "true")
+    assert not run_models.chunk_done(tmp_path, 2)
+    (tmp_path / "traces.jsonl").write_text(record % "true" + record % "false")
+    assert not run_models.chunk_done(tmp_path, 2)
+    (tmp_path / "traces.jsonl").write_text(2 * (record % "true"))
+    assert run_models.chunk_done(tmp_path, 2)
 
 
 def test_stub_calls_describe_backtest_submit_in_turn():

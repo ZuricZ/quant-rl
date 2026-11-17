@@ -7,7 +7,7 @@ that ended in an infrastructure error (the trace is not `ok`) are left out of
 the table and counted separately: the model is not to blame.
 
 Usage:
-    uv run python scripts/results.py outputs/models/qwen3-8b [...]
+    uv run python scripts/results.py outputs/models/qwen3_5-9b [...]
         [--baselines baselines.csv] [--rows rows.csv] [--plot claim_gap.png]
 """
 
@@ -61,12 +61,14 @@ def episode_row(agent: str, trace: dict[str, Any]) -> dict[str, Any]:
 
 
 def run_rows(run_dir: Path) -> pl.DataFrame:
-    """Every episode of one run, named after the run directory."""
+    """Every episode under a run directory, named after it: one run, or a
+    model's chunks as `run_models.py` writes them."""
     rows = []
-    with (run_dir / "traces.jsonl").open() as f:
-        for line in f:
-            for trace in json.loads(line)["traces"]:
-                rows.append(episode_row(run_dir.name, trace))
+    for traces in sorted(run_dir.rglob("traces.jsonl")):
+        with traces.open() as f:
+            for line in f:
+                for trace in json.loads(line)["traces"]:
+                    rows.append(episode_row(run_dir.name, trace))
     return pl.DataFrame(rows, infer_schema_length=None)
 
 
