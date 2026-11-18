@@ -8,6 +8,17 @@ cannot resume a run itself, so a crash loses at most one chunk. Models run one
 after another; episodes within a chunk go in parallel up to `--concurrency`.
 Summarise the runs with `scripts/results.py <out>/<model>`.
 
+Each run directory holds a `manifest.json` of the settings that shape its
+results: the registry entry, split, rollouts, chunk size, budget, image,
+runtime, and hashes of the secret and of `--vf-config`. A resume under other
+settings is refused rather than mixed into the finished chunks. `--tasks` may
+grow between resumes. `--dry-run` validates the vf-run configs in a temporary
+directory and leaves `--out` untouched.
+
+The secret reaches vf-run in a private (0600) JSON file, deleted afterwards:
+not in its arguments, where `ps` would show it, and not as TOML, which vf-run
+copies into the run directory.
+
 The secret picks the datasets: pass the same one to every model and to
 `scripts/run_baselines.py` so they score the same tasks.
 
@@ -33,17 +44,21 @@ cannot set, e.g. the check settings:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
+# vf-run from this interpreter's environment, so an unactivated venv works.
+VF_RUN = str(Path(sys.executable).with_name("vf-run"))
 REGISTRY = ROOT / "runs" / "models.toml"
 TASKSET = "quant-research"
 # Sent as the key to local servers without auth.
@@ -56,14 +71,94 @@ def load_models(path: Path = REGISTRY) -> dict[str, dict[str, Any]]:
         return tomllib.load(f)["models"]
 
 
+MANIFEST = "manifest.json"
+
+
 def run_name(name: str, budget: int | None) -> str:
-    """The run's name: the entry's, with the budget if one is set."""
+    """The run's name.
+
+    Args:
+        name: The registry entry's name.
+        budget: The backtest budget, or None for the taskset's default.
+
+    Returns:
+        `name`, with `-budget<N>` appended when a budget is set.
+    """
     return name if budget is None else f"{name}-budget{budget}"
 
 
 def chunk_dir(first: int, n: int) -> str:
     """Directory name of the chunk of `n` tasks from task `first`."""
     return f"tasks-{first:02d}-{first + n - 1:02d}"
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def manifest(entry: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    """The settings that shape a run's results, for checking resumes.
+
+    Args:
+        entry: The model's registry entry.
+        args: Parsed command-line arguments.
+
+    Returns:
+        A JSON-serialisable dict. The secret and the vf-config appear only
+        as SHA-256 hashes.
+    """
+    return {
+        "entry": entry,
+        "split": args.split,
+        "rollouts": args.rollouts,
+        "chunk": args.chunk,
+        "budget": args.budget,
+        "image": args.image,
+        "runtime": args.runtime,
+        "secret_sha256": _sha256(args.secret.encode()),
+        "vf_config_sha256": (
+            _sha256(args.vf_config.read_bytes()) if args.vf_config else None
+        ),
+    }
+
+
+def check_manifest(run_dir: Path, expected: dict[str, Any]) -> list[str]:
+    """Settings that differ from those the run was started with.
+
+    Args:
+        run_dir: The run's directory.
+        expected: This invocation's `manifest`.
+
+    Returns:
+        Names of the differing settings; empty if they all match or the run
+        has no manifest yet.
+    """
+    path = run_dir / MANIFEST
+    if not path.exists():
+        return []
+    recorded = json.loads(path.read_text())
+    keys = recorded.keys() | expected.keys()
+    return sorted(k for k in keys if recorded.get(k) != expected.get(k))
+
+
+def secret_file(directory: Path, secret: str) -> Path:
+    """Writes the secret as a vf-run config file readable only by its owner.
+
+    JSON, not TOML: vf-run copies root `@` TOML files verbatim into the run's
+    `configs/`, which would put the secret on disk next to the traces.
+
+    Args:
+        directory: A private directory to write into.
+        secret: The taskset's secret.
+
+    Returns:
+        The file's path, for vf-run's `@` argument.
+    """
+    path = directory / "secret.json"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump({"env": {"taskset": {"secret": secret}}}, f)
+    return path
 
 
 def chunk_done(path: Path, episodes: int) -> bool:
@@ -75,33 +170,45 @@ def chunk_done(path: Path, episodes: int) -> bool:
         episodes: Episodes the chunk should hold: tasks times rollouts.
 
     Returns:
-        True if its `traces.jsonl` holds that many episodes, all `ok`.
+        True if its `traces.jsonl` holds that many episodes, all `ok`. False
+        if a line does not parse, e.g. one cut short by a crash.
     """
     traces = path / "traces.jsonl"
     if not traces.exists():
         return False
-    with traces.open() as f:
-        records = [json.loads(line) for line in f if line.strip()]
+    try:
+        with traces.open() as f:
+            records = [json.loads(line) for line in f if line.strip()]
+    except json.JSONDecodeError:
+        return False
     return len(records) == episodes and all(r["ok"] for r in records)
 
 
 def command(
-    name: str, entry: dict[str, Any], args: argparse.Namespace, first: int, n: int
+    name: str,
+    entry: dict[str, Any],
+    args: argparse.Namespace,
+    first: int,
+    n: int,
+    out: Path,
+    secret: Path,
 ) -> list[str]:
     """The `vf-run` command for one chunk of one model's tasks.
 
     Args:
-        name: The entry's name; also the run's name and its directory.
+        name: The entry's name; with the budget, the run's name.
         entry: The model's registry entry.
         args: Parsed command-line arguments.
         first: First task of the chunk.
         n: Tasks in the chunk.
+        out: Directory that holds the runs.
+        secret: The file holding the secret (`secret_file`).
 
     Returns:
         The argument list.
     """
     cmd = [
-        "vf-run",
+        VF_RUN if Path(VF_RUN).exists() else "vf-run",
         TASKSET,
         "--model",
         entry["model"],
@@ -118,13 +225,11 @@ def command(
         "--max-concurrent",
         str(args.concurrency),
         "--output-dir",
-        str(args.out / run_name(name, args.budget)),
+        str(out / run_name(name, args.budget)),
         "--run.name",
         run_name(name, args.budget),
         "--run.dir",
         chunk_dir(first, n),
-        "--env.taskset.secret",
-        args.secret,
         "--env.taskset.split",
         args.split,
         "--env.agent.runtime.type",
@@ -136,11 +241,19 @@ def command(
         cmd += ["--env.taskset.task.image", args.image]
     if args.budget is not None:
         cmd += ["--env.taskset.task.tools.budget", str(args.budget)]
+    cmd += ["@", str(secret)]
     if args.vf_config:
         cmd += ["@", str(args.vf_config)]
     if args.dry_run:
         cmd += ["--dry-run", "True"]
     return cmd
+
+
+def _positive(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
+    return value
 
 
 def main() -> None:
@@ -149,10 +262,10 @@ def main() -> None:
     parser.add_argument("models", nargs="+", help="entry names in the registry")
     parser.add_argument("--secret", required=True)
     parser.add_argument("--split", choices=["eval", "train"], default="eval")
-    parser.add_argument("--tasks", type=int, default=30)
-    parser.add_argument("--rollouts", type=int, default=3)
-    parser.add_argument("--concurrency", type=int, default=4)
-    parser.add_argument("--chunk", type=int, default=4, help="tasks per vf-run")
+    parser.add_argument("--tasks", type=_positive, default=30)
+    parser.add_argument("--rollouts", type=_positive, default=3)
+    parser.add_argument("--concurrency", type=_positive, default=4)
+    parser.add_argument("--chunk", type=_positive, default=4, help="tasks per vf-run")
     parser.add_argument("--budget", type=int, help="backtests allowed per episode")
     parser.add_argument("--runtime", choices=["docker", "prime"], default="docker")
     parser.add_argument("--image", help="task image reference; default the taskset's")
@@ -166,26 +279,48 @@ def main() -> None:
     unknown = [m for m in args.models if m not in models]
     if unknown:
         parser.error(f"not in {args.registry}: {', '.join(unknown)}")
+    if args.budget is not None and args.budget < 0:
+        parser.error(f"--budget must be at least 0, got {args.budget}")
     env = os.environ | {LOCAL_KEY_VAR: os.environ.get(LOCAL_KEY_VAR, "EMPTY")}
     incomplete = []
-    for name in args.models:
-        entry = models[name]
-        key_var = entry.get("api_key_var")
-        if key_var and key_var not in os.environ and not args.dry_run:
-            sys.exit(f"{name}: set {key_var} to the endpoint's API key")
-        for first in range(0, args.tasks, args.chunk):
-            n = min(args.chunk, args.tasks - first)
-            path = args.out / run_name(name, args.budget) / chunk_dir(first, n)
-            if not args.dry_run and chunk_done(path, n * args.rollouts):
-                print(f"{name} {path.name}: done, skipped", flush=True)
-                continue
-            shutil.rmtree(path, ignore_errors=True)
-            cmd = command(name, entry, args, first, n)
-            shown = ["***" if c == args.secret else c for c in cmd]
-            print("$", shlex.join(shown), flush=True)
-            subprocess.run(cmd, env=env, check=False)
-            if not args.dry_run and not chunk_done(path, n * args.rollouts):
-                incomplete.append(f"{name} {path.name}")
+    with tempfile.TemporaryDirectory(prefix="run_models-") as private:
+        private = Path(private)
+        secret = secret_file(private, args.secret)
+        out = private / "dry-run" if args.dry_run else args.out
+        for name in args.models:
+            entry = models[name]
+            key_var = entry.get("api_key_var")
+            if key_var and not os.environ.get(key_var) and not args.dry_run:
+                sys.exit(f"{name}: set {key_var} to the endpoint's API key")
+            run_dir = out / run_name(name, args.budget)
+            expected = manifest(entry, args)
+            differ = check_manifest(run_dir, expected)
+            if differ:
+                sys.exit(
+                    f"{run_dir} was started with other settings ({', '.join(differ)});"
+                    " use another --out or delete it"
+                )
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / MANIFEST).write_text(json.dumps(expected, indent=1))
+            for first in range(0, args.tasks, args.chunk):
+                n = min(args.chunk, args.tasks - first)
+                path = run_dir / chunk_dir(first, n)
+                if chunk_done(path, n * args.rollouts):
+                    print(f"{name} {path.name}: done, skipped", flush=True)
+                    continue
+                shutil.rmtree(path, ignore_errors=True)
+                cmd = command(name, entry, args, first, n, out, secret)
+                print("$", shlex.join(cmd), flush=True)
+                done = subprocess.run(cmd, env=env, check=False)
+                if args.dry_run:
+                    if done.returncode:
+                        incomplete.append(f"{name} {path.name} (vf-run rejected it)")
+                elif not chunk_done(path, n * args.rollouts):
+                    incomplete.append(f"{name} {path.name}")
+        if args.dry_run:
+            print(
+                f"dry run: configs checked in {out}, now deleted; {args.out} untouched"
+            )
     if incomplete:
         sys.exit("incomplete, rerun to retry: " + ", ".join(incomplete))
 

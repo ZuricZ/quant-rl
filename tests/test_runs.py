@@ -1,9 +1,14 @@
 """The model-run scaffold: registry, vf-run command, stub model, results."""
 
+import http.client
 import importlib.util
+import json
 import math
+import stat
 import subprocess
 import sys
+import threading
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import polars as pl
@@ -33,6 +38,7 @@ def _args(**overrides):
         tasks=30,
         rollouts=3,
         concurrency=4,
+        chunk=4,
         runtime="docker",
         image=None,
         vf_config=None,
@@ -47,6 +53,13 @@ def _flag(cmd: list[str], name: str) -> str:
     return cmd[cmd.index(name) + 1]
 
 
+def _command(name: str, args, first: int = 0, n: int = 4) -> list[str]:
+    entry = run_models.load_models()[name]
+    return run_models.command(
+        name, entry, args, first, n, Path("outputs/models"), Path("secret.json")
+    )
+
+
 def test_registry_entries_are_complete():
     models = run_models.load_models()
     assert {"qwen3_5-9b", "qwen3-4b-vllm", "stub"} <= models.keys()
@@ -55,12 +68,10 @@ def test_registry_entries_are_complete():
 
 
 def test_command_runs_the_taskset_with_the_entry():
-    entry = run_models.load_models()["qwen3_5-9b"]
-    cmd = run_models.command("qwen3_5-9b", entry, _args(), first=8, n=4)
-    assert cmd[:2] == ["vf-run", "quant-research"]
+    cmd = _command("qwen3_5-9b", _args(), first=8, n=4)
+    assert Path(cmd[0]).name == "vf-run" and cmd[1] == "quant-research"
     assert _flag(cmd, "--model") == "qwen/qwen3.5-9b"
     assert _flag(cmd, "--client.api-key-var") == "OPENROUTER_API_KEY"
-    assert _flag(cmd, "--env.taskset.secret") == "s3cret"
     assert _flag(cmd, "--env.agent.runtime.type") == "docker"
     assert _flag(cmd, "--run.name") == "qwen3_5-9b"
     assert _flag(cmd, "--sampling.top-p") == "0.95"
@@ -70,10 +81,26 @@ def test_command_runs_the_taskset_with_the_entry():
     assert _flag(cmd, "--run.dir") == "tasks-08-11"
 
 
+def test_the_secret_is_not_in_the_command():
+    cmd = _command("qwen3_5-9b", _args())
+    assert "s3cret" not in cmd and "--env.taskset.secret" not in cmd
+    assert cmd[cmd.index("@") + 1] == "secret.json"
+
+
 def test_local_entry_gets_the_dummy_key_variable():
-    entry = run_models.load_models()["qwen3-4b-vllm"]
-    cmd = run_models.command("qwen3-4b-vllm", entry, _args(), first=0, n=4)
+    cmd = _command("qwen3-4b-vllm", _args())
     assert _flag(cmd, "--client.api-key-var") == run_models.LOCAL_KEY_VAR
+
+
+def test_vf_config_file_is_passed_to_vf_run():
+    cmd = _command("stub", _args(vf_config=Path("ic.toml")), n=1)
+    assert cmd[-2:] == ["@", "ic.toml"]
+
+
+def test_budget_sets_the_flag_and_names_the_run():
+    cmd = _command("qwen3_5-9b", _args(budget=3))
+    assert _flag(cmd, "--env.taskset.task.tools.budget") == "3"
+    assert _flag(cmd, "--run.name") == "qwen3_5-9b-budget3"
 
 
 def test_vf_run_accepts_every_registry_entry(tmp_path):
@@ -87,8 +114,8 @@ def test_vf_run_accepts_every_registry_entry(tmp_path):
         check=False,
     )
     assert done.returncode == 0, done.stderr[-2000:]
-    written = {p.parents[3].name for p in tmp_path.glob("*/*/configs/*/run.json")}
-    assert written == set(names)
+    assert "dry run:" in done.stdout
+    assert not any(tmp_path.iterdir())
 
 
 def test_chunk_is_done_only_when_every_episode_finished_ok(tmp_path):
@@ -100,6 +127,101 @@ def test_chunk_is_done_only_when_every_episode_finished_ok(tmp_path):
     assert not run_models.chunk_done(tmp_path, 2)
     (tmp_path / "traces.jsonl").write_text(2 * (record % "true"))
     assert run_models.chunk_done(tmp_path, 2)
+    # A crash can cut the last line short.
+    (tmp_path / "traces.jsonl").write_text(record % "true" + '{"ok": tr')
+    assert not run_models.chunk_done(tmp_path, 2)
+
+
+class _FakeVfRun:
+    """Stands in for vf-run: writes `ok` episodes for its chunk."""
+
+    def __init__(self):
+        self.calls = []
+        self.secrets = []
+
+    def __call__(self, cmd, env, check):
+        self.calls.append(cmd)
+        secret = Path(cmd[cmd.index("@") + 1])
+        self.secrets.append((secret.read_text(), stat.S_IMODE(secret.stat().st_mode)))
+        chunk = Path(_flag(cmd, "--output-dir")) / _flag(cmd, "--run.dir")
+        chunk.mkdir(parents=True)
+        if "--dry-run" not in cmd:
+            n = int(_flag(cmd, "--select.limit")) * int(_flag(cmd, "--num-rollouts"))
+            (chunk / "traces.jsonl").write_text(n * '{"ok": true, "traces": []}\n')
+        return subprocess.CompletedProcess(cmd, 0)
+
+
+def _main(monkeypatch, tmp_path, *extra):
+    fake = _FakeVfRun()
+    monkeypatch.setattr(run_models.subprocess, "run", fake)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "dummy")
+    argv = ["run_models.py", "qwen3_5-9b", "--secret", "s3cret", "--tasks", "4"]
+    argv += ["--rollouts", "1", "--chunk", "2", "--out", str(tmp_path), *extra]
+    monkeypatch.setattr(sys, "argv", argv)
+    run_models.main()
+    return fake
+
+
+def test_main_runs_each_chunk_once_and_resumes(monkeypatch, tmp_path):
+    first = _main(monkeypatch, tmp_path)
+    assert [_flag(c, "--run.dir") for c in first.calls] == [
+        "tasks-00-01",
+        "tasks-02-03",
+    ]
+    partial = tmp_path / "qwen3_5-9b" / "tasks-02-03" / "traces.jsonl"
+    partial.write_text('{"ok": true, "traces": []}\n{"ok": tr')
+    again = _main(monkeypatch, tmp_path)
+    assert [_flag(c, "--run.dir") for c in again.calls] == ["tasks-02-03"]
+
+
+def test_main_passes_the_secret_in_a_private_file(monkeypatch, tmp_path):
+    fake = _main(monkeypatch, tmp_path)
+    text, mode = fake.secrets[0]
+    assert '"s3cret"' in text and mode == 0o600
+    # vf-run copies root `@` TOML files into the run directory.
+    assert all(Path(c[c.index("@") + 1]).suffix == ".json" for c in fake.calls)
+    assert all("s3cret" not in " ".join(c) for c in fake.calls)
+
+
+def test_dry_run_leaves_finished_chunks_alone(monkeypatch, tmp_path):
+    _main(monkeypatch, tmp_path)
+    traces = sorted((tmp_path / "qwen3_5-9b").glob("*/traces.jsonl"))
+    before = [t.read_text() for t in traces]
+    dry = _main(monkeypatch, tmp_path, "--dry-run")
+    assert [t.read_text() for t in traces] == before
+    assert all(
+        tmp_path not in Path(_flag(c, "--output-dir")).parents for c in dry.calls
+    )
+
+
+def test_main_refuses_to_resume_under_other_settings(monkeypatch, tmp_path):
+    _main(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_models.py", "qwen3_5-9b", "--secret", "other", "--tasks", "4"]
+        + ["--rollouts", "1", "--chunk", "2", "--out", str(tmp_path)],
+    )
+    with pytest.raises(SystemExit, match="secret_sha256"):
+        run_models.main()
+
+
+@pytest.mark.parametrize("bad", [["--chunk", "0"], ["--rollouts", "0"]])
+def test_main_rejects_empty_chunks(monkeypatch, tmp_path, bad):
+    with pytest.raises(SystemExit):
+        _main(monkeypatch, tmp_path, *bad)
+
+
+def test_main_treats_an_empty_key_as_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(run_models.subprocess, "run", _FakeVfRun())
+    monkeypatch.setenv("OPENROUTER_API_KEY", "")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_models.py", "qwen3_5-9b", "--secret", "s", "--out", str(tmp_path)],
+    )
+    with pytest.raises(SystemExit, match="OPENROUTER_API_KEY"):
+        run_models.main()
 
 
 def test_stub_calls_describe_backtest_submit_in_turn():
@@ -117,6 +239,42 @@ def test_stub_calls_describe_backtest_submit_in_turn():
     assert stub_model.reply({"messages": messages, "tools": tools})["content"]
 
 
+@pytest.fixture
+def stub_server():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), stub_model.Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield server.server_address[1]
+    server.shutdown()
+
+
+def _post(port, body, headers=None):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    conn.request("POST", "/v1/chat/completions", body, headers or {})
+    response = conn.getresponse()
+    return response.status, response.read().decode()
+
+
+def test_stub_serves_chat_completions(stub_server):
+    body = json.dumps(
+        {"model": "stub", "messages": [{"role": "user", "content": "go"}]}
+    )
+    status, text = _post(stub_server, body, {"Content-Type": "application/json"})
+    reply = json.loads(text)
+    assert status == 200 and reply["choices"][0]["finish_reason"] == "tool_calls"
+    streamed = json.dumps(json.loads(body) | {"stream": True})
+    status, text = _post(stub_server, streamed)
+    assert status == 200 and text.rstrip().endswith("data: [DONE]")
+    chunks = [json.loads(line[6:]) for line in text.splitlines() if line[6:7] == "{"]
+    assert chunks[0]["choices"][0]["delta"]["tool_calls"][0]["index"] == 0
+
+
+def test_stub_answers_411_without_a_content_length(stub_server):
+    conn = http.client.HTTPConnection("127.0.0.1", stub_server, timeout=10)
+    conn.putrequest("POST", "/v1/chat/completions")
+    conn.endheaders()
+    assert conn.getresponse().status == 411
+
+
 def _trace(index: int, **metrics) -> dict:
     return {
         "task": {"data": {"index": index}},
@@ -132,12 +290,45 @@ def test_episode_row_reads_the_trace():
     trace = _trace(
         4, reward=0.3, raw_ic=0.02, sharpe=1.0, claim_gap=0.5, backtests_used=3.0
     )
-    row = results.episode_row("m", trace)
+    row = results.episode_row("m", trace, budget=3)
     assert (row["agent"], row["task"], row["reward"], row["ic"]) == ("m", 4, 0.3, 0.02)
     assert row["backtests_used"] == 3.0 and row["stop"] == "submitted"
+    assert row["budget"] == 3
 
 
-def test_table_means_performance_over_valid_episodes_only():
+def _chunk(run_dir: Path, name: str, tasks: list[int], budget: int = 3) -> None:
+    chunk = run_dir / name
+    (chunk / "configs" / "resolved").mkdir(parents=True)
+    config = {"env": {"taskset": {"task": {"tools": {"budget": budget}}}}}
+    (chunk / "configs" / "resolved" / "run.json").write_text(json.dumps(config))
+    lines = [
+        json.dumps({"traces": [_trace(t, reward=0.1, claim_gap=0.5)]}) for t in tasks
+    ]
+    (chunk / "traces.jsonl").write_text("\n".join(lines) + "\n")
+
+
+def test_run_rows_reads_every_chunk_with_its_budget(tmp_path):
+    _chunk(tmp_path / "m", "tasks-00-01", [0, 1])
+    _chunk(tmp_path / "m", "tasks-02-03", [2, 3])
+    rows = results.run_rows(tmp_path / "m")
+    assert rows.get_column("task").sort().to_list() == [0, 1, 2, 3]
+    assert set(rows.get_column("budget")) == {3}
+
+
+def test_run_rows_refuses_overlapping_chunks(tmp_path):
+    _chunk(tmp_path / "m", "tasks-00-03", [0, 1, 2, 3])
+    _chunk(tmp_path / "m", "tasks-00-01", [0, 1])
+    with pytest.raises(ValueError, match="twice"):
+        results.run_rows(tmp_path / "m")
+
+
+def test_run_rows_refuses_an_empty_run(tmp_path):
+    (tmp_path / "m").mkdir()
+    with pytest.raises(ValueError, match="no traces"):
+        results.run_rows(tmp_path / "m")
+
+
+def test_table_means_performance_over_honest_episodes_only():
     nan = float("nan")
     rows = pl.DataFrame(
         {
@@ -156,57 +347,61 @@ def test_table_means_performance_over_valid_episodes_only():
             "backtests_used": [2, 5, 1],
         }
     )
-    a = report.table(rows).row(0, named=True)
-    assert a["Agent"] == "a" and a["Episodes"] == 2
+    a, b = report.table(rows).iter_rows(named=True)
+    assert a["Agent"] == "a" and a["Episodes"] == 2 and a["Honest"] == 1
     assert a["Net Sharpe"] == 2.0 and a["Invalid rate"] == 0.5
     assert math.isclose(a["Reward"], -0.25) and a["Backtests used"] == 3.5
+    # b's only submission is flagged: rates count it, performance does not.
+    assert b["Leak rate"] == 1.0 and b["Honest"] == 0 and b["Net Sharpe"] is None
 
 
-def test_vf_config_file_is_passed_to_vf_run():
-    entry = run_models.load_models()["stub"]
-    args = _args(vf_config=Path("ic.toml"))
-    cmd = run_models.command("stub", entry, args, first=0, n=1)
-    assert cmd[-2:] == ["@", "ic.toml"]
+def _gap_rows(**overrides) -> pl.DataFrame:
+    columns = {
+        "agent": ["m-budget1", "m-budget1", "m-budget1", "m-budget10", "b"],
+        "budget": [1, 1, 1, 10, 1],
+        "reward": [0.0, -0.3, -1.0, -1.5, 0.3],
+        "gross_sharpe": [0.5, 0.0, None, 43.0, 1.5],
+        "turnover": [0.4, 0.4, None, 1.0, 0.4],
+        "claim_gap": [1.0, 3.0, float("nan"), -37.0, 0.5],
+        "sharpe": [0.0, -1.0, None, 42.0, 1.0],
+        "ic": [0.001, 0.01, None, 0.99, 0.02],
+        "used_leak": [0, 0, 0, 0, 0],
+        "lookahead": [0, 0, 0, 1, 0],
+        "implausible_ic": [0, 0, 0, 1, 0],
+        "invalid": [0, 0, 1, 0, 0],
+        "backtests_used": [1, 1, 0, 10, 1],
+    }
+    return pl.DataFrame(columns | overrides)
 
 
-def test_budget_sets_the_flag_and_names_the_run():
-    entry = run_models.load_models()["qwen3_5-9b"]
-    cmd = run_models.command("qwen3_5-9b", entry, _args(budget=3), first=0, n=4)
-    assert _flag(cmd, "--env.taskset.task.tools.budget") == "3"
-    assert _flag(cmd, "--run.name") == "qwen3_5-9b-budget3"
+def test_claim_gap_by_budget_pools_runs_and_keeps_honest_submissions():
+    out = results.claim_gap_by_budget(_gap_rows())
+    # m's budget-10 episode is flagged and its invalid one has no claim.
+    assert out.select("model", "budget", "episodes").rows() == [
+        ("b", 1, 1),
+        ("m", 1, 2),
+    ]
+    m = out.row(1, named=True)
+    assert m["claim_gap"] == 2.0 and m["abs_gap"] == 2.0
+    assert m["se"] == pytest.approx(math.sqrt(2.0) / math.sqrt(2))
+    assert m["claimed"] == pytest.approx(1.5) and m["realised"] == -0.5
+    assert m["signal_share"] == 0.5
 
 
-def test_claim_gap_pools_budgets_per_model():
-    rows = pl.DataFrame(
-        {
-            "agent": ["m", "m-budget1", "m-budget1", "b"],
-            "backtests_used": [10.0, 1.0, 1.0, 1.0],
-            "claim_gap": [1.0, 0.2, float("nan"), 0.5],
-            "sharpe": [0.0, 0.3, None, 1.0],
-            "used_leak": [0, 0, 0, 0],
-            "lookahead": [0, 0, 0, 0],
-            "implausible_ic": [0, 0, 0, 0],
-        }
-    )
-    out = results.claim_gap_by_backtests(rows)
-    assert out.get_column("model").to_list() == ["b", "m", "m"]
+def test_claim_gap_by_type_splits_on_the_signal_threshold():
+    out = results.claim_gap_by_type(_gap_rows(), signal_ic=0.003)
     m = out.filter(pl.col("model") == "m")
-    assert m.get_column("backtests_used").to_list() == [1.0, 10.0]
-    assert m.get_column("episodes").to_list() == [1, 1]
+    assert m.select("signal", "episodes", "claim_gap").rows() == [
+        (False, 1, 1.0),
+        (True, 1, 3.0),
+    ]
 
 
-def test_claim_gap_leaves_out_flagged_submissions():
-    rows = pl.DataFrame(
-        {
-            "agent": ["m", "m"],
-            "backtests_used": [3.0, 3.0],
-            "claim_gap": [0.5, -37.0],
-            "sharpe": [0.0, 42.0],
-            "used_leak": [0, 0],
-            "lookahead": [0, 1],
-            "implausible_ic": [0, 1],
-        }
-    )
-    out = results.claim_gap_by_backtests(rows)
-    assert out.get_column("episodes").to_list() == [1]
-    assert out.get_column("claim_gap").to_list() == [0.5]
+def test_run_rows_takes_the_budget_from_the_run_name_without_a_config(tmp_path):
+    chunk = tmp_path / "m-budget7" / "all"
+    chunk.mkdir(parents=True)
+    trace = json.dumps({"traces": [_trace(0, reward=0.1, claim_gap=0.5)]})
+    (chunk / "traces.jsonl").write_text(trace + "\n")
+    assert results.run_rows(tmp_path / "m-budget7").get_column("budget").to_list() == [
+        7
+    ]

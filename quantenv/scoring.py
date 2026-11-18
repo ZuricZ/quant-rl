@@ -37,22 +37,34 @@ _ALLOW, _OK, _ALPHA_ERROR, _SCORING_ERROR = "allow", "ok", "alpha", "scoring"
 class TimeLimit:
     """Wall-clock limit of one pipeline run, scaled with the data.
 
-    The limit grows with the rows the run hands to agent code
-    (`walkforward.pipeline_rows`), so an alpha that fits in its backtest
-    limit and costs the same per row also fits in the scored run's. See the
-    spec, Decision 20, for the measurements behind the defaults.
+    The limit is `startup` plus `per_million_rows` for every million rows
+    the run hands to agent code (`walkforward.run_rows`), up to `maximum`.
+    Being affine, it keeps one promise below the maximum: an alpha that fits
+    its backtest limit and costs the same per row, and the same to start,
+    also fits the scored run's. See the spec, Decision 21, for the
+    measurements behind the defaults.
 
     Attributes:
+        startup: Seconds for start-up, which does not scale with the data.
         per_million_rows: Seconds per million rows.
-        minimum: Floor in seconds, for start-up, which does not scale.
+        maximum: Ceiling in seconds. It also bounds the deadline a scoring
+            worker may set for itself, which the host checks.
     """
 
+    startup: float = 5.0
     per_million_rows: float = 4.0
-    minimum: float = 10.0
+    maximum: float = 600.0
 
     def seconds(self, rows: int) -> float:
-        """The limit of a run that hands `rows` rows to agent code."""
-        return max(self.minimum, self.per_million_rows * rows / 1e6)
+        """The limit of one pipeline run.
+
+        Args:
+            rows: Rows the run hands to agent code.
+
+        Returns:
+            The limit in seconds.
+        """
+        return min(self.maximum, self.startup + self.per_million_rows * rows / 1e6)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -118,6 +130,7 @@ def backtest(
         _backtest_worker,
         (_Pipeline(code, user, limit, STARTUP_ALLOWANCE), load, wf),
         STARTUP_ALLOWANCE,
+        max_allow=limit.maximum + STARTUP_ALLOWANCE,
     )
 
 
@@ -160,6 +173,8 @@ def score_submission(
             _score_worker,
             (_Pipeline(code, user, limit, STARTUP_ALLOWANCE), load, wf, check_config),
             STARTUP_ALLOWANCE,
+            # Pipeline runs at most: base, column dependence, one per cut.
+            max_allow=(2 + check_config.n_cuts) * limit.maximum + STARTUP_ALLOWANCE,
         )
     except AlphaError as e:
         return invalid_score(str(e))
@@ -174,21 +189,27 @@ def score_submission(
     )
 
 
-def run_isolated(target: Callable[..., Any], args: tuple, timeout: float) -> Any:
+def run_isolated(
+    target: Callable[..., Any],
+    args: tuple,
+    timeout: float,
+    max_allow: float = float("inf"),
+) -> Any:
     """Runs a function in a fresh process and returns its result.
 
     The process is killed if it runs past its deadline: `timeout` seconds
-    after the start, or what the target last set. `target` is called as
+    after the start, or what the target set. `target` is called as
     `target(allow, *args)`; `allow(seconds)` moves the deadline to that many
-    seconds from now, for a target that only learns how long it needs once
-    it has loaded its data. `target` must be a module-level function so that
-    it can be pickled.
+    seconds from now, at most `max_allow`, for a target that only learns how
+    long it needs once it has loaded its data. It may be called once.
+    `target` must be a module-level function so that it can be pickled.
 
     Args:
         target: Function to call.
         args: Positional arguments after `allow`, all picklable.
-        timeout: Wall-clock limit in seconds until the target first calls
-            `allow`.
+        timeout: Wall-clock limit in seconds until the target calls `allow`.
+        max_allow: Most seconds `allow` may grant; larger requests are cut
+            to it.
 
     Returns:
         Whatever `target` returns.
@@ -197,7 +218,8 @@ def run_isolated(target: Callable[..., Any], args: tuple, timeout: float) -> Any
         AlphaTimeout: If the process runs past its deadline.
         AlphaError: If `target` raises AlphaError, or the process dies.
         SandboxError: If `target` raises anything else: a problem with the
-            scoring itself, not with the alpha.
+            scoring itself, not with the alpha. Also if `allow` arrives
+            twice, which only a forged message can do.
     """
     ctx = mp.get_context("spawn")
     parent, child = ctx.Pipe(duplex=False)
@@ -206,6 +228,7 @@ def run_isolated(target: Callable[..., Any], args: tuple, timeout: float) -> Any
     child.close()
     started = time.monotonic()
     deadline = started + timeout
+    allowed = False
     try:
         while True:
             if not parent.poll(max(deadline - time.monotonic(), 0.0)):
@@ -213,7 +236,10 @@ def run_isolated(target: Callable[..., Any], args: tuple, timeout: float) -> Any
             kind, payload = parent.recv()
             if kind != _ALLOW:
                 break
-            deadline = time.monotonic() + payload
+            if allowed:
+                raise SandboxError("scoring worker set its deadline twice")
+            allowed = True
+            deadline = time.monotonic() + min(float(payload), max_allow)
     except EOFError as e:
         raise AlphaError("worker process died") from e
     finally:
@@ -271,8 +297,18 @@ class _Pipeline:
     def sandbox(
         self, allow: Allow, data: EvalData, wf: WalkForward, runs: int
     ) -> Sandbox:
-        """A sandbox whose limit fits a full run on `data`; sets the deadline
-        for `runs` such runs."""
+        """A sandbox for runs on `data`, and the worker's deadline.
+
+        Args:
+            allow: Sets the worker's deadline (see `run_isolated`).
+            data: The loaded data.
+            wf: Walk-forward settings.
+            runs: Pipeline runs the worker will make.
+
+        Returns:
+            A sandbox whose per-session limit fits a full run on `data`, the
+            largest; the deadline allows `runs` of them plus `slack`.
+        """
         seconds = self.limit.seconds(walkforward.run_rows(data.panel, wf, data.start))
         allow(runs * seconds + self.slack)
         return Sandbox(self.code, seconds, self.user)

@@ -73,7 +73,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self.path.rstrip("/").endswith("/chat/completions"):
             self.send_error(404)
             return
-        request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        length = self.headers.get("Content-Length")
+        if length is None:
+            self.send_error(411)
+            return
+        request = json.loads(self.rfile.read(int(length)))
         message = reply(request)
         finish = "tool_calls" if message.get("tool_calls") else "stop"
         base = {
@@ -126,7 +130,7 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     """Serves until interrupted."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
     ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()

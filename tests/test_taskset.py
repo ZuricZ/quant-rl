@@ -141,8 +141,8 @@ def test_prompt_states_the_hidden_run_and_its_time_limit():
     prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
     assert "10,000 unseen periods" in prompt
     seconds = scoring.TimeLimit().seconds(taskset.run_rows(hidden=True))
-    assert f"so it may take {seconds:.0f} seconds. The backtest" in prompt
-    assert "so it may take 10 seconds." in prompt
+    assert f"so it may take {seconds:.1f} seconds: an alpha" in prompt
+    assert "so it may take 10.6 seconds." in prompt
 
 
 @pytest.mark.parametrize("hidden", [False, True])

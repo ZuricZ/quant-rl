@@ -5,6 +5,7 @@ import importlib.metadata
 import datetime as dt
 import functools
 import math
+import time
 
 import numpy as np
 import polars as pl
@@ -12,7 +13,8 @@ import pytest
 
 from quantenv import baselines, checks, metrics, reward, scoring, walkforward
 from quantenv.panel import Panel, Schema, between
-from quantenv.alpha import Alpha, AlphaError, compile_alpha
+from quantenv.alpha import Alpha, AlphaError, AlphaTimeout, compile_alpha
+from quantenv.sandbox import SandboxError
 from quantenv.sources import synthetic
 
 SMALL = synthetic.Config(
@@ -473,7 +475,7 @@ def test_slow_signal_times_out():
         "    def predict(self, df):\n"
         "        return pl.col('f00')\n"
     )
-    limit = scoring.TimeLimit(per_million_rows=0.0, minimum=1.0)
+    limit = scoring.TimeLimit(startup=1.0, per_million_rows=0.0)
     s = scoring.score_submission(code, 0.1, _hidden(), SMALL_WF, limit=limit)
     assert (
         s.invalid == 1 and _reward(s) == reward.INVALID_REWARD and "ran past" in s.error
@@ -483,18 +485,41 @@ def test_slow_signal_times_out():
 def test_hung_signal_is_killed(monkeypatch):
     monkeypatch.setattr(scoring, "STARTUP_ALLOWANCE", 5.0)
     code = "class S(Alpha):\n    def predict(self, df):\n        while True:\n            pass\n"
-    limit = scoring.TimeLimit(per_million_rows=0.0, minimum=0.5)
+    limit = scoring.TimeLimit(startup=0.5, per_million_rows=0.0)
     s = scoring.score_submission(code, 0.1, _hidden(), SMALL_WF, limit=limit)
     assert (
         s.invalid == 1 and _reward(s) == reward.INVALID_REWARD and "ran past" in s.error
     )
 
 
-def test_time_limit_scales_with_rows_above_its_minimum():
-    limit = scoring.TimeLimit(per_million_rows=5.0, minimum=30.0)
-    assert limit.seconds(1_000_000) == 30.0
-    assert limit.seconds(10_000_000) == 50.0
-    assert limit.seconds(20_000_000) == 2 * limit.seconds(10_000_000)
+def test_time_limit_is_affine_in_rows_up_to_its_maximum():
+    limit = scoring.TimeLimit(startup=5.0, per_million_rows=4.0, maximum=100.0)
+    assert limit.seconds(0) == 5.0
+    assert limit.seconds(1_400_000) == pytest.approx(10.6)
+    # The same per-row cost fits both runs: the slope is shared.
+    assert limit.seconds(12_400_000) - limit.seconds(1_400_000) == pytest.approx(44.0)
+    assert limit.seconds(10**9) == 100.0
+
+
+def _allow_twice(allow):
+    allow(1.0)
+    allow(1.0)
+    return "done"
+
+
+def _allow_too_much_then_hang(allow):
+    allow(1e9)
+    time.sleep(60)
+
+
+def test_a_worker_may_set_its_deadline_once():
+    with pytest.raises(SandboxError, match="twice"):
+        scoring.run_isolated(_allow_twice, (), timeout=30.0)
+
+
+def test_a_worker_deadline_is_capped_by_the_host():
+    with pytest.raises(AlphaTimeout):
+        scoring.run_isolated(_allow_too_much_then_hang, (), timeout=30.0, max_allow=1.0)
 
 
 def test_slow_signal_passes_when_its_data_allows_it():
@@ -510,7 +535,7 @@ def test_slow_signal_passes_when_its_data_allows_it():
     panel = synthetic.hidden_data(1, SMALL).panel
     rows = walkforward.run_rows(panel, SMALL_WF, synthetic.hidden_data(1, SMALL).start)
     # The same rate gives the run 3 s on this data, 0.3 s on a tenth of it.
-    limit = scoring.TimeLimit(per_million_rows=3.0e6 / rows, minimum=0.0)
+    limit = scoring.TimeLimit(startup=0.0, per_million_rows=3.0e6 / rows)
     s = scoring.score_submission(
         code,
         0.1,
@@ -586,6 +611,35 @@ def test_same_period_ranks_forgives_rounding_swaps_only():
     swapped = pl.Series([0.2, 0.1, 0.2000001, 0.5, 0.1, 0.3])
     with_null = pl.Series([0.1, 0.2, 0.2000001, None, 0.1, 0.3])
     assert not checks.same_period_ranks(ts, a, rounded)
-    assert checks.same_period_ranks(ts, a, rounded, noise=1e-4)
-    assert not checks.same_period_ranks(ts, a, swapped, noise=1e-4)
-    assert not checks.same_period_ranks(ts, a, with_null, noise=1e-4)
+    assert checks.same_period_ranks(ts, a, rounded, noise=1e-4, max_share=0.5)
+    assert not checks.same_period_ranks(ts, a, rounded, noise=1e-4, max_share=0.1)
+    assert not checks.same_period_ranks(ts, a, swapped, noise=1e-4, max_share=0.5)
+    assert not checks.same_period_ranks(ts, a, with_null, noise=1e-4, max_share=0.5)
+
+
+def test_same_period_ranks_forgives_noise_in_a_flat_period():
+    # A std-based scale is 0 here and flagged this as lookahead.
+    ts = pl.Series("timestamp", [1, 1, 1])
+    a = pl.Series([1.0, 1.0, 1.0])
+    b = pl.Series([1.0, 1.0 + 2e-16, 1.0])
+    assert checks.same_period_ranks(ts, a, b, noise=1e-4, max_share=1.0)
+
+
+def test_same_period_ranks_is_exact_at_zero_noise_despite_overflow():
+    # 1e200 overflows a standard deviation to inf; nothing may pass for that.
+    ts = pl.Series("timestamp", [1, 1, 1, 1])
+    a = pl.Series([1e200, 0.1, 0.2, 0.3])
+    b = pl.Series([1e200, 0.2, 0.1, 0.3])
+    assert not checks.same_period_ranks(ts, a, b)
+    assert not checks.same_period_ranks(ts, a, b, noise=1e-4, max_share=1.0)
+
+
+@pytest.mark.parametrize("outlier", [1e7, 1e200])
+def test_an_outlier_asset_does_not_hide_lookahead(plain_panel, outlier):
+    # One extreme asset per period used to shrink every other row's z-score
+    # below the tolerance, and a future-reading alpha passed.
+    wf = walkforward.WalkForward(refit_every=20, window=20)
+    future = "pl.col('r').shift(-2).over('id').fill_null(0.0)"
+    padded = f"{future} + pl.when(pl.col('id') == 0).then({outlier}).otherwise(0.0)"
+    for code in (future, padded):
+        assert checks.truncation(_local(_predict_code(code)), plain_panel, wf, seed=0)

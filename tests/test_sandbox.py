@@ -33,7 +33,9 @@ needs_root = pytest.mark.skipif(
 
 def _backtest(body: str, user: str | None = None) -> metrics.Performance:
     code = f"class S(Alpha):\n    def predict(self, df):\n{body}"
-    return scoring.backtest(code, VISIBLE, SMALL_WF, user=user)
+    # Generous: these tests are about isolation, and some alphas sleep.
+    limit = scoring.TimeLimit(startup=60.0)
+    return scoring.backtest(code, VISIBLE, SMALL_WF, limit, user=user)
 
 
 def test_sandbox_matches_in_process_run():

@@ -230,15 +230,29 @@ def pipeline_rows(
 
 
 def run_rows(panel: Panel, wf: WalkForward, start: Any = None) -> int:
-    """`pipeline_rows` of a run over `panel`, as for `run`."""
-    start = start_timestamp(panel, wf, start)
-    n_timestamps = len(panel.timestamps)
-    return pipeline_rows(
-        n_timestamps,
-        panel.frame.height // n_timestamps,
-        (panel.timestamps < start).sum(),
-        wf,
+    """Rows a full run over `panel` hands to agent code, as for `run`.
+
+    Counted on the panel itself, block by block, so the count holds however
+    many assets each timestamp has. `pipeline_rows` gives the same number
+    from the shape alone when every timestamp has the same assets.
+
+    Args:
+        panel: The data.
+        wf: Walk-forward settings.
+        start: First predicted timestamp; None means after `wf.window`.
+
+    Returns:
+        The number of rows: every row for `features`, plus each block's
+        training window and its own rows.
+    """
+    ts = panel.schema.timestamp
+    counts = panel.frame.lazy().group_by(ts).len().sort(ts).collect()
+    first = start_timestamp(panel, wf, start)
+    per_block = (
+        between(counts, ts, b.train_start, b.end).get_column("len").sum()
+        for b in blocks(panel, wf, first)
     )
+    return panel.frame.height + sum(per_block)
 
 
 def blocks(panel: Panel, wf: WalkForward, start: Any) -> list[Block]:
