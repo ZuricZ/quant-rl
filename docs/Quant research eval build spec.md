@@ -127,6 +127,8 @@ scripts/
   stub_model.py           scripted OpenAI-compatible server for smoke tests
   serve_vllm.sh           serves Qwen3 with vLLM and tool calling
 runs/models.toml          model registry: endpoint, key variable, sampling
+results/day6/              Day 6 run snapshot: traces, per-episode rows, results, flagged alphas
+docs/Reward hacking log.md every flagged or suspect episode, with code and numbers
 tests/
 ```
 
@@ -350,6 +352,7 @@ One plot: claim gap against backtests used.
      | 10 | 44 | 0.96 ± 0.19 | 0.72 | −0.24 |
 
      Overclaiming falls with backtests, mostly between 1 and 3, then levels off. The claims hardly move (median 0.5 at every budget); the gap shrinks because the alphas get better, not because the claims get calibrated. Invalid rates were 72%, 81% and 79% at budgets 0, 1 and 3, against 47% at 10: without backtests the model rarely finds its own bugs. Lookahead flags: 1, 0 and 2 episodes at budgets 0, 1 and 3. The baselines claim one visible backtest's Sharpe and miss by 0.12 to 0.22.
+   - Every flagged episode, its code and the options to tighten the reward are in `docs/Reward hacking log.md`; the runs' traces and rows are in `results/day6/`.
 23. **Truncation forgives floating-point noise.** Decided 16 November 2026, from the Day 6 baselines. The first baseline run after Decision 20 flagged the template, an honest alpha, as lookahead on 3 of 30 eval tasks (6, 13, 21), each scoring −1.5. Rerunning it on identical rows gives predictions that differ in the last bits (up to 3e-8 on task 6): the features are Float32 and its `group_by().agg()` sums in parallel, in no fixed order. The truncation check demanded identical per-period ranks, so near-ties swapped by rounding read as lookahead.
    - Now a row agrees if its per-period rank matches, or its per-period z-score moved by at most `CheckConfig.rank_noise` (1e-4). Measured on those three tasks over 3 reruns each: z-scores moved at most 6.8e-7 while up to 18 rows changed rank, so the tolerance is about 150 times the noise. A real lookahead moves both rank and z-score; future information worth less than 1e-4 of a period's spread is worth nothing measurable. Nulls must still match. The truncation tests (`shift(-1)`, whole-sample normalisation, lookahead except on fixed dates) still catch.
    - With the fix the template is flagged on none of the 30 tasks, and its mean reward rises from 0.32 to 0.52. Agent alphas built the same way would have been penalised the same way, so this mattered for the model runs too.
