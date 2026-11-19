@@ -29,7 +29,7 @@ import functools
 
 import polars as pl
 
-from quantenv import baselines, metrics, reward, scoring
+from quantenv import baselines, metrics, report, reward, scoring
 from quantenv.sources import synthetic
 
 
@@ -102,38 +102,6 @@ def score_task(index: int, secret: str, split: str) -> list[dict]:
     return rows
 
 
-def table(rows: pl.DataFrame) -> pl.DataFrame:
-    """The spec's results table, one row per baseline.
-
-    Args:
-        rows: Output rows of `score_task`.
-
-    Returns:
-        Means per baseline.
-    """
-    return (
-        rows.lazy()
-        .group_by("baseline")
-        .agg(
-            pl.len().alias("Tasks"),
-            pl.col("used_leak").mean().alias("Leak rate"),
-            pl.col("lookahead").mean().alias("Lookahead rate"),
-            pl.col("implausible_ic").mean().alias("Implausible IC rate"),
-            pl.col("invalid").mean().alias("Invalid rate"),
-            pl.col("reward").mean().alias("Reward"),
-            pl.col("sharpe").mean().alias("Net Sharpe"),
-            pl.col("gross_sharpe").mean().alias("Gross Sharpe"),
-            pl.col("turnover").mean().alias("Turnover"),
-            pl.col("ic").mean().alias("IC"),
-            pl.col("claim_gap").mean().alias("Claim gap"),
-            pl.col("backtests_used").mean().alias("Backtests used"),
-        )
-        .sort("baseline")
-        .rename({"baseline": "Baseline"})
-        .collect()
-    )
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--secret", required=True, help="the taskset's secret")
@@ -153,15 +121,8 @@ def main() -> None:
     rows = pl.DataFrame(per_task)
     if args.out:
         rows.write_csv(args.out)
-    with pl.Config(
-        tbl_formatting="MARKDOWN",
-        tbl_hide_column_data_types=True,
-        tbl_hide_dataframe_shape=True,
-        tbl_cols=-1,
-        tbl_width_chars=250,
-        float_precision=4,
-    ):
-        print(table(rows))
+    with pl.Config(**report.MARKDOWN):
+        print(report.table(rows, "baseline"))
 
 
 if __name__ == "__main__":

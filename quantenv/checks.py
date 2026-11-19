@@ -10,14 +10,14 @@
   work: a backstop for lookahead the other checks miss, e.g. a leak built
   into the data. A statistical flag, not proof.
 
-Truncation compares per-period ranks, not raw values, so floating-point noise
-that cannot change the score is ignored. Column dependence compares rank IC,
-because predictions may change without the column being used: a data-driven
-screen that drops the suspect column as implausibly strong may admit it once
-it is permuted into noise. Their random choices (cut dates, permutation)
-come from a seed that agent code must not know: an alpha that knew the cut
-dates could be honest on exactly those dates. Their thresholds are a
-`CheckConfig`.
+Truncation compares per-period ranks, not raw values, and forgives rank swaps
+of near-ties too small to be anything but floating-point noise. Column
+dependence compares rank IC, because predictions may change without the
+column being used: a data-driven screen that drops the suspect column as
+implausibly strong may admit it once it is permuted into noise. Their random
+choices (cut dates, permutation) come from a seed that agent code must not
+know: an alpha that knew the cut dates could be honest on exactly those
+dates. Their thresholds are a `CheckConfig`.
 """
 
 import dataclasses
@@ -41,21 +41,30 @@ class CheckConfig:
 
     Attributes:
         n_cuts: Truncation cuts; each costs one pipeline run.
+        rank_noise: Truncation forgives a changed rank as floating-point
+            noise when the rank moved by at most 1 and the value by at most
+            this times (|a| + |b| + the period's median absolute deviation);
+            see `same_period_ranks`. 0 for exact ranks.
+        rank_noise_share: ...but only while forgiven rows are at most this
+            share of the rows compared in a cut.
         dependence_z: Column dependence flags a drop in mean rank IC larger
             than this many standard errors of the paired per-period
             difference...
         dependence_min_drop: ...and larger than this share of the base
             run's |IC|.
         max_ic: `implausible_ic` flags a mean rank IC against the next
-            return with absolute value at or above this. Honest daily
-            equity alphas rarely reach 0.1; peeking at the target gives
-            close to 1.
+            return with absolute value at or above this. Honest alphas on
+            the default synthetic data reach about 0.03 at most (spec,
+            Decision 24); peeking at the target gives close to 1. Set it
+            per data source: real daily equity alphas rarely reach 0.1.
     """
 
     n_cuts: int = 8
+    rank_noise: float = 1e-4
+    rank_noise_share: float = 0.01
     dependence_z: float = 4.0
     dependence_min_drop: float = 0.05
-    max_ic: float = 0.2
+    max_ic: float = 0.05
 
 
 def cut_points(timestamps: pl.Series, n: int, seed: int) -> list[Any]:
@@ -85,25 +94,58 @@ def cut_points(timestamps: pl.Series, n: int, seed: int) -> list[Any]:
     )
 
 
-def same_period_ranks(timestamps: pl.Series, a: pl.Series, b: pl.Series) -> bool:
-    """Whether two outputs rank the assets identically in every period.
+def same_period_ranks(
+    timestamps: pl.Series,
+    a: pl.Series,
+    b: pl.Series,
+    noise: float = 0.0,
+    max_share: float = 0.0,
+) -> bool:
+    """Whether two outputs rank the assets identically in every period, up to
+    floating-point noise.
+
+    A row agrees if its rank within its period is the same in both. A row
+    whose rank changed is forgiven as noise if the rank moved by at most 1
+    and the value by at most `noise` times (|a| + |b| + the period's median
+    absolute deviation of `a`), as long as forgiven rows are at most
+    `max_share` of all rows. Reruns of the same alpha on the same rows can
+    differ in the last bits, e.g. when polars sums in parallel, and swap
+    near-ties; a real difference moves ranks further or values more.
+
+    The scale ignores the period's spread, which agent code controls: one
+    extreme asset would inflate a standard deviation and hide every other
+    row's change. The median absolute deviation resists such outliers and
+    cannot overflow, and the share cap stops forgiveness at scale.
 
     Args:
         timestamps: Timestamp of each row.
         a: First output, one value per row.
         b: Second output, same rows.
+        noise: Relative value change still treated as noise; 0 for exact.
+        max_share: Largest share of rows that may be forgiven.
 
     Returns:
-        True if every period's ranks match, nulls included.
+        True if every row agrees or is forgiven, nulls included.
     """
     ts = timestamps.name
-    return (
+    va, vb = pl.col("a"), pl.col("b")
+    ra, rb = va.rank().over(ts), vb.rank().over(ts)
+    same = ra.eq_missing(rb)
+    mad = (va - va.median()).abs().median().over(ts)
+    scale = va.abs() + vb.abs() + mad
+    forgiven = (
+        ~same & ((ra - rb).abs() <= 1) & ((va - vb).abs() <= noise * scale)
+    ).fill_null(False)
+    counts = (
         pl.DataFrame([timestamps, a.alias("a"), b.alias("b")])
         .select(
-            pl.col("a").rank().over(ts).eq_missing(pl.col("b").rank().over(ts)).all()
+            changed=(~same & ~forgiven).sum(),
+            forgiven=forgiven.sum(),
+            rows=pl.len(),
         )
-        .item()
+        .row(0, named=True)
     )
+    return counts["changed"] == 0 and counts["forgiven"] <= max_share * counts["rows"]
 
 
 def truncation(
@@ -160,7 +202,10 @@ def truncation(
             .collect()
         )
         stamps = expected.get_column(s.timestamp)
-        if not same_period_ranks(stamps, expected.get_column(PREDICTION), out):
+        expected_out = expected.get_column(PREDICTION)
+        if not same_period_ranks(
+            stamps, expected_out, out, config.rank_noise, config.rank_noise_share
+        ):
             return True
     return False
 

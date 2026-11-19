@@ -1,0 +1,54 @@
+# Models for `scripts/run_models.py`. Each entry is an OpenAI-compatible
+# chat-completions endpoint that supports tool calls (the null harness serves
+# the tools over MCP and the model calls them as functions).
+#
+# Fields:
+#   model        Model id sent to the endpoint.
+#   base_url     Endpoint, ending in /v1.
+#   api_key_var  Environment variable holding the key. Omit for a local server
+#                without auth; the runner then sends a dummy key.
+#   sampling     Optional: temperature, top_p, max_tokens (per response).
+#
+# Qwen3 sampling follows Qwen's recommendation for thinking mode.
+
+# Hosted: OpenRouter serves Qwen behind an OpenAI-compatible API.
+#
+# Training candidates: Qwen3.6-35B-A3B (MoE, 3B active) is the model to
+# train; Qwen3.5-9B (dense) is the cheaper one to debug the pipeline on.
+# Both are instruct models with a thinking mode and tool calling on
+# OpenRouter. Sampling as for Qwen3 below.
+[models.qwen3_6-35b-a3b]
+model = "qwen/qwen3.6-35b-a3b"
+base_url = "https://openrouter.ai/api/v1"
+api_key_var = "OPENROUTER_API_KEY"
+sampling = { temperature = 0.6, top_p = 0.95, max_tokens = 8192 }
+
+[models.qwen3_5-9b]
+model = "qwen/qwen3.5-9b"
+base_url = "https://openrouter.ai/api/v1"
+api_key_var = "OPENROUTER_API_KEY"
+sampling = { temperature = 0.6, top_p = 0.95, max_tokens = 8192 }
+
+# Qwen3-14B's context on OpenRouter is 40,960 tokens, short for 30 turns with
+# thinking. (OpenRouter dropped qwen/qwen3-8b in November 2026.)
+[models.qwen3-14b]
+model = "qwen/qwen3-14b"
+base_url = "https://openrouter.ai/api/v1"
+api_key_var = "OPENROUTER_API_KEY"
+sampling = { temperature = 0.6, top_p = 0.95, max_tokens = 8192 }
+
+# Local: vLLM on your own GPU, started with scripts/serve_vllm.sh.
+[models.qwen3-4b-vllm]
+model = "Qwen/Qwen3-4B"
+base_url = "http://localhost:8000/v1"
+sampling = { temperature = 0.6, top_p = 0.95, max_tokens = 8192 }
+
+[models.qwen3-8b-vllm]
+model = "Qwen/Qwen3-8B"
+base_url = "http://localhost:8000/v1"
+sampling = { temperature = 0.6, top_p = 0.95, max_tokens = 8192 }
+
+# Smoke test: scripts/stub_model.py, a scripted server needing no model.
+[models.stub]
+model = "stub"
+base_url = "http://localhost:8765/v1"

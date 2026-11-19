@@ -204,6 +204,57 @@ def start_timestamp(panel: Panel, wf: WalkForward, start: Any = None) -> Any:
     return start
 
 
+def pipeline_rows(
+    n_timestamps: int, n_assets: int, n_warmup: int, wf: WalkForward
+) -> int:
+    """Rows a full run hands to agent code; time limits scale with it.
+
+    `features` gets every row, each block's `fit` the rows of its window, and
+    its `predict` the block's rows. The window never grows, so this is linear
+    in the number of timestamps. It depends only on the panel's shape, so a
+    limit can be stated before the data exists.
+
+    Args:
+        n_timestamps: Timestamps in the panel.
+        n_assets: Assets per timestamp.
+        n_warmup: Timestamps before the first predicted one; at least
+            `wf.window`.
+        wf: Walk-forward settings.
+
+    Returns:
+        The number of rows.
+    """
+    n_predicted = n_timestamps - n_warmup
+    n_blocks = len(range(0, n_predicted, wf.refit_every))
+    return n_assets * (n_timestamps + n_blocks * wf.window + n_predicted)
+
+
+def run_rows(panel: Panel, wf: WalkForward, start: Any = None) -> int:
+    """Rows a full run over `panel` hands to agent code, as for `run`.
+
+    Counted on the panel itself, block by block, so the count holds however
+    many assets each timestamp has. `pipeline_rows` gives the same number
+    from the shape alone when every timestamp has the same assets.
+
+    Args:
+        panel: The data.
+        wf: Walk-forward settings.
+        start: First predicted timestamp; None means after `wf.window`.
+
+    Returns:
+        The number of rows: every row for `features`, plus each block's
+        training window and its own rows.
+    """
+    ts = panel.schema.timestamp
+    counts = panel.frame.lazy().group_by(ts).len().sort(ts).collect()
+    first = start_timestamp(panel, wf, start)
+    per_block = (
+        between(counts, ts, b.train_start, b.end).get_column("len").sum()
+        for b in blocks(panel, wf, first)
+    )
+    return panel.frame.height + sum(per_block)
+
+
 def blocks(panel: Panel, wf: WalkForward, start: Any) -> list[Block]:
     """The blocks from `start` to the end of the panel, with their windows.
 
