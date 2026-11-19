@@ -1,7 +1,9 @@
 """A scripted OpenAI-compatible model server, for smoke tests without a model.
 
 Each episode calls `describe`, then `backtest` and `submit` with a 20-period
-reversal alpha. Which call comes next is read from the number of tool results
+reversal alpha. A request without tools, as from the no-tools taskset
+(`quant_research_notools`), gets that alpha in a Python block. Which call
+comes next is read from the number of tool results
 in the request, so concurrent episodes need no shared state. Serves
 `POST /v1/chat/completions`, streaming or not, and `GET /v1/models`.
 
@@ -43,9 +45,12 @@ def reply(request: dict[str, Any]) -> dict[str, Any]:
         request: The request body.
 
     Returns:
-        A message with the next scripted tool call, or plain text once the
+        A message with the alpha in a Python block if the request offers no
+        tools; else the next scripted tool call, or plain text once the
         script is done.
     """
+    if not request.get("tools"):
+        return {"role": "assistant", "content": f"```python\n{ALPHA}```"}
     done = sum(m.get("role") == "tool" for m in request.get("messages", []))
     if done >= len(SCRIPT):
         return {"role": "assistant", "content": "Submitted."}

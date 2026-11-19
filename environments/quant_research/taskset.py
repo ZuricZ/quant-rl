@@ -17,6 +17,7 @@ setup puts the seed in the episode's shared state, read by the toolset.
 import dataclasses
 import itertools
 import json
+import os
 import uuid
 from collections.abc import Iterable, Iterator
 from typing import Any, Literal
@@ -42,11 +43,12 @@ _MASK = "**********"
 # Built from the repository's Dockerfile; holds this package.
 IMAGE = "quant-research:0.1.0"
 _SCORE = "score"
+# Environment variable a taskset reads its secret from when none is set.
+SECRET_VAR = "QUANT_RESEARCH_SECRET"
 
-PROMPT = """\
-Research a trading alpha on a simulated panel of asset returns. You are \
-scored on the periods that directly follow the ones you can see.
-
+# The prompt is built from sections, which the no-tools variant
+# (`quant_research_notools`) shares.
+DATA_SECTION = """\
 ## Data
 
 {description}
@@ -57,6 +59,9 @@ features are anonymous. The target, `fwd_return` (the return from this \
 period to the next), is shown only to `fit`, and only for rows whose target \
 was already realised.
 
+"""
+
+ALPHA_SECTION = """\
 ## Alpha
 
 Write Python that defines exactly one subclass of the predefined class \
@@ -90,16 +95,18 @@ grows. The first {window} timestamps are only for training.
 Time limits scale with the rows a run hands to your code: `features` gets \
 every row, each block's `fit` the rows of its window, and its `predict` the \
 block's rows. A run may take {startup:g} seconds plus {per_million_rows:g} \
-seconds per million such rows. A backtest run hands over \
-{backtest_rows:.2f}M rows, so it may take {backtest_limit:.1f} seconds.
+seconds per million such rows. \
+"""
 
-The score is the annualised net Sharpe ratio of a portfolio traded on your \
-predictions. Each period the assets are ranked by prediction and held with \
+PORTFOLIO = """\
+Each period the assets are ranked by prediction and held with \
 dollar-neutral weights proportional to the centred rank, scaled so the \
 absolute weights sum to 1. Each period's P&L is the weights times \
 `fwd_return`, minus {cost_bp:g} bp per unit of turnover (the sum of absolute \
-weight changes). At most {max_null:.0%} of the predictions may be null.
+weight changes). At most {max_null:.0%} of the predictions may be null.\
+"""
 
+EXAMPLE = """\
 Example:
 
 ```python
@@ -107,7 +114,21 @@ class MyAlpha(Alpha):
     def predict(self, df):
         return pl.col("ret")
 ```
+"""
 
+PROMPT = (
+    "Research a trading alpha on a simulated panel of asset returns. You are "
+    "scored on the periods that directly follow the ones you can see.\n\n"
+    + DATA_SECTION
+    + ALPHA_SECTION
+    + "A backtest run hands over {backtest_rows:.2f}M rows, so it may take "
+    "{backtest_limit:.1f} seconds.\n\n"
+    "The score is the annualised net Sharpe ratio of a portfolio traded on "
+    "your predictions. "
+    + PORTFOLIO
+    + "\n\n"
+    + EXAMPLE
+    + """
 ## Tools
 
 - `describe()`: column names, timestamp range and number of assets.
@@ -129,6 +150,7 @@ scores {flagged_reward:g}, and so does a rank IC against the next return of \
 {max_ic:g} or more, which honest alphas do not reach. Any honest alpha scores higher \
 than both.
 """
+)
 
 
 def run_rows(hidden: bool, wf: WalkForward = WalkForward()) -> int:
@@ -171,6 +193,40 @@ def scoring_timeout(check_config: checks.CheckConfig) -> float:
     return runs * seconds + 3 * scoring.STARTUP_ALLOWANCE
 
 
+def prompt_values(
+    check_config: checks.CheckConfig = checks.CheckConfig(),
+) -> dict[str, Any]:
+    """The values the prompt sections refer to, apart from the description
+    and the episode limits.
+
+    Args:
+        check_config: Settings of the checks run when grading; gives the IC
+            ceiling.
+
+    Returns:
+        Format values by name.
+    """
+    wf = WalkForward()
+    limit = scoring.TimeLimit()
+    backtest_rows, score_rows = run_rows(hidden=False), run_rows(hidden=True)
+    return dict(
+        refit_every=wf.refit_every,
+        window=wf.window,
+        max_ic=check_config.max_ic,
+        startup=limit.startup,
+        per_million_rows=limit.per_million_rows,
+        backtest_rows=backtest_rows / 1e6,
+        backtest_limit=limit.seconds(backtest_rows),
+        score_rows=score_rows / 1e6,
+        n_hidden=synthetic.DEFAULT_CONFIG.n_hidden,
+        invalid_reward=reward.INVALID_REWARD,
+        flagged_reward=reward.FLAGGED_REWARD,
+        score_limit=limit.seconds(score_rows),
+        cost_bp=synthetic.DEFAULT_CONFIG.cost * 1e4,
+        max_null=walkforward.MAX_NULL_SHARE,
+    )
+
+
 def prompt(
     description: str,
     budget: int,
@@ -189,32 +245,16 @@ def prompt(
     Returns:
         The prompt text.
     """
-    wf = WalkForward()
-    limit = scoring.TimeLimit()
-    backtest_rows, score_rows = run_rows(hidden=False), run_rows(hidden=True)
     return PROMPT.format(
         description=description,
-        refit_every=wf.refit_every,
-        window=wf.window,
-        max_ic=check_config.max_ic,
-        startup=limit.startup,
-        per_million_rows=limit.per_million_rows,
-        backtest_rows=backtest_rows / 1e6,
-        backtest_limit=limit.seconds(backtest_rows),
-        score_rows=score_rows / 1e6,
-        n_hidden=synthetic.DEFAULT_CONFIG.n_hidden,
-        invalid_reward=reward.INVALID_REWARD,
-        flagged_reward=reward.FLAGGED_REWARD,
-        score_limit=limit.seconds(score_rows),
-        cost_bp=synthetic.DEFAULT_CONFIG.cost * 1e4,
-        max_null=walkforward.MAX_NULL_SHARE,
         budget=budget,
         max_turns=max_turns,
+        **prompt_values(check_config),
     )
 
 
 async def grade(
-    tools: ResearchConfig,
+    user: str | None,
     runtime: vf.Runtime,
     seed: int,
     code: str,
@@ -227,7 +267,7 @@ async def grade(
     package installed (see the repository's Dockerfile).
 
     Args:
-        tools: The toolset's config, for the sandbox user.
+        user: The sandbox user that runs the alpha; see `ResearchConfig`.
         runtime: A runtime of the task image.
         seed: Dataset seed.
         code: Alpha code.
@@ -247,7 +287,7 @@ async def grade(
         "code": code,
         "claimed_sharpe": claimed_sharpe,
         "checks": dataclasses.asdict(check_config),
-        "user": tools.sandbox_user,
+        "user": user,
     }
     await runtime.write(f"{stem}.json", json.dumps(request).encode())
     result = await runtime.run(
@@ -257,6 +297,32 @@ async def grade(
     if result.exit_code != 0:
         raise RuntimeError(f"grader failed: {(result.stderr or result.stdout)[-2000:]}")
     return json.loads(await runtime.read(f"{stem}.out.json"))
+
+
+async def check_sandbox_user(runtime: vf.Runtime, user: str | None) -> None:
+    """Checks that the runtime can run code as the sandbox user.
+
+    Args:
+        runtime: A runtime of the task image.
+        user: The sandbox user; None skips the check.
+
+    Raises:
+        RuntimeError: If the runtime cannot run code as `user`.
+    """
+    if user is None:
+        return
+    check = await runtime.run(["python", "-m", "quant_research.preflight", user], {})
+    if check.exit_code != 0:
+        raise RuntimeError(
+            f"sandbox user {user!r} cannot be used: "
+            f"{(check.stderr or check.stdout).strip()[-500:]}"
+        )
+
+
+def secret_from_env() -> SecretStr | None:
+    """The secret in `SECRET_VAR`, or None if it is unset or empty."""
+    value = os.environ.get(SECRET_VAR)
+    return SecretStr(value) if value else None
 
 
 class QuantResearchTaskConfig(vf.TaskConfig):
@@ -279,25 +345,25 @@ class QuantResearchTaskConfig(vf.TaskConfig):
     check_config: checks.CheckConfig = checks.CheckConfig()
 
 
-class QuantResearchConfig(vf.TasksetConfig):
-    """Taskset settings.
+class SplitConfig(vf.TasksetConfig):
+    """Settings that pick a taskset's datasets.
 
     Attributes:
-        task: Settings passed to every task.
         split: "eval" is a fixed set of `EVAL_TASKS` tasks; "train" is
             infinite. Their datasets never coincide.
         secret: Required; the taskset will not build without it. Dataset
-            seeds are drawn from it, see
-            `synthetic.dataset_seed`. Runs that must share datasets, such as
-            several models and `scripts/run_baselines.py --secret`, set the
-            same value. Dumps show it masked; never show it to the agent.
+            seeds are drawn from it, see `synthetic.dataset_seed`. Runs that
+            must share datasets, such as several models and
+            `scripts/run_baselines.py --secret`, set the same value. Unset,
+            it is read from the environment variable `SECRET_VAR`, which
+            keeps it out of config files, e.g. a prime-rl config. Dumps show
+            it masked; never show it to the agent.
     """
 
-    task: QuantResearchTaskConfig = QuantResearchTaskConfig()
     split: Literal["train", "eval"] = "eval"
     # Optional only because verifiers' CLI builds this config with defaults
     # before it reads the flags; the taskset refuses to build without it.
-    secret: SecretStr | None = None
+    secret: SecretStr | None = Field(default_factory=secret_from_env)
 
     @field_validator("secret")
     @classmethod
@@ -307,6 +373,16 @@ class QuantResearchConfig(vf.TasksetConfig):
         if secret is not None and secret.get_secret_value() in ("", _MASK):
             raise ValueError("secret is empty or masked; pass the real secret")
         return secret
+
+
+class QuantResearchConfig(SplitConfig):
+    """Taskset settings.
+
+    Attributes:
+        task: Settings passed to every task.
+    """
+
+    task: QuantResearchTaskConfig = QuantResearchTaskConfig()
 
 
 class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskConfig]):
@@ -334,16 +410,7 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
         Raises:
             RuntimeError: If the runtime cannot run code as the sandbox user.
         """
-        user = self.config.tools.sandbox_user
-        if user is not None:
-            check = await runtime.run(
-                ["python", "-m", "quant_research.preflight", user], {}
-            )
-            if check.exit_code != 0:
-                raise RuntimeError(
-                    f"sandbox user {user!r} cannot be used: "
-                    f"{(check.stderr or check.stdout).strip()[-500:]}"
-                )
+        await check_sandbox_user(runtime, self.config.tools.sandbox_user)
         trace.state.seed = f"{self.seed:032x}"
 
     @classmethod
@@ -380,7 +447,7 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
             state = trace.state
             if state.submitted:
                 score = await grade(
-                    self.config.tools,
+                    self.config.tools.sandbox_user,
                     runtime,
                     self.seed,
                     state.code,
@@ -435,7 +502,7 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
         """Grades the oracle alpha: it must score above 0 and pass the checks."""
         weights = synthetic.ground_truth(self.seed).weights
         score = await grade(
-            self.config.tools,
+            self.config.tools.sandbox_user,
             runtime,
             self.seed,
             baselines.weighted_code(weights),
@@ -453,7 +520,7 @@ class QuantResearchTaskset(vf.Taskset[QuantResearchTask, QuantResearchConfig]):
         if config.secret is None:
             raise ValueError(
                 "the taskset needs a secret: set --env.taskset.secret "
-                "(--taskset.secret for vf-validate)"
+                f"(--taskset.secret for vf-validate) or {SECRET_VAR}"
             )
         super().__init__(config)
 

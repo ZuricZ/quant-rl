@@ -120,6 +120,8 @@ environments/quant_research/
   taskset.py              verifiers taskset, reward, metrics, stop
   servers/research.py     toolset: describe, backtest, submit
   grade.py                scores a submission on the hidden days, inside the runtime
+environments/quant_research_notools/
+  taskset.py              no-tools variant for the prime-rl smoke run: one reply, reward from hidden IC
 scripts/
   run_baselines.py        naive, oracle and leaky baselines on the eval tasks
   run_models.py           runs models from runs/models.toml with vf-run
@@ -127,6 +129,7 @@ scripts/
   stub_model.py           scripted OpenAI-compatible server for smoke tests
   serve_vllm.sh           serves Qwen3 with vLLM and tool calling
 runs/models.toml          model registry: endpoint, key variable, sampling
+runs/prime-rl/            prime-rl configs: notools-smoke.toml, the smoke run
 results/day6/              Day 6 run snapshot: traces, per-episode rows, results, flagged alphas
 docs/Reward hacking log.md every flagged or suspect episode, with code and numbers
 tests/
@@ -360,6 +363,15 @@ One plot: claim gap against backtests used. In practice the model uses its whole
    - With either fix the template is flagged on none of the 30 tasks, and its mean reward rises from 0.32 to 0.52. Agent alphas built the same way would have been penalised the same way.
 
 24. **The implausible-IC ceiling is 0.05.** Decided 17 November 2026, from the first model run. At 0.2 the shifted-IC flag backstopped nothing seen so far: the two block-statistic lookahead alphas of Decision 22 reached IC 0.053 and 0.052 at +1 (net Sharpe 5.5 and 4.9), caught only by truncation. Honest alphas stay far lower: over the 30 eval tasks the oracle's IC peaks at 0.028, the template's at 0.024, naive's at 0.018, and Qwen3.5-9B's unflagged submissions at 0.015. So `CheckConfig.max_ic` defaults to 0.05, about 1.8 times the best honest IC and about 10 standard deviations above the oracle's 0.020 ± 0.003; both of those alphas now also trip it, by about 0.003. That margin is set by the block length, not by honesty: the block-mean lookahead's IC is roughly 1/√`refit_every` (0.063), damped by ranking, so with `refit_every` above about 400 it would fall under 0.05. Treat the flag as a weak backstop; a flat IC profile across shifts (`docs/Reward hacking log.md`) would not depend on the block length. The margin is thin on both sides, so revisit it if the generator's planted ICs change, and set it per source for real data. It is a setting, not a constant: the prompt reads it from the task's `check_config`, the grader receives it in its request, and vf-run takes it from a TOML file (`[env.taskset.task.check_config]`, `max_ic = …`), which `run_models.py --vf-config` passes through. vf-run's flags cannot set it, since `CheckConfig` is a dataclass.
+
+25. **The smoke run's taskset is a package of its own, `quant-research-notools`.** Decided 19 November 2026, for Day 7.
+   - verifiers maps a taskset id to a module (`quant-research-notools` to `quant_research_notools`), so the variant is a second package in the root distribution, next to `quant_research`, and is installed in the same task image. It reuses the main taskset's datasets (task i of a split with a secret is the same dataset in both), grader, sandbox user check and prompt sections (`DATA_SECTION`, `ALPHA_SECTION`, `PORTFOLIO`, `EXAMPLE`); the main prompt is unchanged byte for byte.
+   - One reply, no tools: the null harness ends the episode after the first reply, and a `@vf.stop` after one turn backs that up. The prompt adds a table of each feature's visible-period score used alone as the prediction, and `ret`'s: mean rank IC against the target and the net Sharpe of the portfolio, computed directly from the visible panel (a raw column needs no walk-forward). The last fenced Python block of the reply is the alpha; none scores as invalid (`no_code` metric).
+   - Reward: the hidden-period rank IC divided by `max_ic`, so an honest alpha earns between −1 and 1; the main taskset's −1 (invalid) and −1.5 (a check fired) stay below it. The spec asks for true IC; dividing by the ceiling keeps the honest range on the same scale as the penalties, which matters for group-relative advantages. No Sharpe claim is asked for, and `grade` gets 0 in its place.
+   - The secret can come from the environment variable `QUANT_RESEARCH_SECRET`, for both tasksets (`SplitConfig`), so a prime-rl config file need not hold it. A secret set in the config wins.
+   - `grade` and the sandbox user check take the user, not the toolset config, since the no-tools task has no toolset.
+   - Verified 19 November 2026 with Docker in a cloud session: `vf-run quant-research-notools` with the stub model (`scripts/stub_model.py` now answers a request without tools with its alpha in a Python block), 2 eval tasks, both `ok`, one turn each, rewards −0.023 and −0.037 (the 20-period reversal's IC is about −0.001 to −0.002 there).
+   - `runs/prime-rl/notools-smoke.toml` trains Qwen3-4B-Instruct-2507 with LoRA (rank 8) for 200 steps, batch 32 in groups of 8, on 1 trainer and 1 inference GPU, written from prime-rl's `examples/basic` of 19 November 2026. It has not run: the cloud sessions have no GPU. Grading bounds the step time (up to about a minute of CPU per rollout), hence the small batch.
 
 ## Open decisions
 

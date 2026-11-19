@@ -1,0 +1,79 @@
+# prime-rl smoke run: LoRA RL on the no-tools taskset (quant-research-notools).
+# The goal is a pipeline that runs, not a result (spec, Day 7).
+#
+# Needs 2 GPUs (one trainer, one inference) and Docker on the same machine:
+# each rollout is graded in a container of the task image, which runs the
+# alpha walk-forward on the hidden periods (up to about a minute of CPU per
+# rollout). From a prime-rl checkout, with this repository installed into its
+# environment (`uv pip install -e <quant-rl>`):
+#
+#   docker build -t quant-research:0.1.0 <quant-rl>
+#   export QUANT_RESEARCH_SECRET=<a secret of your choosing>
+#   uv run rl @ <quant-rl>/runs/prime-rl/notools-smoke.toml
+#
+# The secret picks the datasets and stays out of this file; the taskset reads
+# it from QUANT_RESEARCH_SECRET. Train and eval splits never share a dataset.
+#
+# Written against prime-rl main of 19 November 2026 (examples/basic); not yet
+# run.
+
+max_steps = 200
+seq_len = 4096
+
+[deployment]
+num_train_gpus = 1
+num_infer_gpus = 1
+
+[model]
+name = "Qwen/Qwen3-4B-Instruct-2507"
+
+[trainer.optim]
+lr = 1e-5
+weight_decay = 0.0
+
+[trainer.model.lora]
+rank = 8
+dropout = 0.0
+target_modules = [
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj"
+]
+
+# Small batches: grading, not generation, bounds the step time.
+[orchestrator]
+batch_size = 32
+
+[orchestrator.train]
+group_size = 8
+
+[orchestrator.train.sampling]
+max_completion_tokens = 2048
+
+[[orchestrator.train.source]]
+name = "quant-research-notools"
+env.taskset.id = "quant-research-notools"
+env.taskset.split = "train"
+env.agent.harness.id = "null"
+env.agent.runtime.type = "docker"
+
+[orchestrator.eval]
+interval = 50
+
+[orchestrator.eval.sampling]
+max_completion_tokens = 2048
+
+[[orchestrator.eval.source]]
+name = "quant-research-notools-eval"
+env.taskset.id = "quant-research-notools"
+env.taskset.split = "eval"
+env.agent.harness.id = "null"
+env.agent.runtime.type = "docker"
+
+[ckpt] # Checkpoint at the end of training
+
+[inference]
