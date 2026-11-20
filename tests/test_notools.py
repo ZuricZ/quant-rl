@@ -49,8 +49,9 @@ def task() -> NoToolsTask:
 
 
 def _local_task() -> NoToolsTask:
-    """Task 0 graded as this machine's user, without a sandbox user."""
-    config = NoToolsTaskConfig(secret=SECRET, sandbox_user=None)
+    """Task 0 on the default market, graded as this machine's user, without
+    a sandbox user."""
+    config = NoToolsTaskConfig(secret=SECRET, sandbox_user=None, vary=False)
     return NoToolsTask(ResearchData(split="eval", index=0), config)
 
 
@@ -70,7 +71,7 @@ def test_secret_is_required():
 
 
 def test_prompt_scores_every_feature_and_ret_on_visible_data(task):
-    visible = synthetic.visible_data(task.seed)
+    visible = synthetic.visible_data(task.seed, task.market)
     s = visible.panel.schema
     columns = [*s.features, s.ret]
     ics = metrics.mean_rank_ics(

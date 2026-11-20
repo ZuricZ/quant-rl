@@ -44,6 +44,8 @@ class ResearchState(vf.State):
     Attributes:
         seed: Dataset seed as hex, set by the task's setup before the agent
             starts. The agent must not learn it.
+        variation: The task's variation seed as hex
+            (`synthetic.variation_seed`), or "" for the default market.
         backtests_used: Backtest calls that ran; refused calls do not count.
         submitted: Whether `submit` has run.
         code: The submitted alpha code.
@@ -51,13 +53,14 @@ class ResearchState(vf.State):
     """
 
     seed: str = ""
+    variation: str = ""
     backtests_used: int = 0
     submitted: bool = False
     code: str = ""
     claimed_sharpe: float | None = None
 
 
-# What the toolset records; it only reads the seed.
+# What the toolset records; it only reads the seed and the variation.
 _EPISODE_FIELDS = ("backtests_used", "submitted", "code", "claimed_sharpe")
 
 
@@ -171,7 +174,12 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
         """The loader of the visible periods, from the seed in the state."""
         if not self.state.seed:
             raise ValueError("the task is not set up: no dataset seed")
-        return functools.partial(synthetic.visible_data, int(self.state.seed, 16))
+        variation = int(self.state.variation, 16) if self.state.variation else None
+        return functools.partial(
+            synthetic.visible_data,
+            int(self.state.seed, 16),
+            synthetic.task_config(variation),
+        )
 
     def _publish(self) -> None:
         for name in _EPISODE_FIELDS:

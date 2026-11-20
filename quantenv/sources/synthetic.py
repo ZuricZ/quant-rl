@@ -17,6 +17,12 @@ The market, with each mechanism controlled by `Config`:
   per asset, plus common return factors with per-asset loadings, all scaled
   by a market volatility that moves over time (stochastic log-volatility).
 - Leak: the cross-sectionally standardised next-period return plus noise.
+- Past-return signal (off by default): returns partly continue (momentum)
+  or reverse (short-term reversal) the asset's recent idiosyncratic shocks,
+  so the signal lives in `ret`.
+
+`task_config` draws a varied `Config` per task: shape, bar, cost, column
+names, start date and the style of alpha the task asks for.
 
 numpy is used only to draw random numbers, which polars cannot do; every
 transformation is a polars expression.
@@ -25,6 +31,7 @@ transformation is a polars expression.
 import dataclasses
 import datetime as dt
 import hashlib
+import itertools
 import math
 from typing import Any
 
@@ -87,7 +94,20 @@ class Config:
         cost: Trading cost per unit of turnover, in return units.
         return_vol: Typical per-period return volatility, before the market
             volatility and per-asset multipliers.
-        start: First timestamp; its date for daily bars.
+        start: First timestamp; its date for daily bars, which must be a
+            business day.
+        names: Feature column names; empty for f00, f01, ... Must hold
+            `n_features` distinct names otherwise.
+        style: The style of alpha the task asks for, one of `STYLES`. Only
+            "momentum" and "reversal" change the data, through
+            `ret_signal_ic`; the others are requests to the agent.
+        ret_signal_ic: Planted IC of the past-return signal: the sum of an
+            asset's last `ret_signal_horizon` idiosyncratic return shocks,
+            against the standardised return component. Positive is
+            momentum, negative reversal, 0 none. Like the real features'
+            ICs, measured before factor and volatility effects, so the IC of
+            past `ret` itself is somewhat lower.
+        ret_signal_horizon: Periods the past-return signal sums over.
     """
 
     n_assets: int = 200
@@ -115,9 +135,26 @@ class Config:
     cost: float = 0.0002
     return_vol: float = 0.02
     start: dt.datetime = dt.datetime(2000, 1, 3)
+    names: tuple[str, ...] = ()
+    style: str = "any"
+    ret_signal_ic: float = 0.0
+    ret_signal_horizon: int = 1
+
+    def __post_init__(self) -> None:
+        if self.names and (
+            len(self.names) != self.n_features
+            or len(set(self.names)) != self.n_features
+        ):
+            raise ValueError(f"need {self.n_features} distinct names, got {self.names}")
+        if self.style not in STYLES:
+            raise ValueError(f"style must be one of {STYLES}, got {self.style!r}")
+        if self.ret_signal_horizon < 1:
+            raise ValueError("ret_signal_horizon must be at least 1")
 
     @property
     def feature_names(self) -> list[str]:
+        if self.names:
+            return list(self.names)
         return [f"f{i:02d}" for i in range(self.n_features)]
 
     @property
@@ -131,6 +168,10 @@ class Config:
     def schema(self) -> Schema:
         return Schema(features=tuple(self.feature_names))
 
+
+# Styles of alpha a task can ask for: none in particular, the past-return
+# signals the generator can plant, slow trading, and a mix of features.
+STYLES = ("any", "momentum", "reversal", "low_turnover", "combination")
 
 DEFAULT_CONFIG = Config()
 
@@ -173,6 +214,8 @@ class GroundTruth:
         interaction: The two real features whose product is in the signal,
             or None.
         interaction_weight: Its weight in the signal.
+        ret_signal: The past-return signal's horizon and weight in the
+            signal (negative for reversal), or None.
     """
 
     real: tuple[str, ...]
@@ -182,6 +225,7 @@ class GroundTruth:
     weights: dict[str, float]
     interaction: tuple[str, str] | None = None
     interaction_weight: float = 0.0
+    ret_signal: tuple[int, float] | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -260,6 +304,140 @@ def spearman_to_pearson(rho_s: float) -> float:
     return 2.0 * math.sin(math.pi * rho_s / 6.0)
 
 
+# What `task_config` draws from. Bars: daily, or back-to-back intraday bars.
+_BARS = (None, dt.timedelta(hours=4), dt.timedelta(hours=1))
+_BAR_PROBS = (0.7, 0.15, 0.15)
+_ASSETS = (100, 150, 200, 250)
+_VISIBLE = (1_500, 2_000, 2_500, 3_000)
+_FEATURES = (12, 24)  # Inclusive range.
+_COST_BP = (1.0, 3.0)  # Range; tasks asking for low turnover pay more.
+_LOW_TURNOVER_COST_BP = (3.0, 5.0)
+_MOMENTUM_HORIZONS = (20, 60, 120)
+_REVERSAL_HORIZONS = (1, 3, 5)
+_START_YEARS = (1995, 2015)  # Inclusive range.
+_LETTERS = np.array(list("abcdefghijklmnopqrstuvwxyz"))
+
+
+def _feature_names(rng: np.random.Generator, n: int) -> tuple[str, ...]:
+    """Column names in one of several schemes, drawn per task."""
+    scheme = int(rng.integers(5))
+    if scheme == 0:
+        return tuple(f"f{i:02d}" for i in range(n))
+    if scheme == 1:
+        return tuple(f"x{i}" for i in range(n))
+    if scheme == 2:
+        return tuple(f"feat_{i:03d}" for i in range(n))
+    if scheme == 3:
+        return tuple(f"signal_{chr(ord('a') + i)}" for i in range(n))
+    # Four random letters each, distinct; never a reserved column name,
+    # which all have other lengths or contain "_".
+    names: list[str] = []
+    while len(names) < n:
+        name = "".join(rng.choice(_LETTERS, size=4))
+        if name not in names:
+            names.append(name)
+    return tuple(names)
+
+
+def _start(rng: np.random.Generator, bar: dt.timedelta | None) -> dt.datetime:
+    """A start date in `_START_YEARS`, moved on to a Monday for daily bars."""
+    year = int(rng.integers(_START_YEARS[0], _START_YEARS[1] + 1))
+    day = dt.datetime(year, 1, 1) + dt.timedelta(days=int(rng.integers(0, 330)))
+    if bar is None:
+        day += dt.timedelta(days=(7 - day.weekday()) % 7)
+    return day
+
+
+def _draw_style(variation_seed: int) -> str:
+    """The style a variation seed asks for, uniform over `STYLES`."""
+    return STYLES[_hash_int(4, "style", variation_seed) % len(STYLES)]
+
+
+def task_config(variation_seed: int | None, base: Config = DEFAULT_CONFIG) -> Config:
+    """The varied market of one task (spec, Decision 26).
+
+    Draws the number of assets, visible periods and features, the bar, the
+    cost, the feature names, the start date and the style the task asks
+    for. A momentum or reversal task gets a planted past-return signal of
+    that kind. Intraday bars scale every planted IC and the cost by
+    sqrt(252 / periods per year), so annualised Sharpe ratios, gross and
+    net, stay where `base` calibrates them; per period, intraday signals are
+    weaker and need more periods to detect.
+
+    Args:
+        variation_seed: Non-negative integer seed for the draws, e.g. from
+            `variation_seed`; None draws nothing and returns `base`.
+        base: The parameters that are not drawn.
+
+    Returns:
+        The task's generator parameters.
+    """
+    if variation_seed is None:
+        return base
+    style = _draw_style(variation_seed)
+    rng = np.random.default_rng(_hash_int(16, "variation", variation_seed))
+    bar = _BARS[int(rng.choice(len(_BARS), p=_BAR_PROBS))]
+    n_features = int(rng.integers(_FEATURES[0], _FEATURES[1] + 1))
+    cost_range = _LOW_TURNOVER_COST_BP if style == "low_turnover" else _COST_BP
+    config = dataclasses.replace(
+        base,
+        n_assets=int(rng.choice(_ASSETS)),
+        n_visible=int(rng.choice(_VISIBLE)),
+        bar=bar,
+        n_features=n_features,
+        names=_feature_names(rng, n_features),
+        start=_start(rng, bar),
+        style=style,
+        cost=float(rng.uniform(*cost_range)) * 1e-4,
+    )
+    if style in ("momentum", "reversal"):
+        ic = float(rng.uniform(*base.real_ic_range))
+        horizons = _MOMENTUM_HORIZONS if style == "momentum" else _REVERSAL_HORIZONS
+        config = dataclasses.replace(
+            config,
+            ret_signal_ic=ic if style == "momentum" else -ic,
+            ret_signal_horizon=int(rng.choice(horizons)),
+        )
+    scale = math.sqrt(252.0 / config.periods_per_year)
+    return dataclasses.replace(
+        config,
+        real_ic_range=(config.real_ic_range[0] * scale, config.real_ic_range[1] * scale),
+        replacement_ic=config.replacement_ic * scale,
+        interaction_ic=config.interaction_ic * scale,
+        ret_signal_ic=config.ret_signal_ic * scale,
+        # In whole hundredths of a basis point, so the prompt can state it.
+        cost=round(config.cost * scale * 1e4, 2) * 1e-4,
+    )
+
+
+def variation_seed(index: int, split: str, seed: int) -> int:
+    """The seed of a task's variation draws.
+
+    Eval tasks draw from their index alone, so the eval set's variation is
+    fixed whatever the secret and runs stay comparable. Eval task i takes
+    the first such seed whose style is `STYLES[i % len(STYLES)]`, so every
+    style appears equally often. Train tasks draw from a hash of their
+    dataset seed, so training sees fresh variation without the variation
+    seed giving the dataset seed away (spec, Decision 26).
+
+    Args:
+        index: Task number within the split.
+        split: "train" or "eval".
+        seed: The task's dataset seed.
+
+    Returns:
+        A non-negative integer seed for `task_config`.
+    """
+    if split != "eval":
+        return _hash_int(16, "train", seed)
+    style = STYLES[index % len(STYLES)]
+    for attempt in itertools.count():
+        candidate = _hash_int(16, "eval", index, attempt)
+        if _draw_style(candidate) == style:
+            return candidate
+    raise AssertionError("unreachable")
+
+
 def ground_truth(seed: int, config: Config = DEFAULT_CONFIG) -> GroundTruth:
     """Draws the feature roles and planted ICs for a seed.
 
@@ -317,6 +495,12 @@ def _world(seed: int, config: Config) -> _World:
     signal_var = sum(weights[a] * weights[b] * corr(a, b) for a in real for b in real)
     if interaction is not None:
         signal_var += w_int**2 * (1.0 + rho**2)
+    ret_signal = None
+    if config.ret_signal_ic != 0.0:
+        ret_signal = (
+            config.ret_signal_horizon,
+            spearman_to_pearson(config.ret_signal_ic),
+        )
     if config.n_return_factors > 0:
         betas = tuple((m, *o) for m, o in zip(market, others))
     else:
@@ -331,6 +515,7 @@ def _world(seed: int, config: Config) -> _World:
             weights=weights,
             interaction=interaction,
             interaction_weight=w_int if interaction is not None else 0.0,
+            ret_signal=ret_signal,
         ),
         persistence=dict(zip(names, phis)),
         factor_persistence=phis[-1],
@@ -354,7 +539,10 @@ def generate(
         z = s_t * signal + sqrt(1 - s_t^2 * var(signal)) * noise,
 
     where s_t is the regime strength and the signal is the weighted real
-    features plus the centred interaction. The target is then
+    features plus the centred interaction. With a past-return signal of
+    weight w and horizon h, z also holds w times the sum of the asset's last
+    h noise draws over sqrt(h), and the noise shrinks to keep z at unit
+    variance; the signal regime does not scale it. The target is then
 
         fwd_return = return_vol * vol_t * (sqrt(1 - q) * sigma_i * z
                                    + sqrt(q / K) * beta_i . F_t),
@@ -529,8 +717,22 @@ def _target(config: Config, world: _World) -> pl.Expr:
         product = pl.col(a) * pl.col(b) - world.interaction_mean
         terms.append(truth.interaction_weight * product)
     strength = pl.col(_STRENGTH)
-    noise = (1.0 - strength**2 * world.signal_var).sqrt() * pl.col(_IDIO)
-    z = strength * pl.sum_horizontal(terms) + noise
+    noise_var = 1.0 - strength**2 * world.signal_var
+    past = []
+    if truth.ret_signal is not None:
+        horizon, weight = truth.ret_signal
+        # Earlier shocks of the same asset only; they are in `ret` already.
+        shocks = (
+            pl.col(_IDIO)
+            .shift(1)
+            .rolling_sum(horizon, min_samples=1)
+            .over(config.schema.asset)
+            .fill_null(0.0)
+        )
+        past.append(weight * shocks / math.sqrt(horizon))
+        noise_var = noise_var - weight**2
+    noise = noise_var.sqrt() * pl.col(_IDIO)
+    z = strength * pl.sum_horizontal(terms) + pl.sum_horizontal(*past, noise)
     q = config.return_factor_share
     idio = math.sqrt(1.0 - q) * _per_asset(world.idio_vol, config) * z
     k = config.n_return_factors

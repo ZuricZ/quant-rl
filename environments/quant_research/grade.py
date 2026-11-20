@@ -6,7 +6,8 @@ finished:
     python -m quant_research.grade REQUEST RESULT
 
 REQUEST is a JSON file with `seed`, `code`, `claimed_sharpe`, `user` (the
-sandbox user) and `checks` (a `quantenv.checks.CheckConfig` as a dict). It
+sandbox user), `checks` (a `quantenv.checks.CheckConfig` as a dict) and
+`variation` (the task's variation seed, or null for the default market). It
 holds the dataset seed, so it is deleted as soon as it is read, before any
 agent code runs. The raw score (`scoring.Score`, no reward) is written as
 JSON to RESULT; the host applies the reward rule (`quantenv.reward`). The
@@ -37,7 +38,11 @@ def main(argv: list[str]) -> None:
     score = scoring.score_submission(
         request["code"],
         request["claimed_sharpe"],
-        functools.partial(synthetic.hidden_data, request["seed"]),
+        functools.partial(
+            synthetic.hidden_data,
+            request["seed"],
+            synthetic.task_config(request["variation"]),
+        ),
         user=request["user"],
         check_config=checks.CheckConfig(**request["checks"]),
     )

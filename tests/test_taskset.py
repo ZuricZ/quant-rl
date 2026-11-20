@@ -34,6 +34,7 @@ from quant_research.taskset import (  # noqa: E402
     QuantResearchTaskset,
 )
 from quantenv import baselines, checks, metrics, reward, scoring, walkforward  # noqa: E402
+from quantenv.alpha import AlphaError  # noqa: E402
 from quantenv.sources import synthetic  # noqa: E402
 
 COLUMN = baselines.column_code("f00")
@@ -124,8 +125,9 @@ def test_seed_stays_out_of_published_task_data(task, tmp_path):
 
 def test_prompt_states_columns_budget_and_contract():
     config = _config(tools=ResearchConfig(budget=7))
-    prompt = next(iter(QuantResearchTaskset(config))).data.prompt
-    assert "f00" in prompt and "ret" in prompt
+    task = next(iter(QuantResearchTaskset(config)))
+    prompt = task.data.prompt
+    assert task.market.feature_names[0] in prompt and "ret" in prompt
     assert "You have 7 backtests" in prompt
     for name in (
         "features(df)",
@@ -149,21 +151,74 @@ def test_prompt_states_the_penalties():
 
 
 def test_prompt_states_the_hidden_run_and_its_time_limit():
-    prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
-    assert "10,000 unseen periods" in prompt
-    seconds = scoring.TimeLimit().seconds(taskset.run_rows(hidden=True))
+    task = next(iter(QuantResearchTaskset(_config())))
+    prompt = task.data.prompt
+    assert f"{task.market.n_hidden:,} unseen periods" in prompt
+    limit = scoring.TimeLimit()
+    seconds = limit.seconds(taskset.run_rows(hidden=True, config=task.market))
     assert f"so it may take {seconds:.1f} seconds: an alpha" in prompt
+    seconds = limit.seconds(taskset.run_rows(hidden=False, config=task.market))
+    assert f"so it may take {seconds:.1f} seconds." in prompt
+
+
+def test_default_market_prompt_states_the_fixed_limits():
+    prompt = next(iter(QuantResearchTaskset(_config(vary=False)))).data.prompt
+    assert "10,000 unseen periods" in prompt
     assert "so it may take 10.6 seconds." in prompt
 
 
 @pytest.mark.parametrize("hidden", [False, True])
-def test_prompt_rows_match_the_data(hidden):
+@pytest.mark.parametrize("variation", [None, synthetic.variation_seed(3, "eval", 0)])
+def test_prompt_rows_match_the_data(hidden, variation):
     seed = synthetic.dataset_seed(0, "x", "eval")
+    market = synthetic.task_config(variation)
     load = synthetic.hidden_data if hidden else synthetic.visible_data
-    data = load(seed)
-    assert taskset.run_rows(hidden) == walkforward.run_rows(
+    data = load(seed, market)
+    assert taskset.run_rows(hidden, market) == walkforward.run_rows(
         data.panel, walkforward.WalkForward(), data.start
     )
+
+
+def test_unvaried_prompt_keeps_the_fixed_opening_and_example():
+    task = next(iter(QuantResearchTaskset(_config(vary=False))))
+    prompt = task.data.prompt
+    assert task.variation is None and task.market == synthetic.DEFAULT_CONFIG
+    assert prompt.startswith(taskset.OPENINGS[0])
+    assert taskset.EXAMPLE in prompt and "## Request" not in prompt
+
+
+def test_varied_prompts_state_the_requested_style():
+    tasks = list(QuantResearchTaskset(_config()).take(5))
+    # Eval task i asks for the i-th style.
+    assert [t.market.style for t in tasks] == list(synthetic.STYLES)
+    for task in tasks:
+        prompt = task.data.prompt
+        request = taskset.STYLE_REQUESTS[task.market.style]
+        if request:
+            assert f"## Request\n\n{request}" in prompt
+        else:
+            assert "## Request" not in prompt
+        assert prompt.split("\n\n")[0] in taskset.OPENINGS
+        assert taskset.EXAMPLE not in prompt  # Never the ready-made example.
+
+
+def test_neutral_examples_cannot_be_submitted_as_they_stand():
+    data = synthetic.visible_data(0)
+    for example in taskset.NEUTRAL_EXAMPLES:
+        code = example.split("```python\n")[1].split("```")[0]
+        with pytest.raises(AlphaError, match="COLUMN"):
+            scoring.backtest(code, functools.partial(synthetic.visible_data, 0))
+        assert "COLUMN" not in data.panel.frame.columns
+
+
+def test_toolset_backtests_the_varied_market():
+    tools = _toolset()
+    variation = synthetic.variation_seed(1, "eval", 0)
+    tools.state.variation = f"{variation:032x}"
+    market = synthetic.task_config(variation)
+    text = tools.describe()
+    assert market.feature_names[0] in text
+    assert f"assets: {market.n_assets}" in text
 
 
 def test_grading_timeout_covers_every_scored_run():
@@ -292,7 +347,14 @@ def test_grader_scores_on_hidden_periods(tmp_path):
     request, result = tmp_path / "request.json", tmp_path / "result.json"
     request.write_text(
         json.dumps(
-            {"seed": 0, "code": code, "claimed_sharpe": 1.0, "user": None, "checks": {}}
+            {
+                "seed": 0,
+                "code": code,
+                "claimed_sharpe": 1.0,
+                "user": None,
+                "checks": {},
+                "variation": None,
+            }
         )
     )
     grade.main([str(request), str(result)])

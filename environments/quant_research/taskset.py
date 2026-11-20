@@ -16,6 +16,7 @@ setup puts the seed in the episode's shared state, read by the toolset.
 
 import dataclasses
 import itertools
+import hashlib
 import json
 import os
 import uuid
@@ -106,6 +107,8 @@ absolute weights sum to 1. Each period's P&L is the weights times \
 weight changes). At most {max_null:.0%} of the predictions may be null.\
 """
 
+# The prompt of tasks without variation (spec, Decision 26): the first
+# opening, this example and no style request.
 EXAMPLE = """\
 Example:
 
@@ -116,10 +119,74 @@ class MyAlpha(Alpha):
 ```
 """
 
-PROMPT = (
+# Varied tasks open with one of these and show one of `NEUTRAL_EXAMPLES` or
+# none. The rules that follow are worded the same in every task.
+OPENINGS = (
     "Research a trading alpha on a simulated panel of asset returns. You are "
-    "scored on the periods that directly follow the ones you can see.\n\n"
+    "scored on the periods that directly follow the ones you can see.",
+    "Find a trading alpha in a simulated panel of asset returns. It is scored "
+    "on the periods right after the ones you are shown.",
+    "Your task is to develop an alpha, a trading signal, on the simulated "
+    "panel of asset returns described below. Its score comes from the "
+    "periods that immediately follow the visible ones.",
+)
+
+# Patterns of the API, not submissions: "COLUMN" is not a column, so a copy
+# fails.
+NEUTRAL_EXAMPLES = (
+    """\
+Example of the pattern only; "COLUMN" stands for a real column name:
+
+```python
+class MyAlpha(Alpha):
+    def features(self, df):
+        smooth = pl.col("COLUMN").rolling_mean(10).over("asset")
+        return df.with_columns(smooth.alias("smooth"))
+    def predict(self, df):
+        return pl.col("smooth")
+```
+""",
+    """\
+Example of the pattern only; "COLUMN" stands for a real column name:
+
+```python
+class MyAlpha(Alpha):
+    def fit(self, train):
+        corr = train.select(pl.corr("COLUMN", "fwd_return", method="spearman"))
+        self.sign = 1.0 if corr.item() >= 0 else -1.0
+    def predict(self, df):
+        return self.sign * pl.col("COLUMN")
+```
+""",
+    """\
+Example of the pattern only; "COLUMN" stands for a real column name:
+
+```python
+class MyAlpha(Alpha):
+    def predict(self, df):
+        return pl.col("COLUMN").rank().over("timestamp")
+```
+""",
+)
+
+# What a varied task asks for, by `synthetic.Config.style`. Not checked by
+# the reward yet (spec, open decision 4).
+STYLE_REQUESTS = {
+    "any": "",
+    "momentum": "The desk wants a momentum alpha: one that favours assets "
+    "whose returns over recent periods were high.",
+    "reversal": "The desk wants a short-term reversal alpha: one that favours "
+    "assets whose returns over the last few periods were low.",
+    "low_turnover": "The desk wants a low-turnover alpha: positions should "
+    "change slowly, since trading costs here are high.",
+    "combination": "The desk wants an alpha that combines several features "
+    "rather than relying on one.",
+}
+
+PROMPT = (
+    "{opening}\n\n"
     + DATA_SECTION
+    + "{request}"
     + ALPHA_SECTION
     + "A backtest run hands over {backtest_rows:.2f}M rows, so it may take "
     "{backtest_limit:.1f} seconds.\n\n"
@@ -127,9 +194,8 @@ PROMPT = (
     "your predictions. "
     + PORTFOLIO
     + "\n\n"
-    + EXAMPLE
-    + """
-## Tools
+    + "{example}"
+    + """## Tools
 
 - `describe()`: column names, timestamp range and number of assets.
 - `backtest(code)`: the alpha walk-forward on the visible periods: net \
@@ -154,8 +220,40 @@ than both.
 )
 
 
-def run_rows(hidden: bool, wf: WalkForward = WalkForward()) -> int:
-    """Rows a run on the default synthetic data hands to agent code.
+def _pick(variation: int, label: str, n: int) -> int:
+    """A draw in range(n) from a task's variation seed, one per label."""
+    digest = hashlib.sha256(f"{label}\0{variation}".encode()).digest()
+    return int.from_bytes(digest[:4], "big") % n
+
+
+def prompt_choices(variation: int | None, style: str) -> dict[str, str]:
+    """The varied parts of a task's prompt (spec, Decision 26).
+
+    Args:
+        variation: The task's variation seed, or None for a task without
+            variation: the first opening, `EXAMPLE` and no request.
+        style: The style the task asks for (`synthetic.Config.style`).
+
+    Returns:
+        The `opening`, `request` and `example` format values.
+    """
+    if variation is None:
+        return dict(opening=OPENINGS[0], request="", example=EXAMPLE + "\n")
+    examples = ("", *(e + "\n" for e in NEUTRAL_EXAMPLES))
+    request = STYLE_REQUESTS[style]
+    return dict(
+        opening=OPENINGS[_pick(variation, "opening", len(OPENINGS))],
+        request=f"## Request\n\n{request}\n\n" if request else "",
+        example=examples[_pick(variation, "example", len(examples))],
+    )
+
+
+def run_rows(
+    hidden: bool,
+    config: synthetic.Config = synthetic.DEFAULT_CONFIG,
+    wf: WalkForward = WalkForward(),
+) -> int:
+    """Rows a run on synthetic data hands to agent code.
 
     From the data's shape (`walkforward.pipeline_rows`), so the prompt can
     state the limits without building the hidden periods.
@@ -163,12 +261,12 @@ def run_rows(hidden: bool, wf: WalkForward = WalkForward()) -> int:
     Args:
         hidden: True for a scored run on the hidden periods, False for a
             backtest on the visible ones.
+        config: The task's generator parameters.
         wf: Walk-forward settings.
 
     Returns:
         The number of rows.
     """
-    config = synthetic.DEFAULT_CONFIG
     if hidden:
         n_timestamps, n_warmup = config.n_visible + config.n_hidden, config.n_visible
     else:
@@ -176,7 +274,10 @@ def run_rows(hidden: bool, wf: WalkForward = WalkForward()) -> int:
     return walkforward.pipeline_rows(n_timestamps, config.n_assets, n_warmup, wf)
 
 
-def scoring_timeout(check_config: checks.CheckConfig) -> float:
+def scoring_timeout(
+    check_config: checks.CheckConfig,
+    config: synthetic.Config = synthetic.DEFAULT_CONFIG,
+) -> float:
     """Seconds verifiers allows the grader.
 
     Every pipeline run at the scored run's limit, plus start-up for the
@@ -185,31 +286,35 @@ def scoring_timeout(check_config: checks.CheckConfig) -> float:
 
     Args:
         check_config: Settings of the checks; uses `n_cuts`.
+        config: The task's generator parameters.
 
     Returns:
         The timeout in seconds.
     """
     runs = 2 + check_config.n_cuts
-    seconds = scoring.TimeLimit().seconds(run_rows(hidden=True))
+    seconds = scoring.TimeLimit().seconds(run_rows(hidden=True, config=config))
     return runs * seconds + 3 * scoring.STARTUP_ALLOWANCE
 
 
 def prompt_values(
     check_config: checks.CheckConfig = checks.CheckConfig(),
+    config: synthetic.Config = synthetic.DEFAULT_CONFIG,
 ) -> dict[str, Any]:
-    """The values the prompt sections refer to, apart from the description
-    and the episode limits.
+    """The values the prompt sections refer to, apart from the description,
+    the episode limits and the varied parts.
 
     Args:
         check_config: Settings of the checks run when grading; gives the IC
             ceiling.
+        config: The task's generator parameters.
 
     Returns:
         Format values by name.
     """
     wf = WalkForward()
     limit = scoring.TimeLimit()
-    backtest_rows, score_rows = run_rows(hidden=False), run_rows(hidden=True)
+    backtest_rows = run_rows(hidden=False, config=config)
+    score_rows = run_rows(hidden=True, config=config)
     return dict(
         refit_every=wf.refit_every,
         window=wf.window,
@@ -219,11 +324,11 @@ def prompt_values(
         backtest_rows=backtest_rows / 1e6,
         backtest_limit=limit.seconds(backtest_rows),
         score_rows=score_rows / 1e6,
-        n_hidden=synthetic.DEFAULT_CONFIG.n_hidden,
+        n_hidden=config.n_hidden,
         invalid_reward=reward.INVALID_REWARD,
         flagged_reward=reward.FLAGGED_REWARD,
         score_limit=limit.seconds(score_rows),
-        cost_bp=synthetic.DEFAULT_CONFIG.cost * 1e4,
+        cost_bp=config.cost * 1e4,
         max_null=walkforward.MAX_NULL_SHARE,
     )
 
@@ -233,6 +338,8 @@ def prompt(
     budget: int,
     max_turns: int,
     check_config: checks.CheckConfig = checks.CheckConfig(),
+    config: synthetic.Config = synthetic.DEFAULT_CONFIG,
+    variation: int | None = None,
 ) -> str:
     """The task prompt.
 
@@ -242,6 +349,9 @@ def prompt(
         max_turns: Model turns allowed.
         check_config: Settings of the checks run when grading; the prompt
             states the IC ceiling.
+        config: The task's generator parameters.
+        variation: The task's variation seed, or None for a task without
+            variation; see `prompt_choices`.
 
     Returns:
         The prompt text.
@@ -250,7 +360,8 @@ def prompt(
         description=description,
         budget=budget,
         max_turns=max_turns,
-        **prompt_values(check_config),
+        **prompt_values(check_config, config),
+        **prompt_choices(variation, config.style),
     )
 
 
@@ -261,6 +372,7 @@ async def grade(
     code: str,
     claimed_sharpe: float | None,
     check_config: checks.CheckConfig = checks.CheckConfig(),
+    variation: int | None = None,
 ) -> dict[str, Any]:
     """Scores a submission on the hidden periods inside `runtime`.
 
@@ -274,6 +386,8 @@ async def grade(
         code: Alpha code.
         claimed_sharpe: The claimed net Sharpe on unseen data.
         check_config: Settings of the lookahead checks.
+        variation: The task's variation seed, or None for the default
+            market (`synthetic.task_config`).
 
     Returns:
         The fields of `quantenv.scoring.Score`.
@@ -289,6 +403,7 @@ async def grade(
         "claimed_sharpe": claimed_sharpe,
         "checks": dataclasses.asdict(check_config),
         "user": user,
+        "variation": variation,
     }
     await runtime.write(f"{stem}.json", json.dumps(request).encode())
     result = await runtime.run(
@@ -337,6 +452,9 @@ class QuantResearchTaskConfig(vf.TaskConfig):
             installs this package; for a remote runtime, a registry
             reference to it.
         check_config: Settings of the lookahead checks run when grading.
+        vary: Vary the market and the prompt per task (spec, Decision 26).
+            False gives every task the default market and the fixed prompt,
+            as in the runs of 17 to 19 November 2026.
     """
 
     tools: ResearchConfig = ResearchConfig()
@@ -344,6 +462,7 @@ class QuantResearchTaskConfig(vf.TaskConfig):
     secret: SecretStr | None = None
     image: str = IMAGE
     check_config: checks.CheckConfig = checks.CheckConfig()
+    vary: bool = True
 
 
 class SplitConfig(vf.TasksetConfig):
@@ -404,15 +523,30 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
         secret = self.config.secret.get_secret_value()
         return synthetic.dataset_seed(self.data.index, secret, self.data.split)
 
+    @property
+    def variation(self) -> int | None:
+        """The variation seed (`synthetic.variation_seed`), or None if the
+        task does not vary."""
+        if not self.config.vary:
+            return None
+        return synthetic.variation_seed(self.data.index, self.data.split, self.seed)
+
+    @property
+    def market(self) -> synthetic.Config:
+        """The task's generator parameters."""
+        return synthetic.task_config(self.variation)
+
     async def setup(self, trace: vf.Trace, runtime: vf.Runtime) -> None:
-        """Checks the sandbox user, then hands the toolset the seed through the
-        episode's shared state.
+        """Checks the sandbox user, then hands the toolset the seed and the
+        variation seed through the episode's shared state.
 
         Raises:
             RuntimeError: If the runtime cannot run code as the sandbox user.
         """
         await check_sandbox_user(runtime, self.config.tools.sandbox_user)
         trace.state.seed = f"{self.seed:032x}"
+        variation = self.variation
+        trace.state.variation = "" if variation is None else f"{variation:032x}"
 
     @classmethod
     def toolsets(cls, config: QuantResearchTaskConfig) -> list[vf.Toolset]:
@@ -454,6 +588,7 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
                     state.code,
                     state.claimed_sharpe,
                     self.config.check_config,
+                    self.variation,
                 )
             else:
                 score = dataclasses.asdict(scoring.invalid_score("no submission"))
@@ -501,14 +636,16 @@ class QuantResearchTask(vf.Task[ResearchData, ResearchState, QuantResearchTaskCo
 
     async def validate(self, runtime: vf.Runtime) -> bool:
         """Grades the oracle alpha: it must score above 0 and pass the checks."""
-        weights = synthetic.ground_truth(self.seed).weights
+        market = self.market
+        truth = synthetic.ground_truth(self.seed, market)
         score = await grade(
             self.config.tools.sandbox_user,
             runtime,
             self.seed,
-            baselines.weighted_code(weights),
+            baselines.oracle_code(truth, market.schema),
             0.0,
             self.config.check_config,
+            self.variation,
         )
         return reward.reward(score) > 0
 
@@ -538,22 +675,25 @@ class QuantResearchTaskset(vf.Taskset[QuantResearchTask, QuantResearchConfig]):
             task = QuantResearchTask(
                 ResearchData(split=self.config.split, index=index), task_config
             )
-            description = describe_panel(synthetic.visible_data(task.seed).panel)
+            market = task.market
+            visible = synthetic.visible_data(task.seed, market)
             data = task.data.model_copy(
                 update=dict(
                     name=f"{self.config.split}-{index}",
                     prompt=prompt(
-                        description,
+                        describe_panel(visible.panel),
                         task_config.tools.budget,
                         task_config.max_turns,
                         task_config.check_config,
+                        market,
+                        task.variation,
                     ),
                     image=task_config.image,
                     # Grade in a fresh container of the image, which agent
                     # code never touched; the inputs come from the trace.
                     scoring=vf.ScoringConfig(mode="isolated"),
                     timeout=vf.TaskTimeout(
-                        scoring=scoring_timeout(task_config.check_config)
+                        scoring=scoring_timeout(task_config.check_config, market)
                     ),
                 )
             )

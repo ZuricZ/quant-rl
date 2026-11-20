@@ -97,3 +97,92 @@ def test_return_scale_and_start_date_are_configurable():
     ratio = scaled["fwd_return"].std() / base["fwd_return"].std()
     assert ratio == pytest.approx(2.0)
     assert scaled["timestamp"].min() == dt.date(2010, 1, 4)
+
+
+def _eval_markets(n: int = 30) -> list[synthetic.Config]:
+    return [synthetic.task_config(synthetic.variation_seed(i, "eval", 0)) for i in range(n)]
+
+
+def test_eval_variation_is_fixed_whatever_the_secret_and_balanced():
+    a = [synthetic.variation_seed(i, "eval", 1) for i in range(30)]
+    b = [synthetic.variation_seed(i, "eval", 2) for i in range(30)]
+    assert a == b
+    styles = [m.style for m in _eval_markets()]
+    assert styles == [synthetic.STYLES[i % 5] for i in range(30)]
+
+
+def test_train_variation_follows_the_seed_without_revealing_it():
+    assert synthetic.variation_seed(0, "train", 5) != synthetic.variation_seed(0, "train", 6)
+    assert synthetic.variation_seed(0, "train", 5) != 5
+
+
+def test_variation_changes_shape_names_bar_and_cost():
+    markets = _eval_markets()
+    assert len({m.n_assets for m in markets}) > 1
+    assert len({m.n_visible for m in markets}) > 1
+    assert len({m.n_features for m in markets}) > 1
+    assert len({m.feature_names[0] for m in markets}) > 1
+    assert {m.bar for m in markets} > {None}
+    assert len({m.cost for m in markets}) > 1
+    assert synthetic.task_config(None) == synthetic.DEFAULT_CONFIG
+    for m in markets:
+        assert len(m.feature_names) == m.n_features
+        assert not {"timestamp", "asset", "ret", "fwd_return"} & set(m.feature_names)
+
+
+def test_intraday_markets_scale_ics_and_cost_to_keep_annual_sharpe():
+    daily = synthetic.DEFAULT_CONFIG
+    for m in _eval_markets():
+        if m.bar is None:
+            continue
+        scale = (252.0 / m.periods_per_year) ** 0.5
+        assert m.real_ic_range[1] == pytest.approx(daily.real_ic_range[1] * scale)
+        assert m.cost < 5e-4 * scale + 1e-8
+
+
+def test_low_turnover_tasks_pay_more_to_trade():
+    for m in _eval_markets():
+        if m.style == "low_turnover" and m.bar is None:
+            assert m.cost >= 3e-4
+        elif m.bar is None:
+            assert m.cost <= 3e-4
+
+
+@pytest.mark.parametrize("style", ["momentum", "reversal"])
+def test_past_return_signal_is_planted_in_ret(style):
+    import dataclasses
+
+    config = dataclasses.replace(
+        synthetic.PLAIN,
+        style=style,
+        ret_signal_ic=0.04 if style == "momentum" else -0.04,
+        ret_signal_horizon=5,
+        n_visible=3_000,
+    )
+    syn = synthetic.generate(SEED, config)
+    frame = syn.panel.frame.with_columns(
+        pl.col("ret").rolling_sum(5).over("asset").alias("past")
+    )
+    from quantenv import metrics
+
+    ic = metrics.rank_ic(frame, "past", "fwd_return", "timestamp")
+    assert ic == pytest.approx(config.ret_signal_ic, abs=0.01)
+    assert syn.truth.ret_signal[0] == 5
+
+
+def test_past_return_signal_keeps_the_visible_panel_a_prefix():
+    market = next(m for m in _eval_markets() if m.style == "momentum")
+    visible = synthetic.generate(SEED, market).panel.frame
+    full = synthetic.generate(SEED, market, hidden=True).panel.frame.head(visible.height)
+    numeric = [c for c in visible.columns if c not in ("timestamp", "asset")]
+    diff = (full.select(numeric) - visible.select(numeric)).select(pl.all().abs().max())
+    assert max(v for v in diff.row(0) if v is not None) < 1e-12
+
+
+def test_config_rejects_bad_names_and_styles():
+    import dataclasses
+
+    with pytest.raises(ValueError, match="names"):
+        dataclasses.replace(synthetic.DEFAULT_CONFIG, names=("a", "a"))
+    with pytest.raises(ValueError, match="style"):
+        dataclasses.replace(synthetic.DEFAULT_CONFIG, style="carry")
