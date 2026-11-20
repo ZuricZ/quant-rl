@@ -392,6 +392,15 @@ One plot: claim gap against backtests used. In practice the model uses its whole
      - Eval task i draws from a hash of its index alone, not the secret, so the eval set's variation is the same under every secret; it takes the first hash whose style is the i-th of `STYLES` in turn, so the 30 tasks hold 6 of each style. Train tasks draw from a hash of their dataset seed (not the seed itself, which must stay secret). The variation seed reaches the toolset through the episode state and the grader through its request, like the dataset seed.
      - Prompts: one of three openings; a "Request" section stating the style (none for "any"); and no example or one of three neutral ones, which show `features`, `fit` or a cross-sectional rank on a placeholder column `"COLUMN"`, so a copy fails. The rules (alpha contract, scoring, limits, penalties) keep one wording. The no-tools taskset varies the request and the example, not its opening, which states the one-reply rule.
      - `vary` (task config, default true) turns all of it off: every task gets the default market and the prompt of the earlier runs, so those stay reproducible. `run_baselines.py --no-vary` does the same.
+     - Baselines on the varied eval split, 20 November 2026 (30 tasks, secret `day5-check`, `run_baselines.py`, 4 scorers in parallel; rows in `results/day8/baselines.csv`). No baseline was flagged or invalid on any task, so the checks hold on every shape, bar and style, and the oracle's past-return term passes truncation.
+
+       | Baseline | Reward | Net Sharpe | Gross Sharpe | Turnover | IC | Claim gap |
+       | --- | --- | --- | --- | --- | --- | --- |
+       | naive | 0.23 | 0.72 | 1.65 | 0.44 | 0.009 | 0.38 |
+       | template | 0.31 | 1.04 | 1.91 | 0.42 | 0.010 | 0.11 |
+       | oracle | 0.61 | 2.19 | 3.05 | 0.45 | 0.017 | −0.06 |
+
+       The oracle needs no recalibration: net Sharpe min 1.16, p10 1.28, median 2.01, p90 3.06, max 3.92, 26 of 30 in [1, 3] (22 of 30 on the default market). By style its mean is 1.9 to 2.5; by bar 2.08 daily (23 tasks), 2.39 at 4 hours (3) and 2.67 hourly (4), so the √ scaling keeps intraday Sharpe in range. The tasks got harder for everything else: the template falls from 1.79 to 1.04 and naive from 1.29 to 0.72, mostly on intraday tasks (template 0.54 to 0.72; per-period ICs of 0.001 to 0.004 are hard to estimate in 1,000 to 2,000 bars) and low-turnover tasks (naive −0.19, template 0.56, at 3 to 5 bp). Model results on varied tasks will not compare with the Day 6 and 7 runs on the default market.
 27. **Backtest replies explain their numbers.** Decided 20 November 2026; built the same day.
    - Today a backtest returns three bare lines: net Sharpe, rank IC and backtests left. What they mean is stated once, in the prompt, many turns earlier. The Day 6 and 7 runs suggest the model reads them badly: it overclaimed most when its alphas had no signal, ignoring cost drag.
    - Each reply states what was measured and how precise it is, not what to do next:
