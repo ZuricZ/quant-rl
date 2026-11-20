@@ -15,7 +15,11 @@ import verifiers.v1 as vf  # noqa: E402
 from test_taskset import SECRET, _LocalRuntime  # noqa: E402
 
 from quant_research.servers.research import ResearchData  # noqa: E402
-from quant_research.taskset import QuantResearchConfig, QuantResearchTaskset  # noqa: E402
+from quant_research.taskset import (  # noqa: E402
+    SECRET_VAR,
+    QuantResearchConfig,
+    QuantResearchTaskset,
+)
 from quant_research_notools.taskset import (  # noqa: E402
     NoToolsConfig,
     NoToolsTask,
@@ -65,7 +69,8 @@ def test_splits_match_the_main_taskset():
     assert [t.data.name for t in train.take(2)] == ["train-0", "train-1"]
 
 
-def test_secret_is_required():
+def test_secret_is_required(monkeypatch):
+    monkeypatch.delenv(SECRET_VAR, raising=False)
     with pytest.raises(ValueError, match="secret"):
         NoToolsTaskset(NoToolsConfig())
 

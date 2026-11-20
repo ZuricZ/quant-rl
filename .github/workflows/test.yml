@@ -11,9 +11,6 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    env:
-      # Validation only; not the secret of any published run.
-      QUANT_RESEARCH_SECRET: ci-validate
     steps:
       - uses: actions/checkout@v4
 
@@ -34,6 +31,9 @@ jobs:
         run: docker build -t quant-research:0.1.0 .
 
       - name: Validate the tasksets in Docker
+        env:
+          # Validation only; not the secret of any published run.
+          QUANT_RESEARCH_SECRET: ci-validate
         run: |
           uv run vf-validate quant-research --runtime.type docker -n 2
           uv run vf-validate quant-research-notools --runtime.type docker -n 2

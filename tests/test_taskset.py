@@ -42,12 +42,18 @@ SECRET = "a-test-secret-value"
 DATA = ResearchData(split="eval", index=0)
 
 
+# Agent code runs as this process's user: switching to the sandbox user needs
+# root, and tests/test_sandbox.py covers that path.
+TOOLS = ResearchConfig(sandbox_user=None)
+
+
 def _config(**task) -> QuantResearchConfig:
+    task.setdefault("tools", TOOLS)
     return QuantResearchConfig(secret=SECRET, task=QuantResearchTaskConfig(**task))
 
 
 def _toolset(budget: int = 2) -> ResearchToolset:
-    tools = ResearchToolset(ResearchConfig(budget=budget))
+    tools = ResearchToolset(ResearchConfig(budget=budget, sandbox_user=None))
     asyncio.run(tools.setup_task(DATA))
     # Outside a call the toolset sees its inert state; the host's Task.setup
     # puts the seed there in a rollout.
@@ -90,7 +96,8 @@ def test_eval_split_is_30_named_tasks_and_train_is_infinite():
     assert [t.data.name for t in train.take(2)] == ["train-0", "train-1"]
 
 
-def test_secret_is_required_and_masked():
+def test_secret_is_required_and_masked(monkeypatch):
+    monkeypatch.delenv(taskset.SECRET_VAR, raising=False)
     # verifiers' CLI builds the config with defaults before reading flags, so
     # the field may be unset; the taskset refuses to build without it.
     config = QuantResearchConfig()
@@ -124,7 +131,7 @@ def test_seed_stays_out_of_published_task_data(task, tmp_path):
 
 
 def test_prompt_states_columns_budget_and_contract():
-    config = _config(tools=ResearchConfig(budget=7))
+    config = _config(tools=ResearchConfig(budget=7, sandbox_user=None))
     task = next(iter(QuantResearchTaskset(config)))
     prompt = task.data.prompt
     assert task.market.feature_names[0] in prompt and "ret" in prompt
