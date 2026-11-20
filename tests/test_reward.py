@@ -16,6 +16,7 @@ PERFORMANCE = metrics.Performance(
     robust_sharpe=1.3,
     gross_sharpe=2.0,
     turnover=0.4,
+    years=3,
     year_sharpe_min=-0.5,
     year_sharpe_median=1.2,
     year_sharpe_max=3.0,

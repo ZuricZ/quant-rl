@@ -21,8 +21,8 @@ The market, with each mechanism controlled by `Config`:
   or reverse (short-term reversal) the asset's recent idiosyncratic shocks,
   so the signal lives in `ret`.
 
-`task_config` draws a varied `Config` per task: shape, bar, cost, column
-names, start date and the style of alpha the task asks for.
+`task_config` draws a varied `Config` per task: shape, cost, column names,
+start date and the style of alpha the task asks for.
 
 numpy is used only to draw random numbers, which polars cannot do; every
 transformation is a polars expression.
@@ -304,9 +304,7 @@ def spearman_to_pearson(rho_s: float) -> float:
     return 2.0 * math.sin(math.pi * rho_s / 6.0)
 
 
-# What `task_config` draws from. Bars: daily, or back-to-back intraday bars.
-_BARS = (None, dt.timedelta(hours=4), dt.timedelta(hours=1))
-_BAR_PROBS = (0.7, 0.15, 0.15)
+# What `task_config` draws from. Bars stay daily: see spec, Decision 26.
 _ASSETS = (100, 150, 200, 250)
 _VISIBLE = (1_500, 2_000, 2_500, 3_000)
 _FEATURES = (12, 24)  # Inclusive range.
@@ -339,13 +337,12 @@ def _feature_names(rng: np.random.Generator, n: int) -> tuple[str, ...]:
     return tuple(names)
 
 
-def _start(rng: np.random.Generator, bar: dt.timedelta | None) -> dt.datetime:
-    """A start date in `_START_YEARS`, moved on to a Monday for daily bars."""
+def _start(rng: np.random.Generator) -> dt.datetime:
+    """A start date in `_START_YEARS`, moved on to a Monday (daily bars start
+    on a business day)."""
     year = int(rng.integers(_START_YEARS[0], _START_YEARS[1] + 1))
     day = dt.datetime(year, 1, 1) + dt.timedelta(days=int(rng.integers(0, 330)))
-    if bar is None:
-        day += dt.timedelta(days=(7 - day.weekday()) % 7)
-    return day
+    return day + dt.timedelta(days=(7 - day.weekday()) % 7)
 
 
 def _draw_style(variation_seed: int) -> str:
@@ -356,13 +353,10 @@ def _draw_style(variation_seed: int) -> str:
 def task_config(variation_seed: int | None, base: Config = DEFAULT_CONFIG) -> Config:
     """The varied market of one task (spec, Decision 26).
 
-    Draws the number of assets, visible periods and features, the bar, the
-    cost, the feature names, the start date and the style the task asks
-    for. A momentum or reversal task gets a planted past-return signal of
-    that kind. Intraday bars scale every planted IC and the cost by
-    sqrt(252 / periods per year), so annualised Sharpe ratios, gross and
-    net, stay where `base` calibrates them; per period, intraday signals are
-    weaker and need more periods to detect.
+    Draws the number of assets, visible periods and features, the cost,
+    the feature names, the start date and the style the task asks for. A
+    momentum or reversal task gets a planted past-return signal of that
+    kind. Bars stay those of `base` (daily by default).
 
     Args:
         variation_seed: Non-negative integer seed for the draws, e.g. from
@@ -376,37 +370,27 @@ def task_config(variation_seed: int | None, base: Config = DEFAULT_CONFIG) -> Co
         return base
     style = _draw_style(variation_seed)
     rng = np.random.default_rng(_hash_int(16, "variation", variation_seed))
-    bar = _BARS[int(rng.choice(len(_BARS), p=_BAR_PROBS))]
     n_features = int(rng.integers(_FEATURES[0], _FEATURES[1] + 1))
     cost_range = _LOW_TURNOVER_COST_BP if style == "low_turnover" else _COST_BP
     config = dataclasses.replace(
         base,
         n_assets=int(rng.choice(_ASSETS)),
         n_visible=int(rng.choice(_VISIBLE)),
-        bar=bar,
         n_features=n_features,
         names=_feature_names(rng, n_features),
-        start=_start(rng, bar),
+        start=_start(rng),
         style=style,
-        cost=float(rng.uniform(*cost_range)) * 1e-4,
+        # In whole tenths of a basis point, so the prompt can state it.
+        cost=round(float(rng.uniform(*cost_range)), 1) * 1e-4,
     )
-    if style in ("momentum", "reversal"):
-        ic = float(rng.uniform(*base.real_ic_range))
-        horizons = _MOMENTUM_HORIZONS if style == "momentum" else _REVERSAL_HORIZONS
-        config = dataclasses.replace(
-            config,
-            ret_signal_ic=ic if style == "momentum" else -ic,
-            ret_signal_horizon=int(rng.choice(horizons)),
-        )
-    scale = math.sqrt(252.0 / config.periods_per_year)
+    if style not in ("momentum", "reversal"):
+        return config
+    ic = float(rng.uniform(*base.real_ic_range))
+    horizons = _MOMENTUM_HORIZONS if style == "momentum" else _REVERSAL_HORIZONS
     return dataclasses.replace(
         config,
-        real_ic_range=(config.real_ic_range[0] * scale, config.real_ic_range[1] * scale),
-        replacement_ic=config.replacement_ic * scale,
-        interaction_ic=config.interaction_ic * scale,
-        ret_signal_ic=config.ret_signal_ic * scale,
-        # In whole hundredths of a basis point, so the prompt can state it.
-        cost=round(config.cost * scale * 1e4, 2) * 1e-4,
+        ret_signal_ic=ic if style == "momentum" else -ic,
+        ret_signal_horizon=int(rng.choice(horizons)),
     )
 
 
@@ -431,11 +415,8 @@ def variation_seed(index: int, split: str, seed: int) -> int:
     if split != "eval":
         return _hash_int(16, "train", seed)
     style = STYLES[index % len(STYLES)]
-    for attempt in itertools.count():
-        candidate = _hash_int(16, "eval", index, attempt)
-        if _draw_style(candidate) == style:
-            return candidate
-    raise AssertionError("unreachable")
+    candidates = (_hash_int(16, "eval", index, a) for a in itertools.count())
+    return next(c for c in candidates if _draw_style(c) == style)
 
 
 def ground_truth(seed: int, config: Config = DEFAULT_CONFIG) -> GroundTruth:

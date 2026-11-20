@@ -15,8 +15,8 @@ setup puts the seed in the episode's shared state, read by the toolset.
 """
 
 import dataclasses
-import itertools
 import hashlib
+import itertools
 import json
 import os
 import uuid

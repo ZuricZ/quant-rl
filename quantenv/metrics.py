@@ -105,9 +105,14 @@ class Performance:
         gross_sharpe: Before costs.
         turnover: Mean per-period turnover, sum of |weight change|; 2 is a
             full reversal of a unit-gross book.
-        year_sharpe_min: Lowest net Sharpe of a calendar year.
-        year_sharpe_median: Median net Sharpe of the calendar years.
-        year_sharpe_max: Highest net Sharpe of a calendar year.
+        years: Number of one-year blocks: the traded periods in time order,
+            cut into floor(periods / periods per year) consecutive blocks
+            of equal length (within one period), so each holds at least a
+            year of periods and none is a stub. 0 for less than a year.
+        year_sharpe_min: Lowest net Sharpe of a block; NaN without blocks.
+        year_sharpe_median: Median net Sharpe of the blocks; NaN without
+            blocks.
+        year_sharpe_max: Highest net Sharpe of a block; NaN without blocks.
         max_drawdown: Largest fall of cumulative net P&L from its running
             peak (starting at 0), in return units of a unit-gross book.
     """
@@ -120,6 +125,7 @@ class Performance:
     robust_sharpe: float
     gross_sharpe: float
     turnover: float
+    years: int
     year_sharpe_min: float
     year_sharpe_median: float
     year_sharpe_max: float
@@ -227,11 +233,18 @@ def performance(
         )
         .with_columns((pl.col("gross") - cost * pl.col("turnover")).alias(_PNL))
     )
+    # Block k of n_blocks holds periods i with i * n_blocks // n == k.
+    n_blocks = (pl.len() / periods_per_year).floor().cast(pl.Int64)
     years = (
-        periods.group_by(pl.col(timestamp).dt.year())
-        .agg(sharpe(pl.col(_PNL), periods_per_year).alias("sharpe"), pl.len())
-        .filter(pl.col("len") > 1)
+        periods.with_columns(
+            n_blocks.alias("_blocks"),
+            (pl.int_range(pl.len()) * n_blocks // pl.len()).alias("_block"),
+        )
+        .filter(pl.col("_blocks") > 0)
+        .group_by("_block")
+        .agg(sharpe(pl.col(_PNL), periods_per_year).alias("sharpe"))
         .select(
+            pl.len().alias("years"),
             pl.col("sharpe").min().alias("year_sharpe_min"),
             pl.col("sharpe").median().alias("year_sharpe_median"),
             pl.col("sharpe").max().alias("year_sharpe_max"),
@@ -256,6 +269,10 @@ def performance(
         .alias("max_drawdown"),
     )
     row = pl.concat([totals, years], how="horizontal").collect().row(0, named=True)
+    counts = ("periods", "years")
     return Performance(
-        **{k: v if k == "periods" else float(v) for k, v in row.items()}
+        **{
+            k: v if k in counts else float("nan") if v is None else float(v)
+            for k, v in row.items()
+        }
     )

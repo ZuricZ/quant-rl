@@ -138,6 +138,14 @@ def backtest_report(scope: str, performance: metrics.Performance, left: int) -> 
         The reply text.
     """
     p = performance
+    if p.years == 0:
+        by_year = "fewer periods than one year"
+    else:
+        by_year = (
+            f"min {p.year_sharpe_min:.2f}, median {p.year_sharpe_median:.2f}, "
+            f"max {p.year_sharpe_max:.2f} over {p.years} consecutive blocks of "
+            "about one year of periods each"
+        )
     return (
         f"scope: {scope}\n"
         f"net Sharpe: {p.sharpe:.2f} ± {p.sharpe_se:.2f} (standard error)\n"
@@ -145,8 +153,7 @@ def backtest_report(scope: str, performance: metrics.Performance, left: int) -> 
         f"turnover: {p.turnover:.2f} per period (sum of absolute weight changes)\n"
         f"rank IC: {p.ic:.4f} ± {p.ic_se:.4f} (standard error, "
         f"{p.periods} periods)\n"
-        f"net Sharpe by calendar year: min {p.year_sharpe_min:.2f}, "
-        f"median {p.year_sharpe_median:.2f}, max {p.year_sharpe_max:.2f}\n"
+        f"net Sharpe by year: {by_year}\n"
         f"backtests left: {left}"
     )
 
@@ -167,8 +174,9 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
         super().__init__(config)
         self._episode = ResearchState()
         self._backtesting = asyncio.Lock()
-        self._description: str | None = None
-        self._scope: str | None = None
+        # What describe and the backtest scope say about the visible data,
+        # built once and off the event loop.
+        self._summary: tuple[str, str] | None = None
 
     def _visible(self) -> functools.partial:
         """The loader of the visible periods, from the seed in the state."""
@@ -181,20 +189,26 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
             synthetic.task_config(variation),
         )
 
+    async def _summarise(self) -> tuple[str, str]:
+        """The description of the visible data and the backtest scope."""
+        if self._summary is None:
+            data = await asyncio.to_thread(self._visible())
+            self._summary = (describe_panel(data.panel), backtest_scope(data))
+        return self._summary
+
     def _publish(self) -> None:
         for name in _EPISODE_FIELDS:
             setattr(self.state, name, getattr(self._episode, name))
 
     @vf.tool
-    def describe(self) -> str:
+    async def describe(self) -> str:
         """Describes the visible data.
 
         Returns:
             Column names, timestamp range and number of assets.
         """
-        if self._description is None:
-            self._description = describe_panel(self._visible()().panel)
-        return self._description
+        description, _ = await self._summarise()
+        return description
 
     @vf.tool
     async def backtest(self, code: str) -> str:
@@ -237,9 +251,8 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
             return f"error: {e}\nbacktests left: {left}"
         finally:
             self._publish()
-        if self._scope is None:
-            self._scope = backtest_scope(self._visible()())
-        return backtest_report(self._scope, performance, left)
+        _, scope = await self._summarise()
+        return backtest_report(scope, performance, left)
 
     @vf.tool
     def submit(self, code: str, claimed_sharpe: float) -> str:

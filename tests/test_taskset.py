@@ -223,7 +223,7 @@ def test_toolset_backtests_the_varied_market():
     variation = synthetic.variation_seed(1, "eval", 0)
     tools.state.variation = f"{variation:032x}"
     market = synthetic.task_config(variation)
-    text = tools.describe()
+    text = asyncio.run(tools.describe())
     assert market.feature_names[0] in text
     assert f"assets: {market.n_assets}" in text
 
@@ -235,7 +235,7 @@ def test_grading_timeout_covers_every_scored_run():
 
 
 def test_describe_lists_visible_data_only():
-    text = _toolset().describe()
+    text = asyncio.run(_toolset().describe())
     assert "fwd_return" not in text
     assert "timestamps: 2000" in text
     assert "assets: 200" in text
@@ -268,6 +268,7 @@ def test_backtest_report_explains_its_numbers():
         robust_sharpe=0.8,
         gross_sharpe=1.6,
         turnover=0.43,
+        years=3,
         year_sharpe_min=-0.8,
         year_sharpe_median=0.9,
         year_sharpe_max=2.1,
