@@ -100,6 +100,15 @@ def test_secret_is_required_and_masked():
         QuantResearchConfig.model_validate_json(config.model_dump_json())
 
 
+def test_secret_falls_back_to_the_environment(monkeypatch):
+    monkeypatch.setenv(taskset.SECRET_VAR, SECRET)
+    assert QuantResearchConfig().secret.get_secret_value() == SECRET
+    # A secret that is set wins over the environment.
+    assert QuantResearchConfig(secret="other").secret.get_secret_value() == "other"
+    monkeypatch.setenv(taskset.SECRET_VAR, "")
+    assert QuantResearchConfig().secret is None
+
+
 def test_seed_stays_out_of_published_task_data(task, tmp_path):
     seed = synthetic.dataset_seed(0, SECRET, "eval")
     trace = _trace(task, ResearchState())
@@ -300,9 +309,8 @@ class _LocalRuntime:
 
 def test_grade_runs_the_images_python(tmp_path):
     runtime = _LocalRuntime(tmp_path)
-    tools = ResearchConfig(sandbox_user=None)
     seed = synthetic.dataset_seed(0, SECRET, "eval")
-    score = asyncio.run(taskset.grade(tools, runtime, seed, COLUMN, 0.5))
+    score = asyncio.run(taskset.grade(None, runtime, seed, COLUMN, 0.5))
     assert runtime.argv[:3] == ["python", "-m", "quant_research.grade"]
     assert score["invalid"] == 0 and score["performance"]["sharpe"] is not None
 

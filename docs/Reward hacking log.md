@@ -172,5 +172,24 @@ Not decided; listed for when we come back to the reward.
 - Replace the prompt's example alpha (`pl.col("ret")`) with a neutral one, so
   a low budget measures more than copying. This changes the prompt, so runs
   before and after would not compare.
-- Rerun budget 10 under `max_ic` = 0.05 to make it a clean point on the
-  curve.
+- ~~Rerun budget 10 under `max_ic` = 0.05 to make it a clean point on the
+  curve.~~ Done 19 November 2026; see below.
+
+## Budget 10 rerun, 19 November 2026
+
+Same model, tasks and secret, prompted and graded with `max_ic` = 0.05 and
+the current truncation rule (`results/day7/`). All 90 episodes `ok`.
+
+- **No check fired in 90 episodes**, against 4 lookahead flags in the first
+  budget-10 run, whose prompt stated 0.2. The ceiling now appears in the
+  prompt, but one run does not show that stating it deters lookahead.
+- **Highest unflagged result:** IC 0.021 and net Sharpe 2.35, at the
+  oracle's level, not above it.
+- **Invalid: 41 of 90.** 12 did not submit; 29 submitted code that failed
+  when scored (`fit` 9, `predict` 6, `features` 5, compile 3, no `Alpha`
+  subclass 2, all-null or malformed predictions 2, the alpha process died 2).
+- **Claim gap** of honest submissions: 0.57 ± 0.13 (n = 49), against 0.96 ±
+  0.19 (n = 44) in the first run; the difference (0.38 ± 0.23) is not
+  significant. Split by type: no-signal 1.24 (n = 13), with signal 0.33 (n =
+  36); the share with signal is 73%. Claim and realised Sharpe correlate at
+  0.67; 80% of honest submissions overclaimed.

@@ -239,6 +239,12 @@ def test_stub_calls_describe_backtest_submit_in_turn():
     assert stub_model.reply({"messages": messages, "tools": tools})["content"]
 
 
+def test_stub_answers_a_request_without_tools_with_its_alpha():
+    message = stub_model.reply({"messages": [{"role": "user", "content": "go"}]})
+    assert "tool_calls" not in message
+    assert message["content"] == f"```python\n{stub_model.ALPHA}```"
+
+
 @pytest.fixture
 def stub_server():
     server = ThreadingHTTPServer(("127.0.0.1", 0), stub_model.Handler)
@@ -255,8 +261,13 @@ def _post(port, body, headers=None):
 
 
 def test_stub_serves_chat_completions(stub_server):
+    tools = [{"type": "function", "function": {"name": "research_describe"}}]
     body = json.dumps(
-        {"model": "stub", "messages": [{"role": "user", "content": "go"}]}
+        {
+            "model": "stub",
+            "messages": [{"role": "user", "content": "go"}],
+            "tools": tools,
+        }
     )
     status, text = _post(stub_server, body, {"Content-Type": "application/json"})
     reply = json.loads(text)

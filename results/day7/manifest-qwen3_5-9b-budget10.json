@@ -1,0 +1,20 @@
+{
+ "entry": {
+  "model": "qwen/qwen3.5-9b",
+  "base_url": "https://openrouter.ai/api/v1",
+  "api_key_var": "OPENROUTER_API_KEY",
+  "sampling": {
+   "temperature": 0.6,
+   "top_p": 0.95,
+   "max_tokens": 8192
+  }
+ },
+ "split": "eval",
+ "rollouts": 3,
+ "chunk": 4,
+ "budget": 10,
+ "image": null,
+ "runtime": "docker",
+ "secret_sha256": "92feef5df6e5a535f2db6f0db6c50b786149606b92890b71532508b8cbf2ddc1",
+ "vf_config_sha256": null
+}
