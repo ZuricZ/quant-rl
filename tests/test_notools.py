@@ -125,11 +125,8 @@ def test_reward_is_the_hidden_ic_over_the_ceiling(tmp_path):
 
 
 def test_penalties_follow_the_main_reward_rule():
-    honest = dataclasses.asdict(
-        scoring.Score(
-            metrics.Performance(0.02, *[0.0] * 8), 0.0, 0, 0, 0, 0
-        )
-    )
+    performance = metrics.Performance(1000, 0.02, *[0.0] * 10)
+    honest = dataclasses.asdict(scoring.Score(performance, 0.0, 0, 0, 0, 0))
     assert ic_reward(honest, 0.05) == pytest.approx(0.4)
     assert ic_reward({**honest, "lookahead": 1}, 0.05) == reward.FLAGGED_REWARD
     assert ic_reward({**honest, "implausible_ic": 1}, 0.05) == reward.FLAGGED_REWARD

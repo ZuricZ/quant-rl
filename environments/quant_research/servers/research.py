@@ -15,10 +15,11 @@ from typing import Literal
 import verifiers.v1 as vf
 from pydantic import Field
 
-from quantenv import scoring
+from quantenv import metrics, scoring, walkforward
 from quantenv.alpha import AlphaError
-from quantenv.panel import Panel
+from quantenv.panel import EvalData, Panel
 from quantenv.sources import synthetic
+from quantenv.walkforward import WalkForward
 
 BUDGET = 10
 SANDBOX_USER = "nobody"
@@ -95,6 +96,58 @@ def describe_panel(panel: Panel) -> str:
     )
 
 
+def backtest_scope(data: EvalData, wf: WalkForward = WalkForward()) -> str:
+    """What a backtest measures on the visible data, in one sentence.
+
+    Args:
+        data: The visible data.
+        wf: Walk-forward settings.
+
+    Returns:
+        The predicted timestamps, the window and refit cadence, and how
+        Sharpe ratios are annualised and costed.
+    """
+    stamps = data.panel.timestamps
+    start = walkforward.start_timestamp(data.panel, wf)
+    n_scored = (stamps >= start).sum()
+    return (
+        f"walk-forward on the last {n_scored} of {stamps.len()} visible "
+        f"timestamps ({start} to {stamps.last()}); each block of "
+        f"{wf.refit_every} is predicted by a fresh fit on the {wf.window} "
+        f"timestamps before it. Sharpe ratios are annualised with "
+        f"{data.periods_per_year:g} periods per year; net Sharpe pays "
+        f"{data.cost * 1e4:g} bp per unit of turnover."
+    )
+
+
+def backtest_report(scope: str, performance: metrics.Performance, left: int) -> str:
+    """A backtest's reply: what was measured and how precise it is.
+
+    States numbers only, never advice, since advice would coach what the
+    eval measures (spec, Decision 27).
+
+    Args:
+        scope: Output of `backtest_scope`.
+        performance: The backtest's performance.
+        left: Backtests left.
+
+    Returns:
+        The reply text.
+    """
+    p = performance
+    return (
+        f"scope: {scope}\n"
+        f"net Sharpe: {p.sharpe:.2f} ± {p.sharpe_se:.2f} (standard error)\n"
+        f"gross Sharpe: {p.gross_sharpe:.2f}\n"
+        f"turnover: {p.turnover:.2f} per period (sum of absolute weight changes)\n"
+        f"rank IC: {p.ic:.4f} ± {p.ic_se:.4f} (standard error, "
+        f"{p.periods} periods)\n"
+        f"net Sharpe by calendar year: min {p.year_sharpe_min:.2f}, "
+        f"median {p.year_sharpe_median:.2f}, max {p.year_sharpe_max:.2f}\n"
+        f"backtests left: {left}"
+    )
+
+
 class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
     """Tools for one episode.
 
@@ -112,6 +165,7 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
         self._episode = ResearchState()
         self._backtesting = asyncio.Lock()
         self._description: str | None = None
+        self._scope: str | None = None
 
     def _visible(self) -> functools.partial:
         """The loader of the visible periods, from the seed in the state."""
@@ -145,8 +199,10 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
             code: Python source defining one subclass of `Alpha`.
 
         Returns:
-            The annualised net Sharpe ratio and mean rank IC, or why the
-            code failed, and the number of backtests left.
+            What was measured; net Sharpe with its standard error, gross
+            Sharpe and turnover; mean rank IC with its standard error; the
+            range of per-year net Sharpe; or why the code failed. Then the
+            number of backtests left.
 
         Raises:
             ValueError: If the call is refused.
@@ -173,11 +229,9 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
             return f"error: {e}\nbacktests left: {left}"
         finally:
             self._publish()
-        return (
-            f"net Sharpe: {performance.sharpe:.2f}\n"
-            f"rank IC: {performance.ic:.4f}\n"
-            f"backtests left: {left}"
-        )
+        if self._scope is None:
+            self._scope = backtest_scope(self._visible()())
+        return backtest_report(self._scope, performance, left)
 
     @vf.tool
     def submit(self, code: str, claimed_sharpe: float) -> str:

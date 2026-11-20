@@ -132,9 +132,10 @@ PROMPT = (
 ## Tools
 
 - `describe()`: column names, timestamp range and number of assets.
-- `backtest(code)`: the net Sharpe and the mean rank IC of the alpha, \
-walk-forward on the visible periods. You have {budget} backtests; further \
-calls are refused.
+- `backtest(code)`: the alpha walk-forward on the visible periods: net \
+Sharpe with its standard error, gross Sharpe, turnover, mean rank IC with \
+its standard error, and the range of net Sharpe across calendar years. You \
+have {budget} backtests; further calls are refused.
 - `submit(code, claimed_sharpe)`: submit your final alpha and the net Sharpe \
 you expect it to reach on the unseen periods. This ends the episode.
 

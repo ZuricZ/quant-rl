@@ -69,6 +69,21 @@ def test_drawdown_and_per_year_sharpe():
     assert perf.year_sharpe_min == perf.year_sharpe_median == perf.year_sharpe_max
 
 
+def test_standard_errors_of_ic_and_sharpe():
+    frame = _frame(
+        [[1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [3.0, 2.0, 1.0]],
+        [[0.01, 0.0, 0.03], [0.0, 0.03, 0.01], [0.02, 0.0, -0.02]],
+    )
+    perf = _performance(frame)
+    assert perf.periods == 3
+    ics = [0.5, 0.5, 1.0]
+    assert perf.ic == pytest.approx(statistics.mean(ics))
+    assert perf.ic_se == pytest.approx(statistics.stdev(ics) / math.sqrt(3))
+    per_period = perf.sharpe / math.sqrt(252)
+    expected = math.sqrt(252 * (1 + per_period**2 / 2) / 3)
+    assert perf.sharpe_se == pytest.approx(expected)
+
+
 def test_constant_predictions_hold_no_position():
     frame = _frame([[1.0, 1.0], [1.0, 1.0]], [[0.01, -0.01], [0.02, 0.0]])
     perf = _performance(frame, cost=0.01)

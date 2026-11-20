@@ -93,8 +93,14 @@ class Performance:
     Sharpe ratios are annualised and are 0 when P&L does not vary.
 
     Attributes:
+        periods: Number of traded periods.
         ic: Mean per-period rank IC (see `mean_rank_ics`).
+        ic_se: Standard error of `ic`: the standard deviation of the
+            per-period ICs over the square root of `periods`.
         sharpe: Net of costs.
+        sharpe_se: Standard error of `sharpe` for independent P&L (Lo,
+            2002): sqrt(periods per year x (1 + s**2 / 2) / `periods`), s
+            the per-period Sharpe ratio. About 0.5 for 1,000 daily periods.
         robust_sharpe: Net of costs, on winsorised P&L (see `robust_sharpe`).
         gross_sharpe: Before costs.
         turnover: Mean per-period turnover, sum of |weight change|; 2 is a
@@ -106,8 +112,11 @@ class Performance:
             peak (starting at 0), in return units of a unit-gross book.
     """
 
+    periods: int
     ic: float
+    ic_se: float
     sharpe: float
+    sharpe_se: float
     robust_sharpe: float
     gross_sharpe: float
     turnover: float
@@ -229,9 +238,16 @@ def performance(
         )
     )
     cumulative = pl.col(_PNL).cum_sum()
+    net = sharpe(pl.col(_PNL), periods_per_year)
+    n = pl.len()
     totals = periods.select(
+        n.alias("periods"),
         pl.col("ic").mean(),
-        sharpe(pl.col(_PNL), periods_per_year).alias("sharpe"),
+        (pl.col("ic").std() / n.sqrt()).fill_null(0.0).alias("ic_se"),
+        net.alias("sharpe"),
+        (periods_per_year * (1.0 + net.pow(2) / periods_per_year / 2.0) / n)
+        .sqrt()
+        .alias("sharpe_se"),
         robust_sharpe(pl.col(_PNL), periods_per_year).alias("robust_sharpe"),
         sharpe(pl.col("gross"), periods_per_year).alias("gross_sharpe"),
         pl.col("turnover").mean(),
@@ -240,4 +256,6 @@ def performance(
         .alias("max_drawdown"),
     )
     row = pl.concat([totals, years], how="horizontal").collect().row(0, named=True)
-    return Performance(**{k: float(v) for k, v in row.items()})
+    return Performance(
+        **{k: v if k == "periods" else float(v) for k, v in row.items()}
+    )

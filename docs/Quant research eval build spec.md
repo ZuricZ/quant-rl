@@ -383,7 +383,7 @@ One plot: claim gap against backtests used. In practice the model uses its whole
      - Example: none, or one of several neutral examples that are not a ready-made submission.
      - Wording: a few paraphrases of the instructions. The rules stay exact (the `Alpha` contract, scoring, penalties, limits), since ambiguity there makes the reward unfair.
    - The eval split keeps fixed variation draws per task, so runs stay comparable; training draws freely.
-27. **Backtest replies explain their numbers.** Decided 20 November 2026; not built yet.
+27. **Backtest replies explain their numbers.** Decided 20 November 2026; built the same day.
    - Today a backtest returns three bare lines: net Sharpe, rank IC and backtests left. What they mean is stated once, in the prompt, many turns earlier. The Day 6 and 7 runs suggest the model reads them badly: it overclaimed most when its alphas had no signal, ignoring cost drag.
    - Each reply states what was measured and how precise it is, not what to do next:
      - The scope: walk-forward on the last N visible timestamps, the window and refit cadence, annualised.
@@ -392,6 +392,7 @@ One plot: claim gap against backtests used. In practice the model uses its whole
      - Per-year Sharpe range, as a stability check.
      - Backtests left.
    - No advice ("try X", "your claim should be Y"). Advice would coach the behaviour the eval measures, chiefly the claim gap. Feedback richness could itself become a dial of the experiment, like the budget.
+   - Built: `metrics.Performance` gains `periods`, `ic_se` (standard deviation of per-period ICs over √periods) and `sharpe_se` (Lo 2002: √(periods per year × (1 + s²/2) / periods), s the per-period Sharpe), so scored runs record them too. `research.backtest_scope` states the predicted timestamps, window, refit cadence, annualisation and cost, from the data; `research.backtest_report` formats the reply. The prompt's description of `backtest` lists the new numbers. Runs before this change saw three lines, so they do not compare with runs after it.
 
 ## Open decisions
 

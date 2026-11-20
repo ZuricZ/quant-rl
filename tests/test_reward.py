@@ -8,8 +8,11 @@ import pytest
 from quantenv import metrics, reward, scoring
 
 PERFORMANCE = metrics.Performance(
+    periods=1000,
     ic=0.02,
+    ic_se=0.003,
     sharpe=1.4,
+    sharpe_se=0.5,
     robust_sharpe=1.3,
     gross_sharpe=2.0,
     turnover=0.4,

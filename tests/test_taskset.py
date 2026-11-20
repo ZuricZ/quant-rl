@@ -21,6 +21,8 @@ import verifiers.v1 as vf  # noqa: E402
 from quant_research import grade, taskset  # noqa: E402
 from quant_research.servers.research import (  # noqa: E402
     ResearchConfig,
+    backtest_report,
+    backtest_scope,
     ResearchData,
     ResearchState,
     ResearchToolset,
@@ -31,7 +33,7 @@ from quant_research.taskset import (  # noqa: E402
     QuantResearchTaskConfig,
     QuantResearchTaskset,
 )
-from quantenv import baselines, checks, reward, scoring, walkforward  # noqa: E402
+from quantenv import baselines, checks, metrics, reward, scoring, walkforward  # noqa: E402
 from quantenv.sources import synthetic  # noqa: E402
 
 COLUMN = baselines.column_code("f00")
@@ -186,10 +188,46 @@ def test_backtest_matches_scoring_and_counts():
             synthetic.visible_data, synthetic.dataset_seed(0, SECRET, "eval")
         ),
     )
-    assert f"net Sharpe: {performance.sharpe:.2f}" in out
-    assert f"rank IC: {performance.ic:.4f}" in out
-    assert "backtests left: 1" in out
+    assert out == backtest_report(
+        backtest_scope(synthetic.visible_data(synthetic.dataset_seed(0, SECRET, "eval"))),
+        performance,
+        left=1,
+    )
     assert tools.state.backtests_used == 1
+
+
+def test_backtest_report_explains_its_numbers():
+    performance = metrics.Performance(
+        periods=1000,
+        ic=0.012,
+        ic_se=0.003,
+        sharpe=0.85,
+        sharpe_se=0.5,
+        robust_sharpe=0.8,
+        gross_sharpe=1.6,
+        turnover=0.43,
+        year_sharpe_min=-0.8,
+        year_sharpe_median=0.9,
+        year_sharpe_max=2.1,
+        max_drawdown=0.1,
+    )
+    scope = backtest_scope(synthetic.visible_data(0))
+    assert "last 1000 of 2000 visible timestamps" in scope
+    assert "252 periods per year" in scope and "2 bp" in scope
+    out = backtest_report(scope, performance, left=4)
+    for text in (
+        "net Sharpe: 0.85 ± 0.50",
+        "gross Sharpe: 1.60",
+        "turnover: 0.43",
+        "rank IC: 0.0120 ± 0.0030",
+        "1000 periods",
+        "min -0.80, median 0.90, max 2.10",
+        "backtests left: 4",
+    ):
+        assert text in out
+    # Numbers only: no advice that would coach the claim.
+    for word in ("should", "try", "claim"):
+        assert word not in out.lower()
 
 
 def test_failing_backtest_counts_against_budget():
