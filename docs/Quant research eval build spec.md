@@ -375,12 +375,30 @@ One plot: claim gap against backtests used. In practice the model uses its whole
    - `grade` and the sandbox user check take the user, not the toolset config, since the no-tools task has no toolset.
    - Verified 19 November 2026 with Docker in a cloud session: `vf-run quant-research-notools` with the stub model (`scripts/stub_model.py` now answers a request without tools with its alpha in a Python block), 2 eval tasks, both `ok`, one turn each, rewards −0.023 and −0.037 (the 20-period reversal's IC is about −0.001 to −0.002 there).
    - `runs/prime-rl/notools-smoke.toml` trains Qwen3-4B-Instruct-2507 with LoRA (rank 8) for 200 steps, batch 32 in groups of 8, on 1 trainer and 1 inference GPU, written from prime-rl's `examples/basic` of 19 November 2026. It has not run: the cloud sessions have no GPU. Grading bounds the step time (up to about a minute of CPU per rollout), hence the small batch.
+26. **Tasks vary in data shape, wording and strategy style.** Decided 20 November 2026; not built yet.
+   - Why: today every task has the same prompt; only the hidden data differs. Column names are always `f00` to `f19`, the history length and start date are fixed, and the prompt carries one example alpha. At budget 0, 17 of 24 honest Qwen3.5-9B submissions were that example copied verbatim, so the result partly measured the prompt, not research. For RL, one fixed prompt also lets the policy learn "this text, this strategy" instead of the skill.
+   - What varies, each drawn from the task's seed so a task stays reproducible:
+     - Data shape: number of features and assets, history length, daily or intraday bars (`Config.bar`), cost level, and column names. The description in the prompt then really changes, and the agent has to read it. This also prepares for real data, which will not look like the simulator.
+     - Strategy style: the task asks for an alpha of one style, e.g. momentum, short-term reversal, low turnover, volatility-scaled or a combination of features. The generator must plant signal for the requested style, or the request is cosmetic: momentum and reversal live in `ret`, so their strength has to be a generator parameter per task. Whether the agent kept to the style is open decision 4.
+     - Example: none, or one of several neutral examples that are not a ready-made submission.
+     - Wording: a few paraphrases of the instructions. The rules stay exact (the `Alpha` contract, scoring, penalties, limits), since ambiguity there makes the reward unfair.
+   - The eval split keeps fixed variation draws per task, so runs stay comparable; training draws freely.
+27. **Backtest replies explain their numbers.** Decided 20 November 2026; not built yet.
+   - Today a backtest returns three bare lines: net Sharpe, rank IC and backtests left. What they mean is stated once, in the prompt, many turns earlier. The Day 6 and 7 runs suggest the model reads them badly: it overclaimed most when its alphas had no signal, ignoring cost drag.
+   - Each reply states what was measured and how precise it is, not what to do next:
+     - The scope: walk-forward on the last N visible timestamps, the window and refit cadence, annualised.
+     - Gross Sharpe, net Sharpe and turnover, so cost drag is visible.
+     - Rank IC with its standard error, and the standard error of the net Sharpe (about √(periods per year / N), 0.5 for 1,000 daily periods), so the agent can tell signal from noise.
+     - Per-year Sharpe range, as a stability check.
+     - Backtests left.
+   - No advice ("try X", "your claim should be Y"). Advice would coach the behaviour the eval measures, chiefly the claim gap. Feedback richness could itself become a dial of the experiment, like the budget.
 
 ## Open decisions
 
 1. ~~**Truncation cut points.**~~ Settled by Decision 7.
 2. **Bias in rank IC.** The current estimate shrinks towards 0 (empty or constant periods count as 0; per-period correlations are attenuated). Decide whether to average over valid periods only, weight by asset count, or report coverage alongside.
 3. ~~**Time limit per hidden run.**~~ Settled by Decision 21.
+4. **Checking the strategy style (Decision 26).** Is a submission that ignores the requested style penalised, and how is that measured? One option: the rank correlation of the predictions with a reference signal for the style (e.g. past return over the style's horizon), with a floor. It must be generic over panels, like the other checks, and not reward a copy of the reference itself.
 
 ## Stack notes
 
