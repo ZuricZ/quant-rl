@@ -107,8 +107,12 @@ absolute weights sum to 1. Each period's P&L is the weights times \
 weight changes). At most {max_null:.0%} of the predictions may be null.\
 """
 
-# The prompt of tasks without variation (spec, Decision 26): the first
-# opening, this example and no style request.
+# The prompt of tasks without variation (spec, Decision 26): this opening,
+# this example and no style request.
+FIXED_OPENING = (
+    "Research a trading alpha on a simulated panel of asset returns. You are "
+    "scored on the periods that directly follow the ones you can see."
+)
 EXAMPLE = """\
 Example:
 
@@ -119,55 +123,60 @@ class MyAlpha(Alpha):
 ```
 """
 
-# Varied tasks open with one of these and show one of `NEUTRAL_EXAMPLES` or
-# none. The rules that follow are worded the same in every task.
+# Varied tasks open with one of these goals, then `WORKFLOW`, and show
+# `PATTERN_EXAMPLE`. The goals differ in wording only; everything after them
+# is worded the same in every task.
 OPENINGS = (
-    "Research a trading alpha on a simulated panel of asset returns. You are "
-    "scored on the periods that directly follow the ones you can see.",
-    "Find a trading alpha in a simulated panel of asset returns. It is scored "
-    "on the periods right after the ones you are shown.",
-    "Your task is to develop an alpha, a trading signal, on the simulated "
-    "panel of asset returns described below. Its score comes from the "
-    "periods that immediately follow the visible ones.",
+    "Your task: research a trading alpha on the simulated panel of asset "
+    "returns described below, and submit it.",
+    "Find a trading alpha in the simulated panel of asset returns described "
+    "below, then submit it.",
+    "Develop a trading alpha, a score that ranks assets by the return you "
+    "expect from them next period, on the simulated panel described below, "
+    "and submit it.",
 )
 
-# Patterns of the API, not submissions: "COLUMN" is not a column, so a copy
-# fails.
-NEUTRAL_EXAMPLES = (
-    """\
-Example of the pattern only; "COLUMN" stands for a real column name:
+WORKFLOW = """\
+What you deliver: Python code that defines one subclass of `Alpha` (the \
+format is under "Alpha" below), and the annualised net Sharpe ratio you \
+expect it to earn on the unseen periods.
+
+How to work:
+1. Read the data description and pick the columns that might predict \
+`fwd_return`.
+2. Write an alpha and call `backtest` on it. The reply gives net and gross \
+Sharpe, turnover and rank IC, with standard errors that tell signal from \
+noise.
+3. Improve the alpha within your backtest budget. Every call counts, \
+including calls whose code fails.
+4. Call `submit` with your final code and the net Sharpe you expect.
+"""
+
+# The structure of an alpha, not a submission: "COLUMN" is not a column, so
+# a copy fails.
+PATTERN_EXAMPLE = """\
+Example of the structure only; "COLUMN" stands for a real column name, so \
+this exact code fails:
 
 ```python
 class MyAlpha(Alpha):
     def features(self, df):
+        # New columns from current and past rows only: here a 10-period
+        # rolling mean of one column, per asset.
         smooth = pl.col("COLUMN").rolling_mean(10).over("asset")
         return df.with_columns(smooth.alias("smooth"))
-    def predict(self, df):
-        return pl.col("smooth")
-```
-""",
-    """\
-Example of the pattern only; "COLUMN" stands for a real column name:
 
-```python
-class MyAlpha(Alpha):
     def fit(self, train):
-        corr = train.select(pl.corr("COLUMN", "fwd_return", method="spearman"))
+        # Learn from the training window, which has `fwd_return`: here the
+        # sign of the new column's rank correlation with it.
+        corr = train.select(pl.corr("smooth", "fwd_return", method="spearman"))
         self.sign = 1.0 if corr.item() >= 0 else -1.0
-    def predict(self, df):
-        return self.sign * pl.col("COLUMN")
-```
-""",
-    """\
-Example of the pattern only; "COLUMN" stands for a real column name:
 
-```python
-class MyAlpha(Alpha):
     def predict(self, df):
-        return pl.col("COLUMN").rank().over("timestamp")
+        # One score per row of the block; higher means a larger position.
+        return self.sign * pl.col("smooth")
 ```
-""",
-)
+"""
 
 # What a varied task asks for, by `synthetic.Config.style`. Not checked by
 # the reward yet (spec, open decision 4).
@@ -231,20 +240,21 @@ def prompt_choices(variation: int | None, style: str) -> dict[str, str]:
 
     Args:
         variation: The task's variation seed, or None for a task without
-            variation: the first opening, `EXAMPLE` and no request.
+            variation: the opening, `EXAMPLE` and no request, as in the
+            runs before Decision 26.
         style: The style the task asks for (`synthetic.Config.style`).
 
     Returns:
         The `opening`, `request` and `example` format values.
     """
     if variation is None:
-        return dict(opening=OPENINGS[0], request="", example=EXAMPLE + "\n")
-    examples = ("", *(e + "\n" for e in NEUTRAL_EXAMPLES))
+        return dict(opening=FIXED_OPENING, request="", example=EXAMPLE + "\n")
     request = STYLE_REQUESTS[style]
+    goal = OPENINGS[_pick(variation, "opening", len(OPENINGS))]
     return dict(
-        opening=OPENINGS[_pick(variation, "opening", len(OPENINGS))],
+        opening=f"{goal}\n\n{WORKFLOW.rstrip()}",
         request=f"## Request\n\n{request}\n\n" if request else "",
-        example=examples[_pick(variation, "example", len(examples))],
+        example=PATTERN_EXAMPLE + "\n",
     )
 
 

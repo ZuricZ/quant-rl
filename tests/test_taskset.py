@@ -190,7 +190,7 @@ def test_unvaried_prompt_keeps_the_fixed_opening_and_example():
     task = next(iter(QuantResearchTaskset(_config(vary=False))))
     prompt = task.data.prompt
     assert task.variation is None and task.market == synthetic.DEFAULT_CONFIG
-    assert prompt.startswith(taskset.OPENINGS[0])
+    assert prompt.startswith(taskset.FIXED_OPENING)
     assert taskset.EXAMPLE in prompt and "## Request" not in prompt
 
 
@@ -206,16 +206,21 @@ def test_varied_prompts_state_the_requested_style():
         else:
             assert "## Request" not in prompt
         assert prompt.split("\n\n")[0] in taskset.OPENINGS
+        assert taskset.WORKFLOW.rstrip() in prompt
+        assert taskset.PATTERN_EXAMPLE in prompt
         assert taskset.EXAMPLE not in prompt  # Never the ready-made example.
 
 
-def test_neutral_examples_cannot_be_submitted_as_they_stand():
-    data = synthetic.visible_data(0)
-    for example in taskset.NEUTRAL_EXAMPLES:
-        code = example.split("```python\n")[1].split("```")[0]
-        with pytest.raises(AlphaError, match="COLUMN"):
-            scoring.backtest(code, functools.partial(synthetic.visible_data, 0))
-        assert "COLUMN" not in data.panel.frame.columns
+def test_pattern_example_runs_once_its_placeholder_is_a_column():
+    code = taskset.PATTERN_EXAMPLE.split("```python\n")[1].split("```")[0]
+    load = functools.partial(synthetic.visible_data, 0)
+    # As it stands it cannot be submitted: "COLUMN" is not a column.
+    assert "COLUMN" not in load().panel.frame.columns
+    with pytest.raises(AlphaError, match="COLUMN"):
+        scoring.backtest(code, load)
+    # With a real column it is a valid alpha, so the pattern is right.
+    performance = scoring.backtest(code.replace("COLUMN", "f00"), load)
+    assert performance.periods > 0
 
 
 def test_toolset_backtests_the_varied_market():
