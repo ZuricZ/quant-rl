@@ -1282,7 +1282,7 @@ wheels = [
 ]
 
 [[package]]
-name = "quant-research"
+name = "quant-rl"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

@@ -1,7 +1,8 @@
 """Edge cases of the panel, generator, walk-forward, checks and scoring."""
 
 import dataclasses
-import importlib.metadata
+import pathlib
+import tomllib
 import datetime as dt
 import functools
 import math
@@ -587,8 +588,13 @@ def test_lookahead_except_on_any_fixed_dates_is_caught():
         assert s.lookahead == 1, dates[:3]
 
 
-def test_project_is_named_quant_research():
-    assert importlib.metadata.distribution("quant-research").version == "0.1.0"
+def test_environments_keep_their_hub_names():
+    root = pathlib.Path(__file__).parents[1] / "environments"
+    names = {
+        tomllib.loads((root / env / "pyproject.toml").read_text())["project"]["name"]
+        for env in ("quant_research", "quant_research_notools")
+    }
+    assert names == {"quant-research", "quant-research-notools"}
 
 
 def test_check_thresholds_are_configurable(data):

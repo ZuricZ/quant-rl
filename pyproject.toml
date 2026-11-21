@@ -1,7 +1,9 @@
 [project]
-name = "quant-research"
+name = "quant-rl"
 version = "0.1.0"
-description = "Simulated quant research datasets and scoring for a verifiers environment."
+# Development and the task image: the core and both environments in one
+# install. Each environment publishes from its own pyproject (Decision 28).
+description = "quantenv and both quant research environments, for development and the task image."
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "numpy>=2.0",
@@ -21,6 +23,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["quantenv", "environments/quant_research", "environments/quant_research_notools"]
+exclude = ["environments/*/pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -2,6 +2,10 @@
 
 import pathlib
 import re
+import subprocess
+import zipfile
+
+import pytest
 
 ROOT = pathlib.Path(__file__).parents[1]
 VERIFIERS = re.compile(r"^\s*(import|from)\s+verifiers\b", re.MULTILINE)
@@ -30,3 +34,23 @@ def test_environments_do_not_import_each_other():
         )
     ]
     assert hits == []
+
+
+@pytest.mark.parametrize(
+    "env, own",
+    [
+        ("quant_research", {"__init__.py", "taskset.py", "servers"}),
+        ("quant_research_notools", {"__init__.py", "taskset.py"}),
+    ],
+)
+def test_environment_wheels(tmp_path, env, own):
+    subprocess.run(
+        ["uv", "build", "--wheel", "--out-dir", str(tmp_path), str(ROOT / "environments" / env)],
+        check=True,
+    )
+    (wheel,) = tmp_path.glob("*.whl")
+    names = zipfile.ZipFile(wheel).namelist()
+    tops = {n.split("/")[0] for n in names if ".dist-info/" not in n}
+    assert tops == {env, "quantenv"}
+    assert {n.split("/")[1] for n in names if n.startswith(f"{env}/")} == own
+    assert "quantenv/grade.py" in names

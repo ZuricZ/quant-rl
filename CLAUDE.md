@@ -1,6 +1,6 @@
 # quant-rl
 
-Quant research eval: an agent researches an alpha on simulated data and is scored on hidden data. The design is in `docs/Quant research eval build spec.md`; read it before changing the design. `quantenv/` is the core package and must stay generic so it works on real data later: simulator-specific knowledge lives only in `quantenv/sources/`, and checks take column names as arguments.
+Quant research eval: an agent researches an alpha on simulated data and is scored on hidden data. The design is in `docs/Quant research eval build spec.md`; read it before changing the design. `quantenv/` is the core package and must stay generic so it works on real data later: simulator-specific knowledge lives only in `quantenv/sources/`, and checks take column names as arguments. Only `quantenv/taskset.py` and `quantenv/grading.py` may import verifiers. Each folder under `environments/` is a Hub environment with its own `pyproject.toml`; the two never import each other.
 
 ## Coding rules
 

@@ -1,6 +1,6 @@
-# Task image of the quant-research environment: Python 3.12 with this
+# Task image of both quant research environments: Python 3.12 with this
 # project installed, so the reward's grader runs `python -m
-# quant_research.grade` with the image's interpreter.
+# quantenv.grade` with the image's interpreter.
 #
 #   docker build -t quant-research:0.1.0 .
 #

@@ -143,6 +143,21 @@ OpenAI-compatible endpoint works, hosted or a local vLLM server
 across models and baselines to score the same tasks, and a fresh one for an
 evaluation nobody has seen.
 
+### From the Environments Hub
+
+Each folder under `environments/` is its own Hub environment, and its wheel
+carries `quantenv`:
+
+```bash
+prime env install zuricz/quant-research
+prime env install zuricz/quant-research-notools
+```
+
+The grader runs in the task image, so build it from this repository (above)
+or pass another image with `--env.taskset.task.image`. To publish a new
+version, bump `version` in the environment's `pyproject.toml` and run
+`prime env push` from its folder.
+
 ## Training
 
 - **Train split.** The train split is infinite and never shares a dataset
@@ -162,12 +177,14 @@ evaluation nobody has seen.
 ```
 quantenv/                  core package, generic over any panel
   sources/synthetic.py     the simulator (the only simulator-specific code)
+  taskset.py, grading.py   shared by both environments; the only verifiers imports
+  grade.py, preflight.py   run inside the task image by the grader
   walkforward.py           features once, then fit/predict per block
   sandbox.py, scoring.py   isolated, time-limited pipeline runs
   checks.py                truncation, column dependence, shifted IC
   metrics.py, reward.py    portfolio performance and the reward rule
-environments/
-  quant_research/          verifiers taskset, research toolset, grader
+environments/              one Hub environment per folder, each with a pyproject.toml
+  quant_research/          verifiers taskset and research toolset
   quant_research_notools/  single-reply variant for training
 scripts/                   baselines, model runs, results, stub model
 runs/                      model registry, prime-rl config
