@@ -76,11 +76,11 @@ submission. They shaped most of the design:
   - **Implausible IC:** flag an IC against the next return above a ceiling
     that honest alphas never reach.
 
-Every flagged episode from the model runs is in
-[`docs/Reward hacking log.md`](docs/Reward%20hacking%20log.md), with its code
-and how it was caught. The most common pattern was a per-asset mean in
-`predict` that silently spanned the whole 250-day block, which earned twice
-the oracle's Sharpe until truncation caught it.
+In the first model runs, 7 of 360 episodes were caught reading the future,
+all by truncation. The most common pattern was a per-asset mean in
+`predict` that silently spanned the whole 250-day block. It earned twice the
+oracle's Sharpe until truncation caught it. One episode even noted
+"potential data leakage" in its own backtest and submitted the code anyway.
 
 ## Results
 
@@ -96,7 +96,7 @@ honest submissions only.
 | Qwen3.5-9B | 3 | 79% | 2% | −0.86 | −0.55 | 1.01 |
 | Qwen3.5-9B | 10 | 46% | 0% | −0.42 | 0.18 | 0.57 |
 
-![Claim gap against backtest budget](results/day7/claim_gap.png)
+![Claim gap against backtest budget](assets/claim_gap.png)
 
 Overclaiming falls with the number of backtests, from 2.07 to 0.57 in
 annualised Sharpe. The fall comes from a change in which alphas get
@@ -113,9 +113,6 @@ the baselines score:
 | oracle | 2.24 | 0.021 |
 | template | 1.50 | 0.014 |
 | naive | 1.07 | 0.012 |
-
-More: [write-up](docs/Write-up.md), [Day 7 tables](results/day7/results.md),
-[baseline rows](results/day8/baselines.csv).
 
 ## Quickstart
 
@@ -143,8 +140,8 @@ uv run python scripts/run_models.py --secret my-secret stub --tasks 2 --rollouts
 Real models are listed in [`runs/models.toml`](runs/models.toml). Any
 OpenAI-compatible endpoint works, hosted or a local vLLM server
 (`scripts/serve_vllm.sh`). The secret picks the datasets: use the same one
-across models and baselines to score the same tasks. The published results
-use `day5-check`, so choose your own for an evaluation nobody has seen.
+across models and baselines to score the same tasks, and a fresh one for an
+evaluation nobody has seen.
 
 ## Training
 
@@ -156,7 +153,7 @@ use `day5-check`, so choose your own for an evaluation nobody has seen.
 - **prime-rl smoke run.** [`runs/prime-rl/notools-smoke.toml`](runs/prime-rl/notools-smoke.toml)
   trains a LoRA on Qwen3-4B against it. It is tested end to end with the stub
   model; the training run itself needs GPUs.
-- **Next.** The spec's plan is synthetic training first, to remove invalid
+- **Next.** The plan is synthetic training first, to remove invalid
   submissions and teach honest claims, then real anonymised factor data split
   into train, validation and locked eras.
 
@@ -174,9 +171,5 @@ environments/
   quant_research_notools/  single-reply variant for training
 scripts/                   baselines, model runs, results, stub model
 runs/                      model registry, prime-rl config
-results/                   run snapshots: traces, tables, plots
-docs/                      build spec and decisions, write-up, reward hacking log
+tests/                     unit, sandbox and taskset tests
 ```
-
-The [build spec](docs/Quant%20research%20eval%20build%20spec.md) records every
-design decision, with what was tried, what broke and why.

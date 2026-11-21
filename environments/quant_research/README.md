@@ -61,6 +61,3 @@ uv run vf-run quant-research --model <model> --client.base-url <url> \
 | `env.taskset.task.vary` | true | Vary market and prompt per task; false gives the fixed market of the earliest runs |
 | `env.taskset.task.check_config.max_ic` | 0.05 | IC ceiling of the implausible-IC check (set it through a TOML file) |
 | `env.taskset.task.image` | `quant-research:0.1.0` | Task image; a registry reference for a remote runtime |
-
-The design and every decision behind it are in the repository's build spec,
-`docs/Quant research eval build spec.md`.
