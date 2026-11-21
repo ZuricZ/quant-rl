@@ -1,8 +1,8 @@
-.venv
-.git
-.pytest_cache
-**/__pycache__
-outputs
-tests
-docs
-scripts
+# The task image needs only what the Dockerfile copies; keep the build context
+# small (it is uploaded for remote builds such as `prime images push`).
+*
+!pyproject.toml
+!quantenv/
+!environments/
+**/__pycache__/
+**/*.pyc

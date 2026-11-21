@@ -143,6 +143,23 @@ OpenAI-compatible endpoint works, hosted or a local vLLM server
 across models and baselines to score the same tasks, and a fresh one for an
 evaluation nobody has seen.
 
+### From the Environments Hub
+
+The package is `zuricz/quant-research` on the
+[Environments Hub](https://app.primeintellect.ai/dashboard/environments). One
+install provides both taskset ids, `quant-research` and
+`quant-research-notools`:
+
+```bash
+prime env install zuricz/quant-research
+```
+
+The grader runs in the task image, so build it from this repository
+(`docker build -t quant-research:0.1.0 .`) or pass another image with
+`--env.taskset.task.image`. To publish a new version, bump `version` in
+`pyproject.toml` and run `uv run python scripts/hub_push.py`, which pushes
+only the package sources.
+
 ## Training
 
 - **Train split.** The train split is infinite and never shares a dataset
