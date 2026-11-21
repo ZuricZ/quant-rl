@@ -2,6 +2,7 @@
 # small (it is uploaded for remote builds such as `prime images push`).
 *
 !pyproject.toml
+!README.md
 !quantenv/
 !environments/
 **/__pycache__/
