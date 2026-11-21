@@ -10,31 +10,19 @@ Run as `python -m quant_research.servers.research`; verifiers launches it.
 
 import asyncio
 import functools
-from typing import Literal
 
 import verifiers.v1 as vf
 from pydantic import Field
 
 from quantenv import metrics, scoring, walkforward
 from quantenv.alpha import AlphaError
-from quantenv.panel import EvalData, Panel
+from quantenv.grading import SANDBOX_USER
+from quantenv.panel import EvalData
 from quantenv.sources import synthetic
+from quantenv.taskset import describe_panel
 from quantenv.walkforward import WalkForward
 
 BUDGET = 10
-SANDBOX_USER = "nobody"
-
-
-class ResearchData(vf.TaskData):
-    """Task data. Published with every trace, so it holds no seed.
-
-    Attributes:
-        split: "train" or "eval".
-        index: Dataset number within the split.
-    """
-
-    split: Literal["train", "eval"]
-    index: int = Field(ge=0)
 
 
 class ResearchState(vf.State):
@@ -79,24 +67,6 @@ class ResearchConfig(vf.ToolsetConfig):
     colocated: bool = True
     budget: int = Field(BUDGET, ge=0)
     sandbox_user: str | None = SANDBOX_USER
-
-
-def describe_panel(panel: Panel) -> str:
-    """Columns the alpha sees, timestamp range and number of assets.
-
-    Args:
-        panel: The data.
-
-    Returns:
-        A short plain-text description.
-    """
-    stamps = panel.timestamps
-    n_assets = panel.frame.get_column(panel.schema.asset).n_unique()
-    return (
-        f"columns: {', '.join(panel.observable.columns)}\n"
-        f"timestamps: {stamps.len()}, from {stamps.first()} to {stamps.last()}\n"
-        f"assets: {n_assets}"
-    )
 
 
 def backtest_scope(data: EvalData, wf: WalkForward = WalkForward()) -> str:

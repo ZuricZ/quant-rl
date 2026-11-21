@@ -3,7 +3,7 @@
 The task's reward runs this inside the rollout's runtime, after the agent has
 finished:
 
-    python -m quant_research.grade REQUEST RESULT
+    python -m quantenv.grade REQUEST RESULT
 
 REQUEST is a JSON file with `seed`, `code`, `claimed_sharpe`, `user` (the
 sandbox user), `checks` (a `quantenv.checks.CheckConfig` as a dict) and

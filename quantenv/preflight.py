@@ -2,7 +2,7 @@
 
 `Task.setup` runs this in the rollout's container before the agent starts:
 
-    python -m quant_research.preflight USER
+    python -m quantenv.preflight USER
 
 It exits non-zero, with the reason on stderr, unless USER exists and this
 process is root, which `quantenv.sandbox` needs to run agent code as USER.

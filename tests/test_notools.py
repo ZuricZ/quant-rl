@@ -14,9 +14,7 @@ pytest.importorskip("fcntl")
 import verifiers.v1 as vf  # noqa: E402
 from test_taskset import SECRET, _LocalRuntime  # noqa: E402
 
-from quant_research.servers.research import ResearchData  # noqa: E402
 from quant_research.taskset import (  # noqa: E402
-    SECRET_VAR,
     QuantResearchConfig,
     QuantResearchTaskset,
 )
@@ -31,6 +29,7 @@ from quant_research_notools.taskset import (  # noqa: E402
 )
 from quantenv import baselines, checks, metrics, reward, scoring  # noqa: E402
 from quantenv.sources import synthetic  # noqa: E402
+from quantenv.taskset import SECRET_VAR, ResearchData  # noqa: E402
 
 COLUMN = baselines.column_code("f00")
 REPLY = f"I will use f00.\n\n```python\n{COLUMN}```\n"

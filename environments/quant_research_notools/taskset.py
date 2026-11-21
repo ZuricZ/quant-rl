@@ -19,24 +19,23 @@ import polars as pl
 import verifiers.v1 as vf
 from pydantic import Field, SecretStr
 
-from quant_research.servers.research import SANDBOX_USER, ResearchData, describe_panel
-from quant_research.taskset import (
+from quantenv import baselines, checks, metrics, reward, scoring
+from quantenv.grading import SANDBOX_USER, check_sandbox_user, grade, scoring_timeout
+from quantenv.panel import EvalData
+from quantenv.sources import synthetic
+from quantenv.taskset import (
     ALPHA_SECTION,
     DATA_SECTION,
     EVAL_TASKS,
     IMAGE,
     PORTFOLIO,
     SECRET_VAR,
+    ResearchData,
     SplitConfig,
-    check_sandbox_user,
-    grade,
+    describe_panel,
     prompt_choices,
     prompt_values,
-    scoring_timeout,
 )
-from quantenv import baselines, checks, metrics, reward, scoring
-from quantenv.panel import EvalData
-from quantenv.sources import synthetic
 
 _SCORE = "score"
 # The last fenced Python block of a reply.

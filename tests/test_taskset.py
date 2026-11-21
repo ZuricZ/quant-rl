@@ -18,14 +18,12 @@ pytest.importorskip("fcntl")
 
 import verifiers.v1 as vf  # noqa: E402
 
-from quant_research import grade, taskset  # noqa: E402
 from quant_research.servers.research import (  # noqa: E402
     ResearchConfig,
-    backtest_report,
-    backtest_scope,
-    ResearchData,
     ResearchState,
     ResearchToolset,
+    backtest_report,
+    backtest_scope,
 )
 from quant_research.taskset import (  # noqa: E402
     QuantResearchConfig,
@@ -34,8 +32,10 @@ from quant_research.taskset import (  # noqa: E402
     QuantResearchTaskset,
 )
 from quantenv import baselines, checks, metrics, reward, scoring, walkforward  # noqa: E402
+from quantenv import grade, grading, taskset  # noqa: E402
 from quantenv.alpha import AlphaError  # noqa: E402
 from quantenv.sources import synthetic  # noqa: E402
+from quantenv.taskset import ResearchData  # noqa: E402
 
 COLUMN = baselines.column_code("f00")
 SECRET = "a-test-secret-value"
@@ -236,7 +236,7 @@ def test_toolset_backtests_the_varied_market():
 def test_grading_timeout_covers_every_scored_run():
     config = checks.CheckConfig()
     seconds = scoring.TimeLimit().seconds(taskset.run_rows(hidden=True))
-    assert taskset.scoring_timeout(config) > (2 + config.n_cuts) * seconds
+    assert grading.scoring_timeout(config) > (2 + config.n_cuts) * seconds
 
 
 def test_describe_lists_visible_data_only():
@@ -423,8 +423,8 @@ class _LocalRuntime:
 def test_grade_runs_the_images_python(tmp_path):
     runtime = _LocalRuntime(tmp_path)
     seed = synthetic.dataset_seed(0, SECRET, "eval")
-    score = asyncio.run(taskset.grade(None, runtime, seed, COLUMN, 0.5))
-    assert runtime.argv[:3] == ["python", "-m", "quant_research.grade"]
+    score = asyncio.run(grading.grade(None, runtime, seed, COLUMN, 0.5))
+    assert runtime.argv[:3] == ["python", "-m", "quantenv.grade"]
     assert score["invalid"] == 0 and score["performance"]["sharpe"] is not None
 
 
@@ -472,7 +472,7 @@ def test_a_plugged_reward_replaces_hidden_sharpe_and_gets_the_raw_score():
 
 def test_preflight_module_rejects_an_unknown_user():
     run = subprocess.run(
-        [sys.executable, "-m", "quant_research.preflight", "no-such-user-xyz"],
+        [sys.executable, "-m", "quantenv.preflight", "no-such-user-xyz"],
         capture_output=True,
         text=True,
     )
