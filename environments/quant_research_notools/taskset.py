@@ -140,8 +140,21 @@ def prompt(
 
 
 def extract_code(reply: str) -> str | None:
-    """The last fenced Python block of a reply, or None if it has none."""
-    blocks = _CODE_BLOCK.findall(reply)
+    """The last fenced Python block of a reply's answer.
+
+    Inline reasoning is not part of the answer: only the text after the last
+    `</think>` is searched, and a reply whose `<think>` never closes has no
+    answer. This matches verifiers' own scoring helpers.
+
+    Args:
+        reply: The model's reply text.
+
+    Returns:
+        The code of the block, or None if the answer has none.
+    """
+    if "<think>" in reply and "</think>" not in reply:
+        return None
+    blocks = _CODE_BLOCK.findall(reply.rsplit("</think>", 1)[-1])
     return blocks[-1] if blocks else None
 
 

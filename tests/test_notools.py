@@ -106,6 +106,13 @@ def test_extract_code_takes_the_last_python_block():
     assert extract_code("no code") is None
 
 
+def test_extract_code_ignores_inline_reasoning():
+    draft = "<think>\n```python\ndraft\n```\n</think>\n"
+    assert extract_code(draft + "no code in the answer") is None
+    assert extract_code(draft + "```python\nanswer\n```") == "answer\n"
+    assert extract_code("<think>\n```python\ncut off\n```") is None
+
+
 def test_reply_without_code_is_invalid(task):
     trace = _trace(task, "f00 looks best.")
     # Nothing to grade, so no runtime is needed.
