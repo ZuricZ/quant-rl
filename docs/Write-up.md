@@ -96,6 +96,14 @@ not submitting is cheaper than submitting lookahead.
 
 ## Status
 
+- Since these runs, tasks vary (spec, Decision 26): market shape, column
+  names, costs, a requested style with momentum or reversal planted in
+  returns, and the prompt's wording. Backtest replies now state their
+  standard errors (Decision 27). The results above use the earlier fixed
+  market, which `vary=False` reproduces. Baselines on the varied tasks are
+  in `results/day8/baselines.csv` (oracle net Sharpe 2.24).
+- CI runs the tests, the sandbox tests as root in the task image, and
+  validates both tasksets in Docker.
 - Environment: `quant-research` (tools, the eval above) and
   `quant-research-notools` (one reply, reward from hidden IC, for training).
   Not yet pushed to the Environments Hub.
