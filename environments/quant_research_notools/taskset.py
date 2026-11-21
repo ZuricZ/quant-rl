@@ -24,13 +24,13 @@ from quant_research.taskset import (
     ALPHA_SECTION,
     DATA_SECTION,
     EVAL_TASKS,
-    EXAMPLE,
     IMAGE,
     PORTFOLIO,
     SECRET_VAR,
     SplitConfig,
     check_sandbox_user,
     grade,
+    prompt_choices,
     prompt_values,
     scoring_timeout,
 )
@@ -49,6 +49,7 @@ PROMPT = (
     "scored on the periods that directly follow the ones described here. "
     "You cannot run code: answer in one reply.\n\n"
     + DATA_SECTION
+    + "{request}"
     + """\
 ## Features
 
@@ -66,9 +67,8 @@ the portfolio described below.
     "## Portfolio\n\n"
     + PORTFOLIO
     + "\n\n"
-    + EXAMPLE
-    + """
-## Answer
+    + "{example}"
+    + """## Answer
 
 Reply with your alpha in one ```python block; if there are several, the last \
 one is used. It is scored on the {n_hidden:,} unseen periods that directly \
@@ -111,6 +111,8 @@ def prompt(
     description: str,
     table: str,
     check_config: checks.CheckConfig = checks.CheckConfig(),
+    config: synthetic.Config = synthetic.DEFAULT_CONFIG,
+    variation: int | None = None,
 ) -> str:
     """The task prompt.
 
@@ -119,12 +121,21 @@ def prompt(
         table: Output of `feature_table` on the visible data.
         check_config: Settings of the checks run when grading; gives the IC
             ceiling, which also scales the reward.
+        config: The task's generator parameters.
+        variation: The task's variation seed, or None for a task without
+            variation. Varies the style request and the example, not the
+            opening, which states the one-reply rule.
 
     Returns:
         The prompt text.
     """
+    choices = prompt_choices(variation, config.style)
     return PROMPT.format(
-        description=description, feature_table=table, **prompt_values(check_config)
+        description=description,
+        feature_table=table,
+        request=choices["request"],
+        example=choices["example"],
+        **prompt_values(check_config, config),
     )
 
 
@@ -162,12 +173,14 @@ class NoToolsTaskConfig(vf.TaskConfig):
         check_config: Settings of the lookahead checks run when grading.
         sandbox_user: User that runs the alpha when grading; see
             `quant_research.servers.research.ResearchConfig`.
+        vary: Vary the market and the prompt per task (spec, Decision 26).
     """
 
     secret: SecretStr | None = None
     image: str = IMAGE
     check_config: checks.CheckConfig = checks.CheckConfig()
     sandbox_user: str | None = SANDBOX_USER
+    vary: bool = True
 
 
 class NoToolsConfig(SplitConfig):
@@ -194,6 +207,19 @@ class NoToolsTask(vf.Task[ResearchData, vf.State, NoToolsTaskConfig]):
             raise ValueError("task config has no secret; build tasks via the taskset")
         secret = self.config.secret.get_secret_value()
         return synthetic.dataset_seed(self.data.index, secret, self.data.split)
+
+    @property
+    def variation(self) -> int | None:
+        """The variation seed (`synthetic.variation_seed`), or None if the
+        task does not vary."""
+        if not self.config.vary:
+            return None
+        return synthetic.variation_seed(self.data.index, self.data.split, self.seed)
+
+    @property
+    def market(self) -> synthetic.Config:
+        """The task's generator parameters."""
+        return synthetic.task_config(self.variation)
 
     async def setup(self, trace: vf.Trace, runtime: vf.Runtime) -> None:
         """Checks the sandbox user.
@@ -232,6 +258,7 @@ class NoToolsTask(vf.Task[ResearchData, vf.State, NoToolsTaskConfig]):
                     code,
                     _NO_CLAIM,
                     self.config.check_config,
+                    self.variation,
                 )
             trace.info[_SCORE] = score
         return trace.info[_SCORE]
@@ -262,14 +289,16 @@ class NoToolsTask(vf.Task[ResearchData, vf.State, NoToolsTaskConfig]):
 
     async def validate(self, runtime: vf.Runtime) -> bool:
         """Grades the oracle alpha: it must score above 0 and pass the checks."""
-        weights = synthetic.ground_truth(self.seed).weights
+        market = self.market
+        truth = synthetic.ground_truth(self.seed, market)
         score = await grade(
             self.config.sandbox_user,
             runtime,
             self.seed,
-            baselines.weighted_code(weights),
+            baselines.oracle_code(truth, market.schema),
             _NO_CLAIM,
             self.config.check_config,
+            self.variation,
         )
         return ic_reward(score, self.config.check_config.max_ic) > 0
 
@@ -299,7 +328,8 @@ class NoToolsTaskset(vf.Taskset[NoToolsTask, NoToolsConfig]):
             task = NoToolsTask(
                 ResearchData(split=self.config.split, index=index), task_config
             )
-            visible = synthetic.visible_data(task.seed)
+            market = task.market
+            visible = synthetic.visible_data(task.seed, market)
             data = task.data.model_copy(
                 update=dict(
                     name=f"{self.config.split}-{index}",
@@ -307,11 +337,13 @@ class NoToolsTaskset(vf.Taskset[NoToolsTask, NoToolsConfig]):
                         describe_panel(visible.panel),
                         feature_table(visible),
                         task_config.check_config,
+                        market,
+                        task.variation,
                     ),
                     image=task_config.image,
                     scoring=vf.ScoringConfig(mode="isolated"),
                     timeout=vf.TaskTimeout(
-                        scoring=scoring_timeout(task_config.check_config)
+                        scoring=scoring_timeout(task_config.check_config, market)
                     ),
                 )
             )

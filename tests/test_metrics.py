@@ -24,9 +24,11 @@ def _frame(predictions: list[list[float]], targets: list[list[float]]) -> pl.Dat
     )
 
 
-def _performance(frame: pl.DataFrame, cost: float = 0.0) -> metrics.Performance:
+def _performance(
+    frame: pl.DataFrame, cost: float = 0.0, periods_per_year: float = 252.0
+) -> metrics.Performance:
     return metrics.performance(
-        frame, "p", "y", "t", "a", cost=cost, periods_per_year=252.0
+        frame, "p", "y", "t", "a", cost=cost, periods_per_year=periods_per_year
     )
 
 
@@ -59,14 +61,64 @@ def test_drawdown_and_per_year_sharpe():
         [[1.0, 2.0], [1.0, 2.0], [1.0, 2.0]],
         [[0.0, 0.02], [0.04, 0.0], [0.0, 0.01]],
     )
-    perf = _performance(frame)
+    # With 2 periods a year, 3 periods make one block of all 3: no stub.
+    perf = _performance(frame, periods_per_year=2.0)
     # Weights -0.5, 0.5 throughout: P&L 0.01, -0.02, 0.005.
     assert perf.max_drawdown == pytest.approx(0.02)
-    first_year = [0.01, -0.02]
-    expected = statistics.mean(first_year) / statistics.stdev(first_year)
-    # The second year has one period, so no Sharpe; it is left out.
-    assert perf.year_sharpe_min == pytest.approx(expected * math.sqrt(252))
+    pnl = [0.01, -0.02, 0.005]
+    expected = statistics.mean(pnl) / statistics.stdev(pnl) * math.sqrt(2)
+    assert perf.years == 1
+    assert perf.year_sharpe_min == pytest.approx(expected)
     assert perf.year_sharpe_min == perf.year_sharpe_median == perf.year_sharpe_max
+
+
+def test_per_year_sharpe_uses_consecutive_one_year_blocks():
+    days = [dt.date(2001, 1, 2) + dt.timedelta(days=i) for i in range(5)]
+    targets = [[0.0, 0.02], [0.04, 0.0], [0.0, 0.03], [0.01, 0.0], [0.0, 0.01]]
+    frame = pl.DataFrame(
+        {
+            "t": [d for d in days for _ in range(2)],
+            "a": [0, 1] * 5,
+            "p": [1.0, 2.0] * 5,
+            "y": [x for row in targets for x in row],
+        }
+    )
+    # 5 periods at 2 a year: blocks of 3 then 2 (i * 2 // 5), whatever the
+    # calendar dates.
+    perf = _performance(frame, periods_per_year=2.0)
+    pnl = [0.01, -0.02, 0.015, -0.005, 0.005]
+    sharpes = [
+        statistics.mean(b) / statistics.stdev(b) * math.sqrt(2)
+        for b in (pnl[:3], pnl[3:])
+    ]
+    assert perf.years == 2
+    assert perf.year_sharpe_min == pytest.approx(min(sharpes))
+    assert perf.year_sharpe_max == pytest.approx(max(sharpes))
+
+
+def test_less_than_a_year_gives_no_per_year_sharpe():
+    frame = _frame(
+        [[1.0, 2.0], [1.0, 2.0], [1.0, 2.0]],
+        [[0.0, 0.02], [0.04, 0.0], [0.0, 0.01]],
+    )
+    perf = _performance(frame)  # 3 periods at 252 a year.
+    assert perf.years == 0
+    assert math.isnan(perf.year_sharpe_min) and math.isnan(perf.year_sharpe_max)
+
+
+def test_standard_errors_of_ic_and_sharpe():
+    frame = _frame(
+        [[1.0, 2.0, 3.0], [1.0, 2.0, 3.0], [3.0, 2.0, 1.0]],
+        [[0.01, 0.0, 0.03], [0.0, 0.03, 0.01], [0.02, 0.0, -0.02]],
+    )
+    perf = _performance(frame)
+    assert perf.periods == 3
+    ics = [0.5, 0.5, 1.0]
+    assert perf.ic == pytest.approx(statistics.mean(ics))
+    assert perf.ic_se == pytest.approx(statistics.stdev(ics) / math.sqrt(3))
+    per_period = perf.sharpe / math.sqrt(252)
+    expected = math.sqrt(252 * (1 + per_period**2 / 2) / 3)
+    assert perf.sharpe_se == pytest.approx(expected)
 
 
 def test_constant_predictions_hold_no_position():

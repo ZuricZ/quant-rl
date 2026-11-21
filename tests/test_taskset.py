@@ -21,6 +21,8 @@ import verifiers.v1 as vf  # noqa: E402
 from quant_research import grade, taskset  # noqa: E402
 from quant_research.servers.research import (  # noqa: E402
     ResearchConfig,
+    backtest_report,
+    backtest_scope,
     ResearchData,
     ResearchState,
     ResearchToolset,
@@ -31,7 +33,8 @@ from quant_research.taskset import (  # noqa: E402
     QuantResearchTaskConfig,
     QuantResearchTaskset,
 )
-from quantenv import baselines, checks, reward, scoring, walkforward  # noqa: E402
+from quantenv import baselines, checks, metrics, reward, scoring, walkforward  # noqa: E402
+from quantenv.alpha import AlphaError  # noqa: E402
 from quantenv.sources import synthetic  # noqa: E402
 
 COLUMN = baselines.column_code("f00")
@@ -39,12 +42,18 @@ SECRET = "a-test-secret-value"
 DATA = ResearchData(split="eval", index=0)
 
 
+# Agent code runs as this process's user: switching to the sandbox user needs
+# root, and tests/test_sandbox.py covers that path.
+TOOLS = ResearchConfig(sandbox_user=None)
+
+
 def _config(**task) -> QuantResearchConfig:
+    task.setdefault("tools", TOOLS)
     return QuantResearchConfig(secret=SECRET, task=QuantResearchTaskConfig(**task))
 
 
 def _toolset(budget: int = 2) -> ResearchToolset:
-    tools = ResearchToolset(ResearchConfig(budget=budget))
+    tools = ResearchToolset(ResearchConfig(budget=budget, sandbox_user=None))
     asyncio.run(tools.setup_task(DATA))
     # Outside a call the toolset sees its inert state; the host's Task.setup
     # puts the seed there in a rollout.
@@ -87,7 +96,8 @@ def test_eval_split_is_30_named_tasks_and_train_is_infinite():
     assert [t.data.name for t in train.take(2)] == ["train-0", "train-1"]
 
 
-def test_secret_is_required_and_masked():
+def test_secret_is_required_and_masked(monkeypatch):
+    monkeypatch.delenv(taskset.SECRET_VAR, raising=False)
     # verifiers' CLI builds the config with defaults before reading flags, so
     # the field may be unset; the taskset refuses to build without it.
     config = QuantResearchConfig()
@@ -121,9 +131,10 @@ def test_seed_stays_out_of_published_task_data(task, tmp_path):
 
 
 def test_prompt_states_columns_budget_and_contract():
-    config = _config(tools=ResearchConfig(budget=7))
-    prompt = next(iter(QuantResearchTaskset(config))).data.prompt
-    assert "f00" in prompt and "ret" in prompt
+    config = _config(tools=ResearchConfig(budget=7, sandbox_user=None))
+    task = next(iter(QuantResearchTaskset(config)))
+    prompt = task.data.prompt
+    assert task.market.feature_names[0] in prompt and "ret" in prompt
     assert "You have 7 backtests" in prompt
     for name in (
         "features(df)",
@@ -147,21 +158,79 @@ def test_prompt_states_the_penalties():
 
 
 def test_prompt_states_the_hidden_run_and_its_time_limit():
-    prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
-    assert "10,000 unseen periods" in prompt
-    seconds = scoring.TimeLimit().seconds(taskset.run_rows(hidden=True))
+    task = next(iter(QuantResearchTaskset(_config())))
+    prompt = task.data.prompt
+    assert f"{task.market.n_hidden:,} unseen periods" in prompt
+    limit = scoring.TimeLimit()
+    seconds = limit.seconds(taskset.run_rows(hidden=True, config=task.market))
     assert f"so it may take {seconds:.1f} seconds: an alpha" in prompt
+    seconds = limit.seconds(taskset.run_rows(hidden=False, config=task.market))
+    assert f"so it may take {seconds:.1f} seconds." in prompt
+
+
+def test_default_market_prompt_states_the_fixed_limits():
+    prompt = next(iter(QuantResearchTaskset(_config(vary=False)))).data.prompt
+    assert "10,000 unseen periods" in prompt
     assert "so it may take 10.6 seconds." in prompt
 
 
 @pytest.mark.parametrize("hidden", [False, True])
-def test_prompt_rows_match_the_data(hidden):
+@pytest.mark.parametrize("variation", [None, synthetic.variation_seed(3, "eval", 0)])
+def test_prompt_rows_match_the_data(hidden, variation):
     seed = synthetic.dataset_seed(0, "x", "eval")
+    market = synthetic.task_config(variation)
     load = synthetic.hidden_data if hidden else synthetic.visible_data
-    data = load(seed)
-    assert taskset.run_rows(hidden) == walkforward.run_rows(
+    data = load(seed, market)
+    assert taskset.run_rows(hidden, market) == walkforward.run_rows(
         data.panel, walkforward.WalkForward(), data.start
     )
+
+
+def test_unvaried_prompt_keeps_the_fixed_opening_and_example():
+    task = next(iter(QuantResearchTaskset(_config(vary=False))))
+    prompt = task.data.prompt
+    assert task.variation is None and task.market == synthetic.DEFAULT_CONFIG
+    assert prompt.startswith(taskset.FIXED_OPENING)
+    assert taskset.EXAMPLE in prompt and "## Request" not in prompt
+
+
+def test_varied_prompts_state_the_requested_style():
+    tasks = list(QuantResearchTaskset(_config()).take(5))
+    # Eval task i asks for the i-th style.
+    assert [t.market.style for t in tasks] == list(synthetic.STYLES)
+    for task in tasks:
+        prompt = task.data.prompt
+        request = taskset.STYLE_REQUESTS[task.market.style]
+        if request:
+            assert f"## Request\n\n{request}" in prompt
+        else:
+            assert "## Request" not in prompt
+        assert prompt.split("\n\n")[0] in taskset.OPENINGS
+        assert taskset.WORKFLOW.rstrip() in prompt
+        assert taskset.PATTERN_EXAMPLE in prompt
+        assert taskset.EXAMPLE not in prompt  # Never the ready-made example.
+
+
+def test_pattern_example_runs_once_its_placeholder_is_a_column():
+    code = taskset.PATTERN_EXAMPLE.split("```python\n")[1].split("```")[0]
+    load = functools.partial(synthetic.visible_data, 0)
+    # As it stands it cannot be submitted: "COLUMN" is not a column.
+    assert "COLUMN" not in load().panel.frame.columns
+    with pytest.raises(AlphaError, match="COLUMN"):
+        scoring.backtest(code, load)
+    # With a real column it is a valid alpha, so the pattern is right.
+    performance = scoring.backtest(code.replace("COLUMN", "f00"), load)
+    assert performance.periods > 0
+
+
+def test_toolset_backtests_the_varied_market():
+    tools = _toolset()
+    variation = synthetic.variation_seed(1, "eval", 0)
+    tools.state.variation = f"{variation:032x}"
+    market = synthetic.task_config(variation)
+    text = asyncio.run(tools.describe())
+    assert market.feature_names[0] in text
+    assert f"assets: {market.n_assets}" in text
 
 
 def test_grading_timeout_covers_every_scored_run():
@@ -171,7 +240,7 @@ def test_grading_timeout_covers_every_scored_run():
 
 
 def test_describe_lists_visible_data_only():
-    text = _toolset().describe()
+    text = asyncio.run(_toolset().describe())
     assert "fwd_return" not in text
     assert "timestamps: 2000" in text
     assert "assets: 200" in text
@@ -186,10 +255,47 @@ def test_backtest_matches_scoring_and_counts():
             synthetic.visible_data, synthetic.dataset_seed(0, SECRET, "eval")
         ),
     )
-    assert f"net Sharpe: {performance.sharpe:.2f}" in out
-    assert f"rank IC: {performance.ic:.4f}" in out
-    assert "backtests left: 1" in out
+    assert out == backtest_report(
+        backtest_scope(synthetic.visible_data(synthetic.dataset_seed(0, SECRET, "eval"))),
+        performance,
+        left=1,
+    )
     assert tools.state.backtests_used == 1
+
+
+def test_backtest_report_explains_its_numbers():
+    performance = metrics.Performance(
+        periods=1000,
+        ic=0.012,
+        ic_se=0.003,
+        sharpe=0.85,
+        sharpe_se=0.5,
+        robust_sharpe=0.8,
+        gross_sharpe=1.6,
+        turnover=0.43,
+        years=3,
+        year_sharpe_min=-0.8,
+        year_sharpe_median=0.9,
+        year_sharpe_max=2.1,
+        max_drawdown=0.1,
+    )
+    scope = backtest_scope(synthetic.visible_data(0))
+    assert "last 1000 of 2000 visible timestamps" in scope
+    assert "252 periods per year" in scope and "2 bp" in scope
+    out = backtest_report(scope, performance, left=4)
+    for text in (
+        "net Sharpe: 0.85 ± 0.50",
+        "gross Sharpe: 1.60",
+        "turnover: 0.43",
+        "rank IC: 0.0120 ± 0.0030",
+        "1000 periods",
+        "min -0.80, median 0.90, max 2.10",
+        "backtests left: 4",
+    ):
+        assert text in out
+    # Numbers only: no advice that would coach the claim.
+    for word in ("should", "try", "claim"):
+        assert word not in out.lower()
 
 
 def test_failing_backtest_counts_against_budget():
@@ -254,7 +360,14 @@ def test_grader_scores_on_hidden_periods(tmp_path):
     request, result = tmp_path / "request.json", tmp_path / "result.json"
     request.write_text(
         json.dumps(
-            {"seed": 0, "code": code, "claimed_sharpe": 1.0, "user": None, "checks": {}}
+            {
+                "seed": 0,
+                "code": code,
+                "claimed_sharpe": 1.0,
+                "user": None,
+                "checks": {},
+                "variation": None,
+            }
         )
     )
     grade.main([str(request), str(result)])

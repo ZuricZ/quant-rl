@@ -1,9 +1,13 @@
 """The default generator's market looks like one: each mechanism is visible
 in the data. `PLAIN` turns them all off."""
 
+import dataclasses
+import datetime as dt
+
 import polars as pl
 import pytest
 
+from quantenv import metrics
 from quantenv.sources import synthetic
 
 SEED = 11
@@ -86,9 +90,6 @@ def test_plain_features_are_independent_draws():
 
 
 def test_return_scale_and_start_date_are_configurable():
-    import dataclasses
-    import datetime as dt
-
     base = synthetic.generate(SEED, synthetic.PLAIN).panel.frame
     config = dataclasses.replace(
         synthetic.PLAIN, return_vol=0.04, start=dt.datetime(2010, 1, 4)
@@ -97,3 +98,79 @@ def test_return_scale_and_start_date_are_configurable():
     ratio = scaled["fwd_return"].std() / base["fwd_return"].std()
     assert ratio == pytest.approx(2.0)
     assert scaled["timestamp"].min() == dt.date(2010, 1, 4)
+
+
+def _eval_markets(n: int = 30) -> list[synthetic.Config]:
+    return [synthetic.task_config(synthetic.variation_seed(i, "eval", 0)) for i in range(n)]
+
+
+def test_eval_variation_is_fixed_whatever_the_secret_and_balanced():
+    a = [synthetic.variation_seed(i, "eval", 1) for i in range(30)]
+    b = [synthetic.variation_seed(i, "eval", 2) for i in range(30)]
+    assert a == b
+    styles = [m.style for m in _eval_markets()]
+    assert styles == [synthetic.STYLES[i % 5] for i in range(30)]
+
+
+def test_train_variation_follows_the_seed_without_revealing_it():
+    assert synthetic.variation_seed(0, "train", 5) != synthetic.variation_seed(0, "train", 6)
+    assert synthetic.variation_seed(0, "train", 5) != 5
+
+
+def test_variation_changes_shape_names_start_and_cost():
+    markets = _eval_markets()
+    assert len({m.n_assets for m in markets}) > 1
+    assert len({m.n_visible for m in markets}) > 1
+    assert len({m.n_features for m in markets}) > 1
+    assert len({m.feature_names[0] for m in markets}) > 1
+    assert len({m.start for m in markets}) > 1
+    assert len({m.cost for m in markets}) > 1
+    assert synthetic.task_config(None) == synthetic.DEFAULT_CONFIG
+    for m in markets:
+        assert len(m.feature_names) == m.n_features
+        assert not {"timestamp", "asset", "ret", "fwd_return"} & set(m.feature_names)
+        # Daily bars, planted ICs as in the default market, a business-day start.
+        assert m.bar is None and m.real_ic_range == synthetic.DEFAULT_CONFIG.real_ic_range
+        assert m.start.weekday() < 5
+
+
+def test_low_turnover_tasks_pay_more_to_trade():
+    for m in _eval_markets():
+        if m.style == "low_turnover":
+            assert m.cost >= 3e-4
+        else:
+            assert m.cost <= 3e-4
+
+
+@pytest.mark.parametrize("style", ["momentum", "reversal"])
+def test_past_return_signal_is_planted_in_ret(style):
+    config = dataclasses.replace(
+        synthetic.PLAIN,
+        style=style,
+        ret_signal_ic=0.04 if style == "momentum" else -0.04,
+        ret_signal_horizon=5,
+        n_visible=3_000,
+    )
+    syn = synthetic.generate(SEED, config)
+    frame = syn.panel.frame.with_columns(
+        pl.col("ret").rolling_sum(5).over("asset").alias("past")
+    )
+    ic = metrics.rank_ic(frame, "past", "fwd_return", "timestamp")
+    assert ic == pytest.approx(config.ret_signal_ic, abs=0.01)
+    assert syn.truth.ret_signal[0] == 5
+
+
+def test_past_return_signal_keeps_the_visible_panel_a_prefix():
+    market = next(m for m in _eval_markets() if m.style == "momentum")
+    visible = synthetic.generate(SEED, market).panel.frame
+    full = synthetic.generate(SEED, market, hidden=True).panel.frame.head(visible.height)
+    numeric = [c for c in visible.columns if c not in ("timestamp", "asset")]
+    diff = (full.select(numeric) - visible.select(numeric)).select(pl.all().abs().max())
+    assert max(v for v in diff.row(0) if v is not None) < 1e-12
+
+
+def test_config_rejects_bad_names_and_styles():
+    with pytest.raises(ValueError, match="names"):
+        dataclasses.replace(synthetic.DEFAULT_CONFIG, names=("a", "a"))
+    with pytest.raises(ValueError, match="style"):
+        dataclasses.replace(synthetic.DEFAULT_CONFIG, style="carry")

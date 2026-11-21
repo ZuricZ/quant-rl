@@ -15,10 +15,11 @@ from typing import Literal
 import verifiers.v1 as vf
 from pydantic import Field
 
-from quantenv import scoring
+from quantenv import metrics, scoring, walkforward
 from quantenv.alpha import AlphaError
-from quantenv.panel import Panel
+from quantenv.panel import EvalData, Panel
 from quantenv.sources import synthetic
+from quantenv.walkforward import WalkForward
 
 BUDGET = 10
 SANDBOX_USER = "nobody"
@@ -43,6 +44,8 @@ class ResearchState(vf.State):
     Attributes:
         seed: Dataset seed as hex, set by the task's setup before the agent
             starts. The agent must not learn it.
+        variation: The task's variation seed as hex
+            (`synthetic.variation_seed`), or "" for the default market.
         backtests_used: Backtest calls that ran; refused calls do not count.
         submitted: Whether `submit` has run.
         code: The submitted alpha code.
@@ -50,13 +53,14 @@ class ResearchState(vf.State):
     """
 
     seed: str = ""
+    variation: str = ""
     backtests_used: int = 0
     submitted: bool = False
     code: str = ""
     claimed_sharpe: float | None = None
 
 
-# What the toolset records; it only reads the seed.
+# What the toolset records; it only reads the seed and the variation.
 _EPISODE_FIELDS = ("backtests_used", "submitted", "code", "claimed_sharpe")
 
 
@@ -95,6 +99,65 @@ def describe_panel(panel: Panel) -> str:
     )
 
 
+def backtest_scope(data: EvalData, wf: WalkForward = WalkForward()) -> str:
+    """What a backtest measures on the visible data, in one sentence.
+
+    Args:
+        data: The visible data.
+        wf: Walk-forward settings.
+
+    Returns:
+        The predicted timestamps, the window and refit cadence, and how
+        Sharpe ratios are annualised and costed.
+    """
+    stamps = data.panel.timestamps
+    start = walkforward.start_timestamp(data.panel, wf)
+    n_scored = (stamps >= start).sum()
+    return (
+        f"walk-forward on the last {n_scored} of {stamps.len()} visible "
+        f"timestamps ({start} to {stamps.last()}); each block of "
+        f"{wf.refit_every} is predicted by a fresh fit on the {wf.window} "
+        f"timestamps before it. Sharpe ratios are annualised with "
+        f"{data.periods_per_year:g} periods per year; net Sharpe pays "
+        f"{data.cost * 1e4:g} bp per unit of turnover."
+    )
+
+
+def backtest_report(scope: str, performance: metrics.Performance, left: int) -> str:
+    """A backtest's reply: what was measured and how precise it is.
+
+    States numbers only, never advice, since advice would coach what the
+    eval measures (spec, Decision 27).
+
+    Args:
+        scope: Output of `backtest_scope`.
+        performance: The backtest's performance.
+        left: Backtests left.
+
+    Returns:
+        The reply text.
+    """
+    p = performance
+    if p.years == 0:
+        by_year = "fewer periods than one year"
+    else:
+        by_year = (
+            f"min {p.year_sharpe_min:.2f}, median {p.year_sharpe_median:.2f}, "
+            f"max {p.year_sharpe_max:.2f} over {p.years} consecutive blocks of "
+            "about one year of periods each"
+        )
+    return (
+        f"scope: {scope}\n"
+        f"net Sharpe: {p.sharpe:.2f} ± {p.sharpe_se:.2f} (standard error)\n"
+        f"gross Sharpe: {p.gross_sharpe:.2f}\n"
+        f"turnover: {p.turnover:.2f} per period (sum of absolute weight changes)\n"
+        f"rank IC: {p.ic:.4f} ± {p.ic_se:.4f} (standard error, "
+        f"{p.periods} periods)\n"
+        f"net Sharpe by year: {by_year}\n"
+        f"backtests left: {left}"
+    )
+
+
 class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
     """Tools for one episode.
 
@@ -111,28 +174,41 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
         super().__init__(config)
         self._episode = ResearchState()
         self._backtesting = asyncio.Lock()
-        self._description: str | None = None
+        # What describe and the backtest scope say about the visible data,
+        # built once and off the event loop.
+        self._summary: tuple[str, str] | None = None
 
     def _visible(self) -> functools.partial:
         """The loader of the visible periods, from the seed in the state."""
         if not self.state.seed:
             raise ValueError("the task is not set up: no dataset seed")
-        return functools.partial(synthetic.visible_data, int(self.state.seed, 16))
+        variation = int(self.state.variation, 16) if self.state.variation else None
+        return functools.partial(
+            synthetic.visible_data,
+            int(self.state.seed, 16),
+            synthetic.task_config(variation),
+        )
+
+    async def _summarise(self) -> tuple[str, str]:
+        """The description of the visible data and the backtest scope."""
+        if self._summary is None:
+            data = await asyncio.to_thread(self._visible())
+            self._summary = (describe_panel(data.panel), backtest_scope(data))
+        return self._summary
 
     def _publish(self) -> None:
         for name in _EPISODE_FIELDS:
             setattr(self.state, name, getattr(self._episode, name))
 
     @vf.tool
-    def describe(self) -> str:
+    async def describe(self) -> str:
         """Describes the visible data.
 
         Returns:
             Column names, timestamp range and number of assets.
         """
-        if self._description is None:
-            self._description = describe_panel(self._visible()().panel)
-        return self._description
+        description, _ = await self._summarise()
+        return description
 
     @vf.tool
     async def backtest(self, code: str) -> str:
@@ -145,8 +221,10 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
             code: Python source defining one subclass of `Alpha`.
 
         Returns:
-            The annualised net Sharpe ratio and mean rank IC, or why the
-            code failed, and the number of backtests left.
+            What was measured; net Sharpe with its standard error, gross
+            Sharpe and turnover; mean rank IC with its standard error; the
+            range of per-year net Sharpe; or why the code failed. Then the
+            number of backtests left.
 
         Raises:
             ValueError: If the call is refused.
@@ -173,11 +251,8 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
             return f"error: {e}\nbacktests left: {left}"
         finally:
             self._publish()
-        return (
-            f"net Sharpe: {performance.sharpe:.2f}\n"
-            f"rank IC: {performance.ic:.4f}\n"
-            f"backtests left: {left}"
-        )
+        _, scope = await self._summarise()
+        return backtest_report(scope, performance, left)
 
     @vf.tool
     def submit(self, code: str, claimed_sharpe: float) -> str:

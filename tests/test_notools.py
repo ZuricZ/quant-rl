@@ -15,7 +15,11 @@ import verifiers.v1 as vf  # noqa: E402
 from test_taskset import SECRET, _LocalRuntime  # noqa: E402
 
 from quant_research.servers.research import ResearchData  # noqa: E402
-from quant_research.taskset import QuantResearchConfig, QuantResearchTaskset  # noqa: E402
+from quant_research.taskset import (  # noqa: E402
+    SECRET_VAR,
+    QuantResearchConfig,
+    QuantResearchTaskset,
+)
 from quant_research_notools.taskset import (  # noqa: E402
     NoToolsConfig,
     NoToolsTask,
@@ -49,8 +53,9 @@ def task() -> NoToolsTask:
 
 
 def _local_task() -> NoToolsTask:
-    """Task 0 graded as this machine's user, without a sandbox user."""
-    config = NoToolsTaskConfig(secret=SECRET, sandbox_user=None)
+    """Task 0 on the default market, graded as this machine's user, without
+    a sandbox user."""
+    config = NoToolsTaskConfig(secret=SECRET, sandbox_user=None, vary=False)
     return NoToolsTask(ResearchData(split="eval", index=0), config)
 
 
@@ -64,13 +69,14 @@ def test_splits_match_the_main_taskset():
     assert [t.data.name for t in train.take(2)] == ["train-0", "train-1"]
 
 
-def test_secret_is_required():
+def test_secret_is_required(monkeypatch):
+    monkeypatch.delenv(SECRET_VAR, raising=False)
     with pytest.raises(ValueError, match="secret"):
         NoToolsTaskset(NoToolsConfig())
 
 
 def test_prompt_scores_every_feature_and_ret_on_visible_data(task):
-    visible = synthetic.visible_data(task.seed)
+    visible = synthetic.visible_data(task.seed, task.market)
     s = visible.panel.schema
     columns = [*s.features, s.ret]
     ics = metrics.mean_rank_ics(
@@ -125,11 +131,8 @@ def test_reward_is_the_hidden_ic_over_the_ceiling(tmp_path):
 
 
 def test_penalties_follow_the_main_reward_rule():
-    honest = dataclasses.asdict(
-        scoring.Score(
-            metrics.Performance(0.02, *[0.0] * 8), 0.0, 0, 0, 0, 0
-        )
-    )
+    performance = metrics.Performance(1000, 0.02, *[0.0] * 6, 3, *[0.0] * 4)
+    honest = dataclasses.asdict(scoring.Score(performance, 0.0, 0, 0, 0, 0))
     assert ic_reward(honest, 0.05) == pytest.approx(0.4)
     assert ic_reward({**honest, "lookahead": 1}, 0.05) == reward.FLAGGED_REWARD
     assert ic_reward({**honest, "implausible_ic": 1}, 0.05) == reward.FLAGGED_REWARD

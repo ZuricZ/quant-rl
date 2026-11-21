@@ -1,0 +1,50 @@
+# Tests and taskset validation on every pull request and push to main.
+# verifiers needs Linux (fcntl), so these tests cannot run on Windows.
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# No step needs to write to the repository.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Install
+        run: uv sync --locked
+
+      - name: Tests
+        run: uv run pytest -q -p no:cacheprovider
+
+      - name: Build the task image
+        run: docker build -t quant-research:0.1.0 .
+
+      # The sandbox tests need root, to run alpha code as `nobody`, so they
+      # skip in the step above. They run here inside the task image, where
+      # real episodes run their alpha code: on the runner itself, `nobody`
+      # cannot enter /home/runner to start uv's Python.
+      - name: Sandbox tests as root, in the task image
+        run: >-
+          docker run --rm
+          -v "$PWD/tests/test_sandbox.py:/tests/test_sandbox.py:ro"
+          quant-research:0.1.0
+          sh -c "pip install -q --root-user-action=ignore pytest &&
+          python -m pytest -q -p no:cacheprovider /tests/test_sandbox.py"
+
+      - name: Validate the tasksets in Docker
+        env:
+          # Validation only; not the secret of any published run.
+          QUANT_RESEARCH_SECRET: ci-validate
+        run: |
+          uv run vf-validate quant-research --runtime.type docker -n 2
+          uv run vf-validate quant-research-notools --runtime.type docker -n 2

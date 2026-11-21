@@ -1,12 +1,15 @@
 """Scripted baselines. Each returns alpha code and a claimed IC, the same
 submission an agent makes."""
 
+from typing import Any
+
 import polars as pl
 
 from quantenv import metrics
-from quantenv.panel import Panel
+from quantenv.panel import Panel, Schema
 
 _COMBINED = "_combined"
+_PAST = "_past_return"
 
 
 def column_code(name: str, sign: float = 1.0) -> str:
@@ -22,12 +25,18 @@ def column_code(name: str, sign: float = 1.0) -> str:
 def weighted_code(
     weights: dict[str, float],
     interactions: dict[tuple[str, str], float] | None = None,
+    past_return: tuple[int, float] | None = None,
+    schema: Schema = Schema(features=()),
 ) -> str:
-    """Alpha code for a fixed mix of columns and products of column pairs.
+    """Alpha code for a fixed mix of columns, products of column pairs and,
+    optionally, a past-return term.
 
     Args:
         weights: Column to weight.
         interactions: Column pair to the weight of their product.
+        past_return: Horizon h and weight of each asset's return summed over
+            its last h periods, standardised across assets per timestamp.
+        schema: Names of the timestamp, asset and return columns.
 
     Returns:
         The alpha code.
@@ -37,11 +46,45 @@ def weighted_code(
         f"{w!r} * pl.col({a!r}) * pl.col({b!r})"
         for (a, b), w in (interactions or {}).items()
     ]
+    features = ""
+    if past_return is not None:
+        horizon, weight = past_return
+        ts, asset, ret = schema.timestamp, schema.asset, schema.ret
+        terms.append(f"{weight!r} * pl.col({_PAST!r})")
+        features = (
+            "    def features(self, df):\n"
+            f"        past = pl.col({ret!r}).rolling_sum({horizon}, min_samples=1)\n"
+            f"        df = df.with_columns(past.over({asset!r}).alias({_PAST!r}))\n"
+            f"        z = pl.col({_PAST!r})\n"
+            "        return df.with_columns(\n"
+            f"            ((z - z.mean().over({ts!r})) / z.std().over({ts!r}))\n"
+            f"            .fill_nan(0.0).fill_null(0.0).alias({_PAST!r})\n"
+            "        )\n"
+        )
     return (
         "class WeightedAlpha(Alpha):\n"
-        "    def predict(self, df):\n"
+        + features
+        + "    def predict(self, df):\n"
         f"        return pl.sum_horizontal({', '.join(terms)})\n"
     )
+
+
+def oracle_code(truth: Any, schema: Schema) -> str:
+    """The oracle's alpha: every planted signal at its true weight.
+
+    Args:
+        truth: The simulator's ground truth, with `weights`, `interaction`,
+            `interaction_weight` and `ret_signal`
+            (`quantenv.sources.synthetic.GroundTruth`).
+        schema: The panel's column roles.
+
+    Returns:
+        The alpha code.
+    """
+    interactions = (
+        {truth.interaction: truth.interaction_weight} if truth.interaction else {}
+    )
+    return weighted_code(truth.weights, interactions, truth.ret_signal, schema)
 
 
 def template_code(features: list[str], cap: float = 0.1) -> str:
