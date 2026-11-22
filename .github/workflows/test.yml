@@ -52,10 +52,13 @@ jobs:
       # vf-validate never starts the research toolset, so it cannot see the
       # toolset fail to install in the container. One scripted episode does:
       # verifiers installs the toolset there, the stub model calls describe,
-      # backtest and submit, and the grader scores the submission.
+      # backtest and submit, and the grader scores the submission. The stub
+      # runs on the venv's python, not `uv run`, which would hold uv's cache
+      # lock and block setup-uv's cache prune after the job.
       - name: One scripted episode in Docker
         run: |
-          uv run python scripts/stub_model.py &
+          .venv/bin/python scripts/stub_model.py &
+          trap "kill $!" EXIT
           timeout 30 sh -c 'until curl -sf http://127.0.0.1:8765/v1/models > /dev/null; do sleep 1; done'
           uv run python scripts/run_models.py stub --secret ci-episode --tasks 1 --rollouts 1 --out outputs/ci
           uv run python - <<'EOF'
