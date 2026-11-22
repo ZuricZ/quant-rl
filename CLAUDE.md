@@ -1,6 +1,6 @@
 # quant-rl
 
-Quant research eval: an agent researches an alpha on simulated data and is scored on hidden data. The design is in `docs/Quant research eval build spec.md`; read it before changing the design. `quantenv/` is the core package and must stay generic so it works on real data later: simulator-specific knowledge lives only in `quantenv/sources/`, and checks take column names as arguments.
+Quant research eval: an agent researches an alpha on simulated data and is scored on hidden data. The design is in `docs/Quant research eval build spec.md`; read it before changing the design. `quantenv/` is the core package and must stay generic so it works on real data later: simulator-specific knowledge lives only in `quantenv/sources/`, and checks take column names as arguments. The repository root is the one Hub environment, `quant-research`: its `pyproject.toml` ships `quantenv` and both tasksets, and nothing they need may live outside it (spec, Decision 28).
 
 ## Coding rules
 

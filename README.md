@@ -143,6 +143,21 @@ OpenAI-compatible endpoint works, hosted or a local vLLM server
 across models and baselines to score the same tasks, and a fresh one for an
 evaluation nobody has seen.
 
+### From the Environments Hub
+
+The repository is one Hub environment, `quant-research`, and it carries both
+tasksets and `quantenv`:
+
+```bash
+prime env install zuricz/quant-research
+```
+
+After that, `vf-run quant-research` and `vf-run quant-research-notools` both
+work. The grader runs in the task image, so build it from this repository
+(above) or pass another image with `--env.taskset.task.image`. To publish a
+new version, bump `version` in `pyproject.toml` and run `prime env push` from
+the repository root.
+
 ## Training
 
 - **Train split.** The train split is infinite and never shares a dataset
@@ -160,6 +175,7 @@ evaluation nobody has seen.
 ## Layout
 
 ```
+pyproject.toml             the `quant-research` Hub environment: quantenv and both tasksets
 quantenv/                  core package, generic over any panel
   sources/synthetic.py     the simulator (the only simulator-specific code)
   walkforward.py           features once, then fit/predict per block
