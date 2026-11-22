@@ -48,3 +48,26 @@ jobs:
         run: |
           uv run vf-validate quant-research --runtime.type docker -n 2
           uv run vf-validate quant-research-notools --runtime.type docker -n 2
+
+      # vf-validate never starts the research toolset, so it cannot see the
+      # toolset fail to install in the container. One scripted episode does:
+      # verifiers installs the toolset there, the stub model calls describe,
+      # backtest and submit, and the grader scores the submission.
+      - name: One scripted episode in Docker
+        run: |
+          uv run python scripts/stub_model.py &
+          timeout 30 sh -c 'until curl -sf http://127.0.0.1:8765/v1/models > /dev/null; do sleep 1; done'
+          uv run python scripts/run_models.py stub --secret ci-episode --tasks 1 --rollouts 1 --out outputs/ci
+          uv run python - <<'EOF'
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, "scripts")
+          import results
+
+          (row,) = results.run_rows(Path("outputs/ci/stub")).iter_rows(named=True)
+          print(row)
+          assert row["ok"] and not row["error"], "the episode errored"
+          assert row["backtests_used"] == 1, "the backtest did not run"
+          assert row["invalid"] == 0 and row["sharpe"] is not None, "not graded"
+          EOF
