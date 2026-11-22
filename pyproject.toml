@@ -1,7 +1,10 @@
 [project]
 name = "quant-research"
-version = "0.1.0"
-description = "Simulated quant research datasets and scoring for a verifiers environment."
+version = "0.1.1"
+description = "Agentic quant research: find an alpha with limited backtests, scored on hidden data with lookahead checks."
+readme = "README.md"
+# Not a standard field: `prime env push` reads it for the Hub listing.
+tags = ["quant", "finance", "backtesting", "reward-hacking", "multi-turn", "tools", "single-turn"]
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "numpy>=2.0",
