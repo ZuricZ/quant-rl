@@ -6,7 +6,8 @@ each feature's score on them, since the model cannot run code; the model
 answers with alpha code in a Python block. The reward is the alpha's rank IC
 on the hidden periods, scaled by the IC ceiling, with the main taskset's
 penalties for invalid and flagged submissions. Datasets, seeds, the sandbox
-and the grader are the main taskset's (`quant_research.taskset`).
+and the grader are shared with the main taskset through `quantenv.taskset`
+and `quantenv.grading`.
 """
 
 import dataclasses

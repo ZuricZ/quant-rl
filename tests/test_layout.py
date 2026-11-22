@@ -3,6 +3,7 @@
 import pathlib
 import re
 import subprocess
+import sys
 import zipfile
 
 import pytest
@@ -18,6 +19,25 @@ def _imports_verifiers(path: pathlib.Path) -> bool:
 def test_only_taskset_and_grading_import_verifiers():
     users = {p.name for p in (ROOT / "quantenv").rglob("*.py") if _imports_verifiers(p)}
     assert users == {"taskset.py", "grading.py"}
+
+
+def test_the_rest_of_quantenv_runs_without_verifiers():
+    # Catches indirect imports too, e.g. `grade.py` importing `quantenv.taskset`,
+    # which would load verifiers in the container on every grading run.
+    modules = [
+        ".".join(p.relative_to(ROOT).with_suffix("").parts).removesuffix(".__init__")
+        for p in (ROOT / "quantenv").rglob("*.py")
+        if p.name not in ("taskset.py", "grading.py")
+    ]
+    code = (
+        "import importlib, sys\n"
+        f"for m in {modules!r}: importlib.import_module(m)\n"
+        "print('verifiers' in sys.modules)"
+    )
+    run = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, cwd=ROOT, check=True
+    )
+    assert run.stdout.strip() == "False"
 
 
 def test_environments_do_not_import_each_other():

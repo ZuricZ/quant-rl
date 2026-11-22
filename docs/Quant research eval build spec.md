@@ -106,7 +106,7 @@ In this eval, column dependence runs on the generator's leaky column; the taskse
 ## Code layout
 
 ```
-quantenv/                 core package, no verifiers import
+quantenv/                 core package; only taskset.py and grading.py import verifiers
   panel.py                Panel: frame + schema (timestamp, asset, features, ret, target); no ground truth
   sources/synthetic.py    the generator: seed -> Panel + ground truth
   alpha.py                Alpha base class; compile agent code into an Alpha subclass
