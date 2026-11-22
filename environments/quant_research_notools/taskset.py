@@ -129,12 +129,10 @@ def prompt(
     Returns:
         The prompt text.
     """
-    choices = prompt_choices(variation, config.style)
     return PROMPT.format(
         description=description,
         feature_table=table,
-        request=choices["request"],
-        example=choices["example"],
+        **prompt_choices(variation, config.style),
         **prompt_values(check_config, config),
     )
 

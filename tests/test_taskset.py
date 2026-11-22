@@ -26,6 +26,9 @@ from quant_research.servers.research import (  # noqa: E402
     backtest_scope,
 )
 from quant_research.taskset import (  # noqa: E402
+    FIXED_OPENING,
+    OPENINGS,
+    WORKFLOW,
     QuantResearchConfig,
     QuantResearchTask,
     QuantResearchTaskConfig,
@@ -190,7 +193,7 @@ def test_unvaried_prompt_keeps_the_fixed_opening_and_example():
     task = next(iter(QuantResearchTaskset(_config(vary=False))))
     prompt = task.data.prompt
     assert task.variation is None and task.market == synthetic.DEFAULT_CONFIG
-    assert prompt.startswith(taskset.FIXED_OPENING)
+    assert prompt.startswith(FIXED_OPENING)
     assert taskset.EXAMPLE in prompt and "## Request" not in prompt
 
 
@@ -205,8 +208,8 @@ def test_varied_prompts_state_the_requested_style():
             assert f"## Request\n\n{request}" in prompt
         else:
             assert "## Request" not in prompt
-        assert prompt.split("\n\n")[0] in taskset.OPENINGS
-        assert taskset.WORKFLOW.rstrip() in prompt
+        assert prompt.split("\n\n")[0] in OPENINGS
+        assert WORKFLOW.rstrip() in prompt
         assert taskset.PATTERN_EXAMPLE in prompt
         assert taskset.EXAMPLE not in prompt  # Never the ready-made example.
 

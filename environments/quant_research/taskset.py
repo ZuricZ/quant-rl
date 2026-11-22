@@ -15,6 +15,7 @@ setup puts the seed in the episode's shared state, read by the toolset.
 """
 
 import dataclasses
+import hashlib
 import itertools
 from collections.abc import Iterable, Iterator
 from typing import Any
@@ -46,6 +47,41 @@ from quantenv.taskset import (
 
 MAX_TURNS = 30
 _SCORE = "score"
+
+# The opening of tasks without variation (spec, Decision 26).
+FIXED_OPENING = (
+    "Research a trading alpha on a simulated panel of asset returns. You are "
+    "scored on the periods that directly follow the ones you can see."
+)
+
+# Varied tasks open with one of these goals, then `WORKFLOW`. The goals
+# differ in wording only; everything after them is worded the same in every
+# task.
+OPENINGS = (
+    "Your task: research a trading alpha on the simulated panel of asset "
+    "returns described below, and submit it.",
+    "Find a trading alpha in the simulated panel of asset returns described "
+    "below, then submit it.",
+    "Develop a trading alpha, a score that ranks assets by the return you "
+    "expect from them next period, on the simulated panel described below, "
+    "and submit it.",
+)
+
+WORKFLOW = """\
+What you deliver: Python code that defines one subclass of `Alpha` (the \
+format is under "Alpha" below), and the annualised net Sharpe ratio you \
+expect it to earn on the unseen periods.
+
+How to work:
+1. Read the data description and pick the columns that might predict \
+`fwd_return`.
+2. Write an alpha and call `backtest` on it. The reply gives net and gross \
+Sharpe, turnover and rank IC, with standard errors that tell signal from \
+noise.
+3. Improve the alpha within your backtest budget. Every call counts, \
+including calls whose code fails.
+4. Call `submit` with your final code and the net Sharpe you expect.
+"""
 
 PROMPT = (
     "{opening}\n\n"
@@ -84,6 +120,29 @@ than both.
 )
 
 
+def _pick(variation: int, label: str, n: int) -> int:
+    """A draw in range(n) from a task's variation seed, one per label."""
+    digest = hashlib.sha256(f"{label}\0{variation}".encode()).digest()
+    return int.from_bytes(digest[:4], "big") % n
+
+
+def opening(variation: int | None) -> str:
+    """The start of a task's prompt (spec, Decision 26).
+
+    Args:
+        variation: The task's variation seed, or None for a task without
+            variation, which gets `FIXED_OPENING` as in the runs before
+            Decision 26.
+
+    Returns:
+        The `opening` format value.
+    """
+    if variation is None:
+        return FIXED_OPENING
+    goal = OPENINGS[_pick(variation, "opening", len(OPENINGS))]
+    return f"{goal}\n\n{WORKFLOW.rstrip()}"
+
+
 def prompt(
     description: str,
     budget: int,
@@ -102,7 +161,7 @@ def prompt(
             states the IC ceiling.
         config: The task's generator parameters.
         variation: The task's variation seed, or None for a task without
-            variation; see `prompt_choices`.
+            variation; see `opening` and `prompt_choices`.
 
     Returns:
         The prompt text.
@@ -111,6 +170,7 @@ def prompt(
         description=description,
         budget=budget,
         max_turns=max_turns,
+        opening=opening(variation),
         **prompt_values(check_config, config),
         **prompt_choices(variation, config.style),
     )
