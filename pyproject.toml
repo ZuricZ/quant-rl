@@ -23,7 +23,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["quantenv", "environments/quant_research", "environments/quant_research_notools"]
-exclude = ["environments/*/pyproject.toml"]
+exclude = ["environments/*/pyproject.toml", "environments/*/hatch_build.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -17,12 +17,18 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 # The wheel holds this folder as `quant_research` and the shared core
-# `quantenv` from the repository root (spec, Decision 28).
+# `quantenv`, added by `hatch_build.py`. The sdist carries `quantenv` too, so
+# a wheel built from it works outside the repository, as when verifiers
+# installs the environment into a sandbox (spec, Decision 28).
 [tool.hatch.build.targets.wheel]
 bypass-selection = true
+
+[tool.hatch.build.targets.wheel.hooks.custom]
 
 [tool.hatch.build.targets.wheel.force-include]
 "__init__.py" = "quant_research/__init__.py"
 "taskset.py" = "quant_research/taskset.py"
 "servers" = "quant_research/servers"
+
+[tool.hatch.build.targets.sdist.force-include]
 "../../quantenv" = "quantenv"
