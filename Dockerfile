@@ -10,7 +10,7 @@
 ARG BASE=python:3.12-slim
 FROM ${BASE}
 WORKDIR /opt/quant-research
-COPY pyproject.toml ./
+COPY pyproject.toml README.md ./
 COPY quantenv ./quantenv
 COPY environments ./environments
 RUN pip install --no-cache-dir . && rm -rf /opt/quant-research
