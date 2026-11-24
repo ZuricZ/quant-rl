@@ -495,3 +495,24 @@ def test_main_taskset_baselines_claim_one_backtest(monkeypatch):
     assert backtests == ["c"] and row["backtests_used"] == 1
     # tanh of a robust Sharpe of 0.
     assert row["claim_gap"] == 0.0 and row["reward"] == 0.0
+
+
+def test_episode_row_survives_a_reward_that_was_never_scored():
+    trace = _trace(0, reward=0.4)
+    trace["rewards"] = {"hidden_ic": None}
+    assert results.episode_row("m-notools", trace)["reward"] is None
+
+
+def test_only_main_taskset_baselines_get_a_budget(monkeypatch, tmp_path):
+    columns = {c: [0.0, 0.0] for c in report.COLUMNS}
+    rows = pl.DataFrame(
+        {"baseline": ["naive", "naive-notools"], "task": [0, 0]}
+        | columns
+        | {"backtests_used": [1.0, None], "claim_gap": [0.5, None]}
+    )
+    rows.write_csv(tmp_path / "baselines.csv")
+    argv = ["results.py", "--baselines", str(tmp_path / "baselines.csv")]
+    monkeypatch.setattr(sys, "argv", argv + ["--rows", str(tmp_path / "rows.csv")])
+    results.main()
+    out = pl.read_csv(tmp_path / "rows.csv").sort("agent")
+    assert out.get_column("budget").to_list() == [1, None]

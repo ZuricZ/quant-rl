@@ -17,7 +17,8 @@ quant-research-notools`.
 The claim-gap analysis groups by backtest budget, which each chunk's resolved
 vf-run config records: within a budget the model nearly always uses all of
 it, so "backtests used" adds nothing. Baselines claim one visible backtest's
-Sharpe and count as budget 1. Only honest submissions count (valid, no check
+Sharpe and count as budget 1; no-tools baselines claim nothing and have no
+budget. Only honest submissions count (valid, no check
 fired); they are split into alphas with signal (|IC| above `--signal-ic`)
 and without.
 
@@ -74,7 +75,8 @@ def episode_row(
     """
     metrics = trace.get("metrics") or {}
     rewards = trace.get("rewards") or {}
-    reward = next((rewards[name] for name in REWARDS if name in rewards), {})
+    # A reward whose scoring did not finish is recorded as null.
+    reward = next((rewards[name] for name in REWARDS if rewards.get(name)), {})
     return {
         "agent": agent,
         "task": trace["task"]["data"]["index"],
@@ -304,7 +306,12 @@ def main() -> None:
         frames.append(
             pl.read_csv(args.baselines)
             .rename({"baseline": "agent"})
-            .with_columns(ok=pl.lit(True), stop=pl.lit("baseline"), budget=pl.lit(1))
+            # One backtest on the main taskset, none on the no-tools one.
+            .with_columns(
+                ok=pl.lit(True),
+                stop=pl.lit("baseline"),
+                budget=pl.col("backtests_used").cast(pl.Int64),
+            )
         )
     if not frames:
         parser.error("give run directories, --baselines, or both")
