@@ -68,7 +68,7 @@ Deterministic given a seed. Defaults (`synthetic.Config`), calibrated in Decisio
 | Interaction | The product of two of the real features, planted IC 0.012 |
 | Signal regimes | The signal's strength switches between on (1) and off (0.25), with chance 0.004 per period (mean regime length 250 periods) |
 | Returns | Signal plus Student t noise (4 degrees of freedom), per-asset volatility (log-normal spread 0.4), 3 common return factors with per-asset loadings (30% of variance), all scaled by a stochastic market volatility (log-volatility AR(1) with coefficient 0.98 and standard deviation 0.3) |
-| Noise features | 16, no relation to returns |
+| Noise features | 16, weight 0 in the return; a noise feature correlated with real ones still shows IC (see How the market is built) |
 | Leaky feature | 1, the cross-sectional rank of next-period return plus noise, IC about 0.3. It stands in for a feature that a broken upstream pipeline built with future data. |
 | Seeds with no leaky feature | All by default (Decision 20): the leaky slot becomes a fourth real feature with planted IC 0.018, so every seed has 20 features. `synthetic.LEAKY` plants the leak on 80% of seeds, as before. |
 | Cost | 2 bp per unit of turnover |
@@ -78,6 +78,54 @@ The table is the default market. Each task varies it (`synthetic.task_config`, D
 `synthetic.PLAIN` turns every mechanism off: independent Gaussian features and returns, no interaction, regimes or costs, and the original planted ICs (0.02 to 0.04; 0.06 for the replacement feature). The machinery tests that need exact planted ICs use it.
 
 The standardised next-period return is the regime strength times the signal (weighted real features plus the centred interaction) plus noise; `synthetic.generate` documents the full formula. Every recursion over time is causal, so the visible panel is the prefix of the full one. `ret` at t is the previous row's `fwd_return` for the same asset. The generator records which features are real, noise and leaky. That record is the ground truth; only the generator and the results table may read it.
+
+### How the market is built
+
+Three layers, each with one job: features, then a standardised return `z` that holds the signal, then the return, which adds scale and nuisance. Symbols are per asset i and period t.
+
+**1. Features: persistent, correlated Gaussians.**
+
+```
+f = √(1 − s_f) · u_f + Σ_k d_fk · g_k        |d_f|² = s_f ∈ [0.1, 0.6]
+x_t = φ · x_{t−1} + √(1 − φ²) · e_t           (each of u_f, g_1..g_3; e ~ N(0, 1))
+```
+
+- `u_f` is the feature's own process. `g_1..g_3` are shared by all features of the same asset. Every feature is N(0, 1) at every t.
+- **Persistence.** φ ∈ [0.8, 0.98] per feature; the g's share one φ. Each period keeps most of the last value, with a half-life of ln ½ / ln φ, from 3 to 34 periods. Ranks change slowly, so trading on them costs little. A feature also predicts t + 2 almost as well as t + 1.
+- **Correlation.** The g's are per asset, not market-wide. They make one asset's features move together, with corr(f, f′) = d_f · d_f′, the way two accounting ratios share a cause.
+
+**2. Standardised return `z`: where the signal is planted.**
+
+```
+z = s_t · S + w_r · R + √(1 − s_t² · Var S − w_r²) · ε
+S = Σ_real w_f · f + w_× · (f_a · f_b − ρ_ab)        w = 2 sin(π · IC / 6)
+```
+
+- **The weights.** `w` converts a planted Spearman IC into a Pearson correlation; that conversion holds exactly for bivariate normals, and here w ≈ 1.05 · IC.
+- **Regime.** `s_t` is 1 when the signal is on and 0.25 when it is off.
+- **Noise.** `ε` is Student t with 4 degrees of freedom, scaled to unit variance.
+- **Past-return term.** `R` is used on momentum and reversal tasks only. It is the sum of the asset's last h shocks ε, divided by √h. Those shocks are in `ret`, but `ret` also carries everything in layer 3, so past `ret` is only a proxy for R.
+- **Unit variance.** The noise is sized so that Var z = 1 in every regime. The signal explains about 0.1% of it (Var S ≈ 0.001). Intuition: one asset on one day is almost pure noise; the edge appears only when averaged over 200 assets and many periods.
+- **A feature's observed IC is not its planted IC.** A feature's correlation with z is s_t · Σ_j w_j · corr(f, f_j), summed over the real features j, not w_f. The two are equal only for independent features (`PLAIN`). As a result:
+  - A real feature's IC also carries the signal of the real features correlated with it, which can cancel its own. On seeds 0 and 1, over 6,000 periods, real features measured −0.005 to 0.017. Seed 1's `f10` has a positive planted IC but a negative observed one.
+  - A noise feature that shares g's with real features has real, persistent IC, although its weight is 0. On the same seeds, noise features measured up to ±0.010.
+  - A joint fit recovers the weights. Weighting each feature by its own IC double-counts the shared part, one reason the template trails the oracle (Decision 13).
+- **The interaction.** It is invisible to single-feature ICs. For Gaussians, the centred product f_a · f_b is uncorrelated with f_a and with f_b, so it is found only by testing products.
+
+**3. Return: scale and nuisance.**
+
+```
+fwd_return = 2% · v_t · ( √0.7 · σ_i · z + √(0.3 / 3) · β_i · F_t )
+```
+
+| Term | What it is | Cross-sectional IC | Sharpe |
+| --- | --- | --- | --- |
+| 2% (`return_vol`) | Typical daily single-stock volatility, about 32% a year | No effect | Gross Sharpe: no effect. Net: costs are in return units, so halving it doubles the effective cost |
+| `v_t` | Market volatility. log v is AR(1) with φ = 0.98 and standard deviation 0.3; mean of v is 1 | No effect: one positive number for all assets at t, so ranks are kept | Gross P&L scales with v_t and costs do not, so calm years lose more of the edge to costs. Clustering widens the spread of yearly Sharpe |
+| `σ_i` | Per-asset volatility, log-normal with spread 0.4 and mean square 1 | Small loss: a jumpy asset's rank is mostly its noise | Small |
+| `β_i · F_t` | 3 common factors with Student t(4) draws. Market loadings are N(1, 0.3), the other two N(0, 1) | Loss: loadings differ by asset, so factors add spread across assets that no feature explains | The dollar-neutral book hedges most of the market factor, not the other two |
+
+For features whose correlation with z is above 0.005, the measured IC against `fwd_return` is about 0.55 to 0.8 times that correlation (seeds 0 and 1). The loss comes from the √0.7 share above, the off regime and the fat tails.
 
 ## Scoring
 
