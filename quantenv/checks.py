@@ -5,10 +5,16 @@
 - column_dependence: does performance fall when columns are permuted across
   assets within each timestamp? Catches use of columns known or suspected to
   hold future information.
-- shifted_ics: rank IC against past, next and next-but-one returns.
-  `implausible_ic` flags an IC against the next return too high for honest
-  work: a backstop for lookahead the other checks miss, e.g. a leak built
-  into the data. A statistical flag, not proof.
+- ic_profile: rank IC of the fixed predictions against the returns realised
+  before t and those to come after it, period by period. Two flags read it,
+  both backstops for lookahead the other checks miss, e.g. a leak built into
+  the data, and both statistical flags, not proof. Neither judges the past
+  side: an alpha may be built from past returns, so its IC there can reach 1.
+  `implausible_ic` flags an IC against any future return too high for honest
+  work. `late_ic_peak` flags a profile that rises after the target: an honest
+  alpha knows later returns only through what persists, so its IC fades with
+  distance, while a leak too far ahead peaks where it leaks. Unlike the
+  ceiling, it does not depend on the IC's scale.
 
 Truncation compares per-period ranks, not raw values, and forgives rank swaps
 of near-ties too small to be anything but floating-point noise. Column
@@ -52,11 +58,17 @@ class CheckConfig:
             difference...
         dependence_min_drop: ...and larger than this share of the base
             run's |IC|.
-        max_ic: `implausible_ic` flags a mean rank IC against the next
+        max_ic: `implausible_ic` flags a mean rank IC against any future
             return with absolute value at or above this. Honest alphas on
             the default synthetic data reach about 0.03 at most (spec,
             Decision 24); peeking at the target gives close to 1. Set it
             per data source: real daily equity alphas rarely reach 0.1.
+        profile_lags: Lags of the IC profile on each side of t, so
+            `shifted_ics` covers -this to -1 and 1 to this.
+        peak_z: `late_ic_peak` flags a later lag whose mean |IC| exceeds
+            the one at +1 by more than this many standard errors of the
+            paired per-period difference...
+        peak_ratio: ...and is at least this many times the |IC| at +1.
     """
 
     n_cuts: int = 8
@@ -65,6 +77,9 @@ class CheckConfig:
     dependence_z: float = 4.0
     dependence_min_drop: float = 0.05
     max_ic: float = 0.05
+    profile_lags: int = 10
+    peak_z: float = 4.0
+    peak_ratio: float = 2.0
 
 
 def cut_points(timestamps: pl.Series, n: int, seed: int) -> list[Any]:
@@ -305,56 +320,112 @@ def column_dependence(
     return drop > config.dependence_z * (se or 0.0) and material
 
 
-def shifted_ics(panel: Panel, run: Run) -> dict[int, float]:
-    """Rank IC of the predictions against returns at several shifts.
+def ic_profile(panel: Panel, run: Run, lags: int) -> pl.DataFrame:
+    """Per-period rank IC of the predictions against returns at each lag.
+
+    The predictions stay fixed while the return slides one period at a time.
+    Lag 1 is the target, lag k the return k - 1 periods after it; lag -1 is
+    the return realised at t (`ret`), lag -k the one k - 1 periods before.
+    There is no lag 0. Periods too close to an end of the panel to have a
+    lag's return get IC 0 there.
 
     Args:
         panel: The data the predictions were made on.
         run: The walk-forward run.
+        lags: Lags on each side.
 
     Returns:
-        Shift to IC: -1 is the return realised at t (`ret`), 1 the target,
-        2 the return one period after the target.
+        One row per scored period: the timestamp, then one IC column per lag,
+        "-`lags`" to "-1" and "1" to "`lags`".
     """
     s = panel.schema
+    # The target shifted forward by `-shift` periods is the return at the lag.
+    shifts = {
+        **{str(-k): k for k in range(lags, 0, -1)},
+        **{str(k): 1 - k for k in range(1, lags + 1)},
+    }
     frame = (
         panel.frame.lazy()
         .select(
             s.timestamp,
-            s.ret,
-            s.target,
-            pl.col(s.target).shift(-1).over(s.asset).alias("_next"),
+            *(
+                pl.col(s.target).shift(n).over(s.asset).alias(f"_r{lag}")
+                for lag, n in shifts.items()
+            ),
         )
         .filter(pl.col(s.timestamp) >= run.start)
         .collect()
         .with_columns(run.predictions.get_column(PREDICTION))
     )
-    ics = metrics.mean_rank_ics(
-        frame,
-        {
-            "-1": (PREDICTION, s.ret),
-            "1": (PREDICTION, s.target),
-            "2": (PREDICTION, "_next"),
-        },
-        s.timestamp,
+    return metrics.period_rank_ics(
+        frame, {lag: (PREDICTION, f"_r{lag}") for lag in shifts}, s.timestamp
     )
-    return {int(k): v for k, v in ics.items()}
+
+
+def shifted_ics(profile: pl.DataFrame) -> dict[int, float]:
+    """Mean rank IC at each lag of an IC profile.
+
+    Args:
+        profile: Output of `ic_profile`.
+
+    Returns:
+        Lag to mean IC, e.g. -1 for the return realised at t (`ret`), 1 for
+        the target.
+    """
+    means = profile.drop(profile.columns[0]).mean().row(0, named=True)
+    return {int(lag): ic for lag, ic in means.items()}
 
 
 def implausible_ic(
     shifted: dict[int, float], config: CheckConfig = CheckConfig()
 ) -> bool:
-    """Whether the IC against the next return is too high to be honest.
+    """Whether the IC against any future return is too high to be honest.
 
-    Only shift 1 is judged. Shift -1 is the return already realised at t,
-    which an honest alpha may track. Shift 2 says nothing on its own:
-    persistent honest signals predict it too.
+    Only future lags are judged: the past ones are returns already realised
+    at t, which an honest alpha may track.
 
     Args:
         shifted: Output of `shifted_ics`.
         config: Check settings; uses `max_ic`.
 
     Returns:
-        True if |IC at shift 1| >= `config.max_ic`. False for a NaN IC.
+        True if |IC| >= `config.max_ic` at some lag of 1 or more. NaN ICs
+        never flag.
     """
-    return abs(shifted[1]) >= config.max_ic
+    return any(abs(ic) >= config.max_ic for lag, ic in shifted.items() if lag > 0)
+
+
+def late_ic_peak(profile: pl.DataFrame, config: CheckConfig = CheckConfig()) -> bool:
+    """Whether the IC profile peaks after the target.
+
+    Compares the |IC| at each lag after 1 with the |IC| at lag 1, period by
+    period, each signed by its own mean so a sign flip cannot hide a peak.
+    Flags a lag whose excess is larger than `config.peak_z` standard errors
+    of the paired per-period difference and whose |IC| is at least
+    `config.peak_ratio` times the one at lag 1. Past lags are ignored.
+
+    Args:
+        profile: Output of `ic_profile`.
+        config: Check settings; uses the peak thresholds.
+
+    Returns:
+        True if some later lag beats lag 1 on both counts.
+    """
+    first, *later = [c for c in profile.columns[1:] if int(c) > 0]
+    means = profile.select(pl.col(first, *later).mean()).row(0, named=True)
+
+    def oriented(lag: str) -> pl.Expr:
+        return pl.col(lag) * (-1.0 if means[lag] < 0 else 1.0)
+
+    excess = profile.select(
+        pl.struct(
+            mean=(oriented(k) - oriented(first)).mean(),
+            se=(oriented(k) - oriented(first)).std() / pl.len().sqrt(),
+        ).alias(k)
+        for k in later
+    ).row(0, named=True)
+    return any(
+        e["mean"] > config.peak_z * (e["se"] or 0.0)
+        and abs(means[k]) >= config.peak_ratio * abs(means[first])
+        for k, e in excess.items()
+    )

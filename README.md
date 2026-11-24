@@ -180,7 +180,7 @@ quantenv/                  core package, generic over any panel
   sources/synthetic.py     the simulator (the only simulator-specific code)
   walkforward.py           features once, then fit/predict per block
   sandbox.py, scoring.py   isolated, time-limited pipeline runs
-  checks.py                truncation, column dependence, shifted IC
+  checks.py                truncation, column dependence, IC profile
   metrics.py, reward.py    portfolio performance and the reward rule
 environments/
   quant_research/          verifiers taskset, research toolset, grader

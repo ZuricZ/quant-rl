@@ -297,7 +297,8 @@ def test_checks_work_on_a_plain_panel(plain_panel):
     assert not checks.truncation(honest, plain_panel, wf, seed=0)
     assert checks.column_dependence(peeking, plain_panel, ["peek"], wf, seed=0)
     assert checks.truncation(future, plain_panel, wf, seed=0)
-    shifted = checks.shifted_ics(plain_panel, walkforward.run(peeking, plain_panel, wf))
+    run = walkforward.run(peeking, plain_panel, wf)
+    shifted = checks.shifted_ics(checks.ic_profile(plain_panel, run, lags=2))
     assert shifted[1] > 0.5 and abs(shifted[2]) < 0.1
 
 
@@ -306,7 +307,8 @@ def test_implausible_ic_flags_peeking_not_honest_work(plain_panel):
     honest = _local(_predict_code("pl.col('x')"))
     peeking = _local(_predict_code("pl.col('peek')"))
     def shifted(runner):
-        return checks.shifted_ics(plain_panel, walkforward.run(runner, plain_panel, wf))
+        run = walkforward.run(runner, plain_panel, wf)
+        return checks.shifted_ics(checks.ic_profile(plain_panel, run, lags=2))
 
     # This panel plants an honest IC of about 0.06, above the default ceiling
     # tuned for the synthetic market, so it sets its own.
@@ -315,6 +317,78 @@ def test_implausible_ic_flags_peeking_not_honest_work(plain_panel):
     assert checks.implausible_ic(shifted(peeking), config)
     lenient = checks.CheckConfig(max_ic=1.0)
     assert not checks.implausible_ic(shifted(peeking), lenient)
+
+
+@pytest.fixture(scope="module")
+def late_panel(plain_panel):
+    # "late" peeks at the return after the target: a leak built into the data
+    # one period too far ahead, which the IC at +1 alone cannot see.
+    rng = np.random.default_rng(1)
+    frame = plain_panel.frame.with_columns(
+        late=pl.col("y").shift(-1).over("id")
+        + 0.5 * pl.Series(rng.standard_normal(plain_panel.frame.height))
+    )
+    return Panel(frame, dataclasses.replace(plain_panel.schema, features=("x", "late")))
+
+
+def _profile(panel, column):
+    wf = walkforward.WalkForward(refit_every=20, window=20)
+    run = walkforward.run(_local(_predict_code(f"pl.col('{column}')")), panel, wf)
+    return checks.ic_profile(panel, run, lags=5)
+
+
+def test_ic_profile_has_one_column_per_lag_on_each_side(late_panel):
+    profile = _profile(late_panel, "late")
+    assert profile.columns == ["t", "-5", "-4", "-3", "-2", "-1", "1", "2", "3", "4", "5"]
+    shifted = checks.shifted_ics(profile)
+    assert shifted[2] > 0.5 and abs(shifted[1]) < 0.1 and abs(shifted[3]) < 0.1
+
+
+def test_ic_profile_past_lags_are_the_realised_returns(late_panel):
+    # r is the return realised at t (-1); y.shift(1) one period before (-2).
+    frame = late_panel.frame.with_columns(r2=pl.col("r").shift(1).over("id"))
+    panel = Panel(frame, dataclasses.replace(late_panel.schema, features=("r", "r2")))
+    assert checks.shifted_ics(_profile(panel, "r"))[-1] == pytest.approx(1.0)
+    assert checks.shifted_ics(_profile(panel, "r2"))[-2] == pytest.approx(1.0)
+
+
+def test_implausible_ic_judges_every_future_lag_but_no_past_one(late_panel):
+    config = checks.CheckConfig(max_ic=0.2)
+    # The leak at +2 reaches the ceiling although the IC at +1 does not.
+    late = checks.shifted_ics(_profile(late_panel, "late"))
+    assert abs(late[1]) < 0.2 and checks.implausible_ic(late, config)
+    # Tracking the realised return gives IC 1 at -1: known, so allowed.
+    realised = checks.shifted_ics(_profile(late_panel, "r"))
+    assert realised[-1] == pytest.approx(1.0)
+    assert not checks.implausible_ic(realised, config)
+
+
+def test_late_ic_peak_flags_a_leak_past_the_target(late_panel):
+    late = _profile(late_panel, "late")
+    assert checks.late_ic_peak(late)
+    # Without any ceiling: the peak's shape, not its size, gives it away.
+    lenient = checks.CheckConfig(max_ic=1.0)
+    assert not checks.implausible_ic(checks.shifted_ics(late), lenient)
+
+
+def test_late_ic_peak_flags_a_sign_flipped_leak(late_panel):
+    flipped = late_panel.with_frame(
+        late_panel.frame.with_columns(late=-pl.col("late"))
+    )
+    assert checks.late_ic_peak(_profile(flipped, "late"))
+
+
+@pytest.mark.parametrize("column", ["x", "peek", "r"])
+def test_late_ic_peak_spares_profiles_that_peak_at_the_target(late_panel, column):
+    # Honest x and the target read peek both peak at +1; the latter is the
+    # IC ceiling's job. r peaks at -1, which the check ignores.
+    assert not checks.late_ic_peak(_profile(late_panel, column))
+
+
+def test_late_ic_peak_needs_both_significance_and_size(late_panel):
+    late = _profile(late_panel, "late")
+    assert not checks.late_ic_peak(late, checks.CheckConfig(peak_z=1e6))
+    assert not checks.late_ic_peak(late, checks.CheckConfig(peak_ratio=1e6))
 
 
 def test_refits_train_on_a_fixed_sliding_window(data):
@@ -420,16 +494,27 @@ def test_score_lookahead_submission_is_penalised():
     )
 
 
+def test_score_flags_an_ic_peak_past_the_target():
+    # Reads the return after the target: IC near 0 at +1, so only the
+    # profile's peak at +2 makes the IC implausible.
+    code = _predict_code("pl.col('ret').shift(-2).over('asset')")
+    s = scoring.score_submission(code, 0.1, _hidden(), SMALL_WF)
+    assert abs(s.shifted_ics[1]) < checks.CheckConfig().max_ic
+    assert s.implausible_ic == 1 and _reward(s) == reward.FLAGGED_REWARD
+
+
 def test_score_oracle_submission_gets_its_squashed_robust_net_sharpe():
     truth = synthetic.ground_truth(1, SMALL)
     s = scoring.score_submission(
         baselines.weighted_code(truth.weights), 0.05, _hidden(), SMALL_WF
     )
     assert s.used_leak == 0 and s.lookahead == 0 and s.invalid == 0
+    assert s.implausible_ic == 0
     expected = math.tanh(s.performance.robust_sharpe / reward.SHARPE_SCALE)
     assert _reward(s) == pytest.approx(expected)
     assert _reward(s) > 0
-    assert set(s.shifted_ics) == {-1, 1, 2}
+    lags = checks.CheckConfig().profile_lags
+    assert set(s.shifted_ics) == set(range(-lags, 0)) | set(range(1, lags + 1))
 
 
 def test_costs_come_from_the_data():

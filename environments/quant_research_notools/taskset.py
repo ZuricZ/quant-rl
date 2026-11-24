@@ -76,9 +76,9 @@ follow the visible ones, walk-forward with the same {window}-timestamp \
 training window. The score is its mean rank IC against `fwd_return` there, \
 divided by {max_ic:g}. A reply without a Python block, or whose alpha fails, \
 scores {invalid_reward:g}; an alpha caught reading the future scores \
-{flagged_reward:g}, and so does a rank IC against the next return of \
-{max_ic:g} or more, which honest alphas do not reach. Any honest alpha scores \
-higher than both.
+{flagged_reward:g}, and so does a rank IC of {max_ic:g} or more against any \
+future return, or one higher against a later return than against the next: \
+honest alphas do neither. Any honest alpha scores higher than both.
 """
 )
 

@@ -95,6 +95,7 @@ def test_prompt_states_the_answer_format_and_penalties(task):
     prompt = task.data.prompt
     assert "```python block" in prompt and "backtest" not in prompt
     assert f"divided by {checks.CheckConfig().max_ic:g}" in prompt
+    assert "higher against a later return than against the next" in prompt
     assert f"scores {reward.INVALID_REWARD:g}" in prompt
     assert f"future scores {reward.FLAGGED_REWARD:g}" in prompt
 
