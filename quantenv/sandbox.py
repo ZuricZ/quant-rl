@@ -82,7 +82,9 @@ class Sandbox:
             its files removed after each session. Needs root.
         memory_bytes: RLIMIT_AS, the child's address space.
         max_processes: RLIMIT_NPROC: processes and threads of the user's,
-            system-wide. polars starts one thread per core.
+            system-wide. polars starts about three threads per core in
+            each process, and without `user` the caller's own processes
+            (the scorer, its worker) count too.
         max_file_bytes: RLIMIT_FSIZE, the largest file the child can write.
     """
 
@@ -91,7 +93,7 @@ class Sandbox:
     user: str | None = None
     memory_bytes: int = 16 * _GiB
     max_processes: int = dataclasses.field(
-        default_factory=lambda: max(256, 8 * (os.cpu_count() or 1))
+        default_factory=lambda: max(512, 32 * (os.cpu_count() or 1))
     )
     max_file_bytes: int = _GiB
 
