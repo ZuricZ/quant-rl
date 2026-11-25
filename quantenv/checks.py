@@ -505,35 +505,49 @@ def _decide(
 _PHI = [i / 100 for i in range(101)]
 
 
-def _leave_one_out_decay(means: list[float]) -> tuple[list[float], list[float]]:
+def _leave_one_out_decay(means: pl.LazyFrame) -> pl.LazyFrame:
     """Fits IC(k) = a * phi**(k - 1) to all lags but one, for each lag.
 
-    Least squares on the means over a grid of phi; for each phi the best a
-    is closed-form, and the best phi maximises (w . m)**2 / (w . w).
+    Least squares over a grid of phi, for every draw, left-out lag and phi
+    at once: with weights w = phi**(k - 1) on the kept lags, the best a is
+    (w . m) / (w . w), and the best phi maximises (w . m)**2 / (w . w).
 
     Args:
-        means: Mean IC at lags 1, 2, ...
+        means: Mean IC `m` per `draw` and `lag` (1, 2, ...).
 
     Returns:
-        Per lag: the residual of its mean from the fit of the others,
-        signed so that positive is above the fit in the fit's direction,
-        and the fit's prediction there.
+        Per `draw` and left-out lag `out`: `m`, the lag's mean IC;
+        `prediction`, the fit of the other lags there; and `residual`, the
+        mean minus the prediction, signed so that positive is above the fit
+        in the fit's direction.
     """
-    residuals, predictions = [], []
-    for k, m_k in enumerate(means):
-        best = (float("-inf"), 0.0, 0.0)
-        for phi in _PHI:
-            w = [phi**j for j in range(len(means))]
-            ww = sum(w[j] ** 2 for j in range(len(means)) if j != k)
-            if ww == 0:
-                continue
-            wm = sum(w[j] * means[j] for j in range(len(means)) if j != k)
-            if wm * wm / ww > best[0]:
-                best = (wm * wm / ww, wm / ww, w[k])
-        _, a, w_k = best
-        predictions.append(a * w_k)
-        residuals.append((1.0 if a >= 0 else -1.0) * (m_k - a * w_k))
-    return residuals, predictions
+    keys = ["draw", "out"]
+    w = pl.col("phi").pow(pl.col("lag") - 1)
+    kept = pl.col("lag") != pl.col("out")
+    a = pl.col("wm") / pl.col("ww")
+    prediction = a * pl.col("phi").pow(pl.col("out") - 1)
+    return (
+        means.join(pl.LazyFrame({"phi": _PHI}), how="cross")
+        .join(means.select(pl.col("lag").unique().alias("out")), how="cross")
+        .group_by(*keys, "phi")
+        .agg(
+            ww=(w * w).filter(kept).sum(),
+            wm=(w * pl.col("m")).filter(kept).sum(),
+            m=pl.col("m").filter(~kept).first(),
+        )
+        .filter(pl.col("ww") > 0)
+        .sort(*keys, "phi")
+        .group_by(keys, maintain_order=True)
+        .agg(pl.all().get((pl.col("wm") ** 2 / pl.col("ww")).arg_max()))
+        .select(
+            *keys,
+            "m",
+            prediction.alias("prediction"),
+            (pl.when(a >= 0).then(1.0).otherwise(-1.0) * (pl.col("m") - prediction)).alias(
+                "residual"
+            ),
+        )
+    )
 
 
 def smooth_decay(
@@ -562,21 +576,37 @@ def smooth_decay(
     future = profile.select(c for c in profile.columns[1:] if int(c) > 0)
     if _too_short(future.height, config):
         return _UNJUDGED
-    means = list(future.mean().row(0))
-    residuals, predictions = _leave_one_out_decay(means)
-    replicates = [
-        _leave_one_out_decay(list(row))
-        for row in pl.concat(
-            future[rows].mean()
-            for rows in bootstrap_rows(
-                future.height, config.bootstrap_block, config.bootstrap_draws, seed
-            )
-        ).iter_rows()
-    ]
-    se_residual = pl.DataFrame([r for r, _ in replicates], orient="row").std().row(0)
-    se_prediction = pl.DataFrame([p for _, p in replicates], orient="row").std().row(0)
-    tail = [abs(f) > config.tail_z * se for f, se in zip(predictions, se_prediction)]
-    return _decide(residuals, se_residual, means, tail, config.decay_z, config.decay_share)
+    resamples = bootstrap_rows(
+        future.height, config.bootstrap_block, config.bootstrap_draws, seed
+    )
+    # Draw 0 is the run itself, draws 1.. its bootstrap resamples.
+    means = (
+        pl.concat([future.mean(), *(future[rows].mean() for rows in resamples)])
+        .with_row_index("draw")
+        .unpivot(index="draw", variable_name="lag", value_name="m")
+        .with_columns(pl.col("lag").cast(pl.Int32))
+    )
+    fits = _leave_one_out_decay(means.lazy())
+    se = (
+        fits.filter(pl.col("draw") > 0)
+        .group_by("out")
+        .agg(
+            se_residual=pl.col("residual").std(),
+            se_prediction=pl.col("prediction").std(),
+        )
+    )
+    point = fits.filter(pl.col("draw") == 0).join(se, on="out").sort("out").collect()
+    tail = point.select(
+        pl.col("prediction").abs() > config.tail_z * pl.col("se_prediction")
+    ).to_series()
+    return _decide(
+        point.get_column("residual").to_list(),
+        point.get_column("se_residual").to_list(),
+        point.get_column("m").to_list(),
+        tail.to_list(),
+        config.decay_z,
+        config.decay_share,
+    )
 
 
 def delay_profile(panel: Panel, run: Run, delays: int) -> pl.DataFrame:
