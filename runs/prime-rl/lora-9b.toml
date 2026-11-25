@@ -1,0 +1,87 @@
+# Hosted Training on Prime: LoRA RL of Qwen3.5-9B on the no-tools taskset
+# (quant-research-notools). Same run as notools-smoke.toml, adapted for a
+# dedicated hosted run instead of a local prime-rl checkout:
+#
+# - Qwen3.5-9B, the model of the Day 6 and 7 results; Hosted Training does not
+#   offer Qwen3-4B-Instruct-2507.
+# - 8192 completion tokens, as in the qwen3_5-9b registry entry, so training
+#   and the before/after eval (spec, Decision 29) sample alike; Qwen3.5-9B
+#   thinks first and runs out of 2048 tokens before writing code. seq_len
+#   leaves room for the prompt (about 2,000 tokens).
+# - Rollouts are graded in Prime sandboxes with the pushed task image
+#   (`prime images push quant-research:0.1.0 --context .`), not local Docker.
+# - 10 steps: a smoke run that shows the pipeline trains, checkpoints and
+#   scores, not a result.
+#
+#   prime train validate runs/prime-rl/lora-9b.toml
+#   prime train runs/prime-rl/lora-9b.toml -e QUANT_RESEARCH_SECRET
+#
+# The secret picks the datasets and stays out of this file. Validated on 25
+# November 2026 against the hosted runtime's prime-rl 4cec527 (v0.11.0) with
+# 2048 tokens; not yet submitted. Unchecked until submission: whether a
+# dedicated run accepts LoRA, and whether the runner finds the
+# quant-research-notools taskset, which ships inside the Hub environment
+# zuricz/quant-research.
+mode = "rl"
+max_steps = 10
+seq_len = 12288
+
+[deployment]
+num_train_gpus = 1
+num_infer_gpus = 1
+
+[model]
+name = "Qwen/Qwen3.5-9B"
+
+[trainer.optim]
+lr = 1e-5
+weight_decay = 0.0
+
+[trainer.model.lora]
+rank = 8
+dropout = 0.0
+target_modules = [
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj"
+]
+
+# Small batches: grading, not generation, bounds the step time.
+[orchestrator]
+batch_size = 32
+
+[orchestrator.train]
+group_size = 8
+
+[orchestrator.train.sampling]
+max_completion_tokens = 8192
+
+[[orchestrator.train.source]]
+name = "quant-research-notools"
+env.taskset.id = "quant-research-notools"
+env.taskset.split = "train"
+env.agent.harness.id = "null"
+env.agent.runtime.type = "prime"
+env.taskset.task.image = "prime/zuricz/quant-research:0.1.0"
+
+[orchestrator.eval]
+interval = 50
+
+[orchestrator.eval.sampling]
+max_completion_tokens = 8192
+
+[[orchestrator.eval.source]]
+name = "quant-research-notools-eval"
+env.taskset.id = "quant-research-notools"
+env.taskset.split = "eval"
+env.agent.harness.id = "null"
+env.agent.runtime.type = "prime"
+env.taskset.task.image = "prime/zuricz/quant-research:0.1.0"
+
+[ckpt] # Checkpoint at the end of training
+
+[inference]
