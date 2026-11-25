@@ -508,14 +508,16 @@ def _leave_one_out_decay(means: pl.LazyFrame) -> pl.LazyFrame:
     A log-linear regression, log|IC(k)| = log|a| + (k - 1) * log(phi), per
     draw and left-out lag; the fit's sign is that of the kept lags' summed
     IC. Weights IC(k)**2 make it least squares on the IC scale to first
-    order, so lags near 0, whose logs are pure noise, barely count.
+    order, so lags near 0, whose logs are pure noise, barely count. phi is
+    not capped at 1: kept lags that rise extrapolate upward.
 
     Args:
         means: Mean IC `m` per `draw` and `lag` (1, 2, ...).
 
     Returns:
         Per `draw` and left-out lag `out`: `m`, the lag's mean IC;
-        `prediction`, the fit of the other lags there; and `residual`, the mean minus the
+        `prediction`, the fit of the other lags there, 0 if fewer than two
+        of them have a nonzero IC; and `residual`, the mean minus the
         prediction, signed so that positive is above the fit in the fit's
         direction.
     """
@@ -532,6 +534,8 @@ def _leave_one_out_decay(means: pl.LazyFrame) -> pl.LazyFrame:
     ).with_columns(direction=pl.when(kept).then(pl.col("m")).sum().over(keys).sign())
     fits = (
         pairs.filter(kept & (pl.col("m") != 0))
+        # Two points at least for a slope and an intercept.
+        .filter(pl.len().over(keys) >= 2)
         .group_by(keys)
         .agg(
             pds.lin_reg(

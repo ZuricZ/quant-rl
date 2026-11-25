@@ -215,3 +215,12 @@ def test_null_targets_are_skipped(decay_panel):
     assert not checks.smooth_decay(_profile(holes, "slow"), seed=0).flagged
     assert not checks.memory_decay(_delays(holes, "slow"), seed=0).flagged
     assert checks.memory_decay(_delays(holes, "leak"), seed=0).flagged
+
+
+def test_a_profile_with_one_nonzero_lag_is_judged_without_crashing(decay_panel):
+    # IC exactly 0 at every lag but the target, e.g. a signal that ranks the
+    # assets apart in a single period: the other lags have no log to fit.
+    profile = _profile(decay_panel, "leak").with_columns(
+        pl.col(c).mul(0.0) for c in _profile(decay_panel, "leak").columns[1:] if int(c) > 1
+    )
+    assert not checks.smooth_decay(profile, seed=0).flagged
