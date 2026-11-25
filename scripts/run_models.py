@@ -1,4 +1,4 @@
-"""Runs models from `runs/models.toml` on the taskset with `vf-run`.
+"""Runs models from `runs/models.toml` on a taskset with `vf-run`.
 
 Each model's tasks run in chunks of `--chunk` tasks, one `vf-run` per chunk,
 written to `<out>/<model>/tasks-<first>-<last>/` (`traces.jsonl` and the
@@ -28,13 +28,20 @@ and pass `--image` for `--runtime prime`.
 
 Usage:
     uv run python scripts/run_models.py --secret S qwen3_5-9b [...]
-        [--split eval] [--tasks 30] [--rollouts 3] [--concurrency 4]
+        [--taskset quant-research] [--split eval] [--tasks 30] [--rollouts 3]
+        [--concurrency 4]
         [--chunk 4] [--runtime docker] [--out outputs/models]
         [--budget N] [--vf-config overrides.toml] [--dry-run]
+
+`--taskset quant-research-notools` runs the single-reply taskset instead,
+the one prime-rl trains on, and names the run `<model>-notools`, so it never
+shares a directory with the same model's main-taskset runs. Its episodes are
+the same datasets as the main taskset's with the same secret and split.
 
 `--budget N` sets the backtest budget (the taskset's default otherwise) and
 names the run `<model>-budget<N>`, so runs of one model at several budgets
 sit side by side; `results.py` pools them per model in its claim-gap plot.
+The no-tools taskset has no backtests, so it takes no budget.
 
 `--vf-config` passes a TOML file of vf-run settings, for those its flags
 cannot set, e.g. the check settings:
@@ -60,7 +67,8 @@ ROOT = Path(__file__).resolve().parent.parent
 # vf-run from this interpreter's environment, so an unactivated venv works.
 VF_RUN = str(Path(sys.executable).with_name("vf-run"))
 REGISTRY = ROOT / "runs" / "models.toml"
-TASKSET = "quant-research"
+# The main taskset first: the default.
+TASKSETS = ("quant-research", "quant-research-notools")
 # Sent as the key to local servers without auth.
 LOCAL_KEY_VAR = "LOCAL_MODEL_API_KEY"
 
@@ -74,16 +82,20 @@ def load_models(path: Path = REGISTRY) -> dict[str, dict[str, Any]]:
 MANIFEST = "manifest.json"
 
 
-def run_name(name: str, budget: int | None) -> str:
+def run_name(name: str, budget: int | None, taskset: str = TASKSETS[0]) -> str:
     """The run's name.
 
     Args:
         name: The registry entry's name.
         budget: The backtest budget, or None for the taskset's default.
+        taskset: The taskset id.
 
     Returns:
-        `name`, with `-budget<N>` appended when a budget is set.
+        `name`, with `-notools` appended for the no-tools taskset and
+        `-budget<N>` when a budget is set.
     """
+    if taskset != TASKSETS[0]:
+        name = f"{name}-notools"
     return name if budget is None else f"{name}-budget{budget}"
 
 
@@ -196,7 +208,8 @@ def command(
     """The `vf-run` command for one chunk of one model's tasks.
 
     Args:
-        name: The entry's name; with the budget, the run's name.
+        name: The entry's name; with the taskset and budget, the run's name
+            (`run_name`).
         entry: The model's registry entry.
         args: Parsed command-line arguments.
         first: First task of the chunk.
@@ -209,7 +222,7 @@ def command(
     """
     cmd = [
         VF_RUN if Path(VF_RUN).exists() else "vf-run",
-        TASKSET,
+        args.taskset,
         "--model",
         entry["model"],
         "--client.base-url",
@@ -225,9 +238,9 @@ def command(
         "--max-concurrent",
         str(args.concurrency),
         "--output-dir",
-        str(out / run_name(name, args.budget)),
+        str(out / run_name(name, args.budget, args.taskset)),
         "--run.name",
-        run_name(name, args.budget),
+        run_name(name, args.budget, args.taskset),
         "--run.dir",
         chunk_dir(first, n),
         "--env.taskset.split",
@@ -261,6 +274,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("models", nargs="+", help="entry names in the registry")
     parser.add_argument("--secret", required=True)
+    parser.add_argument("--taskset", choices=TASKSETS, default=TASKSETS[0])
     parser.add_argument("--split", choices=["eval", "train"], default="eval")
     parser.add_argument("--tasks", type=_positive, default=30)
     parser.add_argument("--rollouts", type=_positive, default=3)
@@ -281,6 +295,8 @@ def main() -> None:
         parser.error(f"not in {args.registry}: {', '.join(unknown)}")
     if args.budget is not None and args.budget < 0:
         parser.error(f"--budget must be at least 0, got {args.budget}")
+    if args.budget is not None and args.taskset != TASKSETS[0]:
+        parser.error(f"--budget needs backtests, which {args.taskset} has none of")
     env = os.environ | {LOCAL_KEY_VAR: os.environ.get(LOCAL_KEY_VAR, "EMPTY")}
     incomplete = []
     with tempfile.TemporaryDirectory(prefix="run_models-") as private:
@@ -292,7 +308,7 @@ def main() -> None:
             key_var = entry.get("api_key_var")
             if key_var and not os.environ.get(key_var) and not args.dry_run:
                 sys.exit(f"{name}: set {key_var} to the endpoint's API key")
-            run_dir = out / run_name(name, args.budget)
+            run_dir = out / run_name(name, args.budget, args.taskset)
             expected = manifest(entry, args)
             differ = check_manifest(run_dir, expected)
             if differ:

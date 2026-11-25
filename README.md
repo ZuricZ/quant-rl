@@ -195,6 +195,29 @@ sandbox time; the image build cost about $0.01 and storage about $0.001 a day.
   submissions and teach honest claims, then real anonymised factor data split
   into train, validation and locked eras.
 
+### Evaluating training
+
+Compare the model before and after training on the no-tools eval split: 30
+fixed tasks that never share a dataset with the train split. Use the same
+secret, tasks, rollouts and sampling for both runs, and the base model the
+run starts from as "before".
+
+```bash
+# The baselines, scored as the no-tools taskset scores a reply.
+uv run python scripts/run_baselines.py --secret my-secret --taskset quant-research-notools --out notools-baselines.csv
+
+# Before: the base model. After: the same with the trained checkpoint's entry.
+uv run python scripts/run_models.py --secret my-secret --taskset quant-research-notools <model> --tasks 30 --rollouts 4
+
+uv run python scripts/results.py outputs/models/<model>-notools --baselines notools-baselines.csv
+```
+
+No-tools runs are named `<model>-notools`. Their reward is the hidden rank IC
+over the IC ceiling, not the main taskset's Sharpe-based reward, so compare
+rewards only within one taskset. Compare the invalid and flagged rates too,
+task by task (`results.py --rows`): with 30 tasks, a change smaller than the
+spread across rollouts is noise.
+
 ## Layout
 
 ```

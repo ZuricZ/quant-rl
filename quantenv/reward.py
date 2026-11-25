@@ -42,3 +42,22 @@ def reward(score: Mapping[str, Any]) -> float:
     if score["used_leak"] or score["lookahead"] or score["implausible_ic"]:
         return FLAGGED_REWARD
     return math.tanh(score["performance"]["robust_sharpe"] / SHARPE_SCALE)
+
+
+def ic_reward(score: Mapping[str, Any], max_ic: float) -> float:
+    """The reward of the no-tools taskset for one scored submission.
+
+    Args:
+        score: A `scoring.Score` as a dict.
+        max_ic: The IC ceiling of the checks; an honest IC divided by it lies
+            in (-1, 1).
+
+    Returns:
+        `INVALID_REWARD` if the submission was invalid, `FLAGGED_REWARD` if a
+        lookahead check fired, else the hidden-period rank IC over `max_ic`.
+    """
+    if score["invalid"]:
+        return INVALID_REWARD
+    if score["used_leak"] or score["lookahead"] or score["implausible_ic"]:
+        return FLAGGED_REWARD
+    return score["performance"]["ic"] / max_ic

@@ -52,15 +52,18 @@ jobs:
       # vf-validate never starts the research toolset, so it cannot see the
       # toolset fail to install in the container. One scripted episode does:
       # verifiers installs the toolset there, the stub model calls describe,
-      # backtest and submit, and the grader scores the submission. The stub
+      # backtest and submit, and the grader scores the submission. A second
+      # episode, of the no-tools taskset, checks the route of the before and
+      # after RL evaluation through run_models.py and results.py. The stub
       # runs on the venv's python, not `uv run`, which would hold uv's cache
       # lock and block setup-uv's cache prune after the job.
-      - name: One scripted episode in Docker
+      - name: Scripted episodes in Docker
         run: |
           .venv/bin/python scripts/stub_model.py &
           trap "kill $!" EXIT
           timeout 30 sh -c 'until curl -sf http://127.0.0.1:8765/v1/models > /dev/null; do sleep 1; done'
           uv run python scripts/run_models.py stub --secret ci-episode --tasks 1 --rollouts 1 --out outputs/ci
+          uv run python scripts/run_models.py stub --taskset quant-research-notools --secret ci-episode --tasks 1 --rollouts 1 --out outputs/ci
           uv run python - <<'EOF'
           import sys
           from pathlib import Path
@@ -73,4 +76,10 @@ jobs:
           assert row["ok"] and not row["error"], "the episode errored"
           assert row["backtests_used"] == 1, "the backtest did not run"
           assert row["invalid"] == 0 and row["sharpe"] is not None, "not graded"
+
+          (row,) = results.run_rows(Path("outputs/ci/stub-notools")).iter_rows(named=True)
+          print(row)
+          assert row["ok"] and not row["error"], "the no-tools episode errored"
+          assert row["invalid"] == 0 and row["ic"] is not None, "no-tools not graded"
+          assert row["reward"] is not None and row["budget"] is None, "no-tools reward"
           EOF
