@@ -6,10 +6,19 @@ optionally the per-task rows of `scripts/run_baselines.py --out`. Episodes
 that ended in an infrastructure error (the trace is not `ok`) are left out of
 the table and counted separately: the model is not to blame.
 
+Runs of either taskset work. The reward column is each taskset's own: tanh of
+the hidden net Sharpe over 3 for `quant-research`, the hidden rank IC over the
+IC ceiling for `quant-research-notools` (`quantenv.reward`), so compare
+rewards only within one taskset. No-tools episodes make no claim and run no
+backtest, so they have no claim gap and no budget, and the claim-gap tables
+leave them out; compare them with `run_baselines.py --taskset
+quant-research-notools`.
+
 The claim-gap analysis groups by backtest budget, which each chunk's resolved
 vf-run config records: within a budget the model nearly always uses all of
 it, so "backtests used" adds nothing. Baselines claim one visible backtest's
-Sharpe and count as budget 1. Only honest submissions count (valid, no check
+Sharpe and count as budget 1; no-tools baselines claim nothing and have no
+budget. Only honest submissions count (valid, no check
 fired); they are split into alphas with signal (|IC| above `--signal-ic`)
 and without.
 
@@ -29,7 +38,8 @@ import polars as pl
 
 from quantenv import report
 
-REWARD = "hidden_sharpe"
+# Each taskset's one reward: quant-research's, then quant-research-notools'.
+REWARDS = ("hidden_sharpe", "hidden_ic")
 # Run names of one model at several budgets end like this (run_models.py).
 BUDGET_SUFFIX = r"-budget\d+$"
 # Trace metric names, by the column `report.table` reads.
@@ -64,7 +74,9 @@ def episode_row(
         status.
     """
     metrics = trace.get("metrics") or {}
-    reward = (trace.get("rewards") or {}).get(REWARD) or {}
+    rewards = trace.get("rewards") or {}
+    # A reward whose scoring did not finish is recorded as null.
+    reward = next((rewards[name] for name in REWARDS if rewards.get(name)), {})
     return {
         "agent": agent,
         "task": trace["task"]["data"]["index"],
@@ -86,13 +98,14 @@ def chunk_budget(chunk: Path, run_dir: Path) -> int | None:
         run_dir: The run directory it belongs to.
 
     Returns:
-        The budget from the chunk's resolved config; without one, from the
-        run's `-budget<N>` name (`run_models.py`); else None.
+        The budget from the chunk's resolved config, None for a taskset
+        without tools; without a config, from the run's `-budget<N>` name
+        (`run_models.py`); else None.
     """
     config = chunk / "configs" / "resolved" / "run.json"
     if config.exists():
-        resolved = json.loads(config.read_text())
-        return resolved["env"]["taskset"]["task"]["tools"]["budget"]
+        task = json.loads(config.read_text())["env"]["taskset"]["task"]
+        return task.get("tools", {}).get("budget")
     named = re.search(r"-budget(\d+)$", run_dir.name)
     return int(named.group(1)) if named else None
 
@@ -293,7 +306,12 @@ def main() -> None:
         frames.append(
             pl.read_csv(args.baselines)
             .rename({"baseline": "agent"})
-            .with_columns(ok=pl.lit(True), stop=pl.lit("baseline"), budget=pl.lit(1))
+            # One backtest on the main taskset, none on the no-tools one.
+            .with_columns(
+                ok=pl.lit(True),
+                stop=pl.lit("baseline"),
+                budget=pl.col("backtests_used").cast(pl.Int64),
+            )
         )
     if not frames:
         parser.error("give run directories, --baselines, or both")

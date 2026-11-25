@@ -14,7 +14,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from quantenv import report
+from quantenv import metrics, report, scoring
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -29,11 +29,14 @@ def _script(name: str):
 run_models = _script("run_models")
 results = _script("results")
 stub_model = _script("stub_model")
+run_baselines = _script("run_baselines")
+NOTOOLS = "quant-research-notools"
 
 
 def _args(**overrides):
     defaults = dict(
         secret="s3cret",
+        taskset="quant-research",
         split="eval",
         tasks=30,
         rollouts=3,
@@ -103,6 +106,18 @@ def test_budget_sets_the_flag_and_names_the_run():
     assert _flag(cmd, "--run.name") == "qwen3_5-9b-budget3"
 
 
+def test_notools_runs_its_taskset_under_its_own_name():
+    cmd = _command("qwen3_5-9b", _args(taskset=NOTOOLS))
+    assert cmd[1] == NOTOOLS and _flag(cmd, "--run.name") == "qwen3_5-9b-notools"
+    assert _flag(cmd, "--output-dir") == str(Path("outputs/models/qwen3_5-9b-notools"))
+    assert "--env.taskset.task.tools.budget" not in cmd
+
+
+def test_main_refuses_a_budget_for_the_notools_taskset(monkeypatch, tmp_path):
+    with pytest.raises(SystemExit):
+        _main(monkeypatch, tmp_path, "--taskset", NOTOOLS, "--budget", "3")
+
+
 def test_vf_run_accepts_every_registry_entry(tmp_path):
     pytest.importorskip("fcntl")
     names = list(run_models.load_models())
@@ -116,6 +131,20 @@ def test_vf_run_accepts_every_registry_entry(tmp_path):
     assert done.returncode == 0, done.stderr[-2000:]
     assert "dry run:" in done.stdout
     assert not any(tmp_path.iterdir())
+
+
+def test_vf_run_accepts_the_notools_taskset(tmp_path):
+    pytest.importorskip("fcntl")
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "run_models.py"), "stub"]
+        + ["--taskset", NOTOOLS, "--secret", "x", "--dry-run", "--out", str(tmp_path)]
+        + ["--tasks", "2"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    assert f"vf-run {NOTOOLS}" in done.stdout
 
 
 def test_chunk_is_done_only_when_every_episode_finished_ok(tmp_path):
@@ -416,3 +445,74 @@ def test_run_rows_takes_the_budget_from_the_run_name_without_a_config(tmp_path):
     assert results.run_rows(tmp_path / "m-budget7").get_column("budget").to_list() == [
         7
     ]
+
+
+def test_episode_row_reads_the_notools_reward():
+    trace = _trace(0, reward=0.4, raw_ic=0.02)
+    trace["rewards"] = {"hidden_ic": trace["rewards"].pop("hidden_sharpe")}
+    row = results.episode_row("m-notools", trace)
+    assert row["reward"] == 0.4 and row["ic"] == 0.02
+    assert row["claim_gap"] is None and row["backtests_used"] is None
+
+
+def test_run_rows_gives_a_notools_run_no_budget(tmp_path):
+    _chunk(tmp_path / "m-notools", "tasks-00-01", [0, 1])
+    config = tmp_path / "m-notools" / "tasks-00-01" / "configs" / "resolved" / "run.json"
+    config.write_text(json.dumps({"env": {"taskset": {"task": {"secret": None}}}}))
+    rows = results.run_rows(tmp_path / "m-notools")
+    assert rows.get_column("budget").to_list() == [None, None]
+
+
+def _baseline_rows(monkeypatch, taskset: str) -> tuple[list[dict], list[str]]:
+    # IC 0.02 and every Sharpe 0.
+    performance = metrics.Performance(1000, 0.02, *[0.0] * 6, 3, *[0.0] * 4)
+    backtests = []
+
+    def backtest(code, load):
+        backtests.append(code)
+        return performance
+
+    def score_submission(code, claim, load):
+        return scoring.Score(performance, claim - performance.sharpe, 0, 0, 0, 0)
+
+    monkeypatch.setattr(run_baselines, "codes", lambda seed, market: {"naive": "c"})
+    monkeypatch.setattr(run_baselines.scoring, "backtest", backtest)
+    monkeypatch.setattr(run_baselines.scoring, "score_submission", score_submission)
+    rows = run_baselines.score_task(0, "s", "eval", vary=False, taskset=taskset)
+    return rows, backtests
+
+
+def test_notools_baselines_score_as_a_reply_does(monkeypatch):
+    (row,), backtests = _baseline_rows(monkeypatch, NOTOOLS)
+    assert backtests == []
+    assert row["claim_gap"] is None and row["backtests_used"] is None
+    # The hidden IC over the default IC ceiling, 0.05.
+    assert row["reward"] == pytest.approx(0.4)
+
+
+def test_main_taskset_baselines_claim_one_backtest(monkeypatch):
+    (row,), backtests = _baseline_rows(monkeypatch, "quant-research")
+    assert backtests == ["c"] and row["backtests_used"] == 1
+    # tanh of a robust Sharpe of 0.
+    assert row["claim_gap"] == 0.0 and row["reward"] == 0.0
+
+
+def test_episode_row_survives_a_reward_that_was_never_scored():
+    trace = _trace(0, reward=0.4)
+    trace["rewards"] = {"hidden_ic": None}
+    assert results.episode_row("m-notools", trace)["reward"] is None
+
+
+def test_only_main_taskset_baselines_get_a_budget(monkeypatch, tmp_path):
+    columns = {c: [0.0, 0.0] for c in report.COLUMNS}
+    rows = pl.DataFrame(
+        {"baseline": ["naive", "naive-notools"], "task": [0, 0]}
+        | columns
+        | {"backtests_used": [1.0, None], "claim_gap": [0.5, None]}
+    )
+    rows.write_csv(tmp_path / "baselines.csv")
+    argv = ["results.py", "--baselines", str(tmp_path / "baselines.csv")]
+    monkeypatch.setattr(sys, "argv", argv + ["--rows", str(tmp_path / "rows.csv")])
+    results.main()
+    out = pl.read_csv(tmp_path / "rows.csv").sort("agent")
+    assert out.get_column("budget").to_list() == [1, None]

@@ -161,6 +161,29 @@ work. The grader runs in the task image, so build it from this repository
 new version, bump `version` in `pyproject.toml` and run `prime env push` from
 the repository root.
 
+### On Prime sandboxes
+
+Episodes and grading can run in Prime's sandboxes instead of local Docker.
+Push the task image to your private Prime registry; it is built remotely from
+the Dockerfile, so push again after changing the code:
+
+```bash
+prime images push quant-research:0.1.0 --context .
+```
+
+Then pass the pushed reference, with `PRIME_API_KEY` set:
+
+```bash
+uv run python scripts/stub_model.py &
+uv run python scripts/run_models.py --secret my-secret stub --tasks 1 --rollouts 1 --runtime prime --image prime/zuricz/quant-research:0.1.0
+```
+
+`vf-run` and the model endpoint stay on your machine; the sandbox reaches the
+model through Prime's tunnel, so the machine needs outbound TCP to Prime's
+tunnel server (a network that allows only HTTPS through a proxy is not
+enough). On 23 November 2026 one stub episode took 1.5 minutes and $0.0004 of
+sandbox time; the image build cost about $0.01 and storage about $0.001 a day.
+
 ## Training
 
 - **Train split.** The train split is infinite and never shares a dataset
@@ -174,6 +197,29 @@ the repository root.
 - **Next.** The plan is synthetic training first, to remove invalid
   submissions and teach honest claims, then real anonymised factor data split
   into train, validation and locked eras.
+
+### Evaluating training
+
+Compare the model before and after training on the no-tools eval split: 30
+fixed tasks that never share a dataset with the train split. Use the same
+secret, tasks, rollouts and sampling for both runs, and the base model the
+run starts from as "before".
+
+```bash
+# The baselines, scored as the no-tools taskset scores a reply.
+uv run python scripts/run_baselines.py --secret my-secret --taskset quant-research-notools --out notools-baselines.csv
+
+# Before: the base model. After: the same with the trained checkpoint's entry.
+uv run python scripts/run_models.py --secret my-secret --taskset quant-research-notools <model> --tasks 30 --rollouts 4
+
+uv run python scripts/results.py outputs/models/<model>-notools --baselines notools-baselines.csv
+```
+
+No-tools runs are named `<model>-notools`. Their reward is the hidden rank IC
+over the IC ceiling, not the main taskset's Sharpe-based reward, so compare
+rewards only within one taskset. Compare the invalid and flagged rates too,
+task by task (`results.py --rows`): with 30 tasks, a change smaller than the
+spread across rollouts is noise.
 
 ## Layout
 

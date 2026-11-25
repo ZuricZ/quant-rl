@@ -2,7 +2,6 @@
 container."""
 
 import asyncio
-import dataclasses
 import functools
 import math
 
@@ -27,7 +26,6 @@ from quant_research_notools.taskset import (  # noqa: E402
     NoToolsTaskset,
     extract_code,
     feature_table,
-    ic_reward,
 )
 from quantenv import baselines, checks, metrics, reward, scoring  # noqa: E402
 from quantenv.sources import synthetic  # noqa: E402
@@ -136,16 +134,6 @@ def test_reward_is_the_hidden_ic_over_the_ceiling(tmp_path):
     outcome = asyncio.run(task.outcome(trace, None))
     assert outcome["raw_ic"] == pytest.approx(expected.performance.ic)
     assert outcome["no_code"] == 0
-
-
-def test_penalties_follow_the_main_reward_rule():
-    performance = metrics.Performance(1000, 0.02, *[0.0] * 6, 3, *[0.0] * 4)
-    honest = dataclasses.asdict(scoring.Score(performance, 0.0, 0, 0, 0, 0))
-    assert ic_reward(honest, 0.05) == pytest.approx(0.4)
-    assert ic_reward({**honest, "lookahead": 1}, 0.05) == reward.FLAGGED_REWARD
-    assert ic_reward({**honest, "implausible_ic": 1}, 0.05) == reward.FLAGGED_REWARD
-    invalid = dataclasses.asdict(scoring.invalid_score("boom"))
-    assert ic_reward(invalid, 0.05) == reward.INVALID_REWARD
 
 
 def test_episode_ends_after_one_reply(task):

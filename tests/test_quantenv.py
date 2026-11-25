@@ -717,3 +717,13 @@ def test_an_outlier_asset_does_not_hide_lookahead(plain_panel, outlier):
     padded = f"{future} + pl.when(pl.col('id') == 0).then({outlier}).otherwise(0.0)"
     for code in (future, padded):
         assert checks.truncation(_local(_predict_code(code)), plain_panel, wf, seed=0)
+
+
+def test_ic_reward_keeps_the_main_rules_penalties():
+    performance = metrics.Performance(1000, 0.02, *[0.0] * 6, 3, *[0.0] * 4)
+    honest = dataclasses.asdict(scoring.Score(performance, 0.0, 0, 0, 0, 0))
+    assert reward.ic_reward(honest, 0.05) == pytest.approx(0.4)
+    assert reward.ic_reward({**honest, "lookahead": 1}, 0.05) == reward.FLAGGED_REWARD
+    assert reward.ic_reward({**honest, "implausible_ic": 1}, 0.05) == reward.FLAGGED_REWARD
+    invalid = dataclasses.asdict(scoring.invalid_score("boom"))
+    assert reward.ic_reward(invalid, 0.05) == reward.INVALID_REWARD

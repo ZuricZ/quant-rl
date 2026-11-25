@@ -159,25 +159,6 @@ def extract_code(reply: str) -> str | None:
     return blocks[-1] if blocks else None
 
 
-def ic_reward(score: dict[str, Any], max_ic: float) -> float:
-    """The reward of one scored submission.
-
-    Args:
-        score: A `scoring.Score` as a dict.
-        max_ic: The IC ceiling of the checks; an honest IC divided by it lies
-            in (-1, 1).
-
-    Returns:
-        The main taskset's penalties for invalid and flagged submissions
-        (`quantenv.reward`), else the hidden-period rank IC over `max_ic`.
-    """
-    if score["invalid"]:
-        return reward.INVALID_REWARD
-    if score["used_leak"] or score["lookahead"] or score["implausible_ic"]:
-        return reward.FLAGGED_REWARD
-    return score["performance"]["ic"] / max_ic
-
-
 class NoToolsTaskConfig(vf.TaskConfig):
     """Task settings.
 
@@ -299,7 +280,7 @@ class NoToolsTask(vf.Task[ResearchData, vf.State, NoToolsTaskConfig]):
         """Hidden-period rank IC over the IC ceiling; -1.5 if a check fired,
         -1 if the reply has no code or the alpha is invalid."""
         score = await self.raw_score(trace, runtime)
-        return ic_reward(score, self.config.check_config.max_ic)
+        return reward.ic_reward(score, self.config.check_config.max_ic)
 
     async def validate(self, runtime: vf.Runtime) -> bool:
         """Grades the oracle alpha: it must score above 0 and pass the checks."""
@@ -314,7 +295,7 @@ class NoToolsTask(vf.Task[ResearchData, vf.State, NoToolsTaskConfig]):
             self.config.check_config,
             self.variation,
         )
-        return ic_reward(score, self.config.check_config.max_ic) > 0
+        return reward.ic_reward(score, self.config.check_config.max_ic) > 0
 
 
 class NoToolsTaskset(vf.Taskset[NoToolsTask, NoToolsConfig]):

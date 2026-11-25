@@ -78,7 +78,7 @@ class CheckConfig:
             signal's own autocorrelation keeps by more than this many
             bootstrap standard errors. Stricter than `decay_z`: slow honest
             signals, such as momentum, keep more memory than edge (spec,
-            Decision 29)...
+            Decision 30)...
         decay_share: ...and, for both, by more than this share of the IC
             expected there.
         tail_z: `smooth_decay` judges a lag only where the decay predicted
@@ -705,7 +705,7 @@ def memory_decay(
     # part that predicts. A slow signal with much non-predictive content,
     # such as 20-period momentum, keeps more memory than edge, so this check
     # reads its honest decay as a leak: on the synthetic market it flagged 3
-    # of 120 honest runs at z 4.1 to 4.9 (spec, Decision 29), hence
+    # of 120 honest runs at z 4.1 to 4.9 (spec, Decision 30), hence
     # `memory_z` = 6 while the exploits measured from z 6.6. The margin is
     # thin and rests on simulated data. Possible improvements:
     # - Estimate memory from the predictive part only: weight the

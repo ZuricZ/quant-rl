@@ -1,7 +1,7 @@
 """Measures the IC decay checks on honest alphas and on known exploits.
 
 The calibration behind `CheckConfig.decay_z`, `memory_z` and `decay_share`
-(spec, Decision 29). On eval tasks 0..N-1 of `--secret`, every alpha runs
+(spec, Decision 30). On eval tasks 0..N-1 of `--secret`, every alpha runs
 walk-forward on the hidden periods, in process, and both decay checks score
 it with the task's check seed. Honest set:
 - naive, template and oracle (see `scripts/run_baselines.py`);
