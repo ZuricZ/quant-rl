@@ -34,6 +34,7 @@ import dataclasses
 from typing import Any
 
 import polars as pl
+import polars_ds as pds
 
 from quantenv import metrics, walkforward
 from quantenv.panel import Panel
@@ -501,51 +502,58 @@ def _decide(
     )
 
 
-# Decay rates `smooth_decay` tries: 0 (all IC at +1) to 1 (no decay).
-_PHI = [i / 100 for i in range(101)]
-
-
 def _leave_one_out_decay(means: pl.LazyFrame) -> pl.LazyFrame:
     """Fits IC(k) = a * phi**(k - 1) to all lags but one, for each lag.
 
-    Least squares over a grid of phi, for every draw, left-out lag and phi
-    at once: with weights w = phi**(k - 1) on the kept lags, the best a is
-    (w . m) / (w . w), and the best phi maximises (w . m)**2 / (w . w).
+    A log-linear regression, log|IC(k)| = log|a| + (k - 1) * log(phi), per
+    draw and left-out lag. The fit's direction is the sign of the kept
+    lags' summed IC; a lag on the other side of 0 has no log and is left
+    out. Weights IC(k)**2 make it least squares on the IC scale to first
+    order, so lags near 0, whose logs are pure noise, barely count.
 
     Args:
         means: Mean IC `m` per `draw` and `lag` (1, 2, ...).
 
     Returns:
         Per `draw` and left-out lag `out`: `m`, the lag's mean IC;
-        `prediction`, the fit of the other lags there; and `residual`, the
-        mean minus the prediction, signed so that positive is above the fit
-        in the fit's direction.
+        `prediction`, the fit of the other lags there (0 if fewer than two
+        lags lie on the fit's side of 0); and `residual`, the mean minus the
+        prediction, signed so that positive is above the fit in the fit's
+        direction.
     """
     keys = ["draw", "out"]
-    w = pl.col("phi").pow(pl.col("lag") - 1)
     kept = pl.col("lag") != pl.col("out")
-    a = pl.col("wm") / pl.col("ww")
-    prediction = a * pl.col("phi").pow(pl.col("out") - 1)
-    return (
-        means.join(pl.LazyFrame({"phi": _PHI}), how="cross")
-        .join(means.select(pl.col("lag").unique().alias("out")), how="cross")
-        .group_by(*keys, "phi")
+    side = pl.col("m") * pl.col("direction")
+    coef = pl.col("coef")
+    prediction = (
+        (pl.col("direction") * (coef.list.get(1) + coef.list.get(0) * (pl.col("out") - 1)).exp())
+        .fill_nan(0.0)
+        .fill_null(0.0)
+    )
+    pairs = means.join(
+        means.select(pl.col("lag").unique().alias("out")), how="cross"
+    ).with_columns(direction=pl.when(kept).then(pl.col("m")).sum().over(keys).sign())
+    fits = (
+        pairs.filter(kept & (side > 0))
+        .filter(pl.len().over(keys) >= 2)
+        .group_by(keys)
         .agg(
-            ww=(w * w).filter(kept).sum(),
-            wm=(w * pl.col("m")).filter(kept).sum(),
-            m=pl.col("m").filter(~kept).first(),
+            pds.lin_reg(
+                (pl.col("lag") - 1).cast(pl.Float64),
+                target=side.log(),
+                add_bias=True,
+                weights=pl.col("m") ** 2,
+            ).alias("coef")
         )
-        .filter(pl.col("ww") > 0)
-        .sort(*keys, "phi")
-        .group_by(keys, maintain_order=True)
-        .agg(pl.all().get((pl.col("wm") ** 2 / pl.col("ww")).arg_max()))
+    )
+    return (
+        pairs.filter(~kept)
+        .join(fits, on=keys, how="left")
         .select(
             *keys,
             "m",
             prediction.alias("prediction"),
-            (pl.when(a >= 0).then(1.0).otherwise(-1.0) * (pl.col("m") - prediction)).alias(
-                "residual"
-            ),
+            (pl.col("direction") * (pl.col("m") - prediction)).alias("residual"),
         )
     )
 

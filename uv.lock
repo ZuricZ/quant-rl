@@ -965,6 +965,22 @@ wheels = [
 ]
 
 [[package]]
+name = "polars-ds"
+version = "0.14.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "polars" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/09/8e/77c4e230abdf5d961505e100ab98225d54d4ecb616412a0ea51a2c0f14cc/polars_ds-0.14.0.tar.gz", hash = "sha256:0a65034546d9c1eb246b762942f9db9a8e87dc1a3d34833e1eaf79d1e3a94faa", size = 2264336, upload-time = "2026-10-30T22:01:29.598Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/74/7a/676000ea4e6931e71851187670f70e3c204ae5edc6f4b638abddb7804a7a/polars_ds-0.14.0-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:e6c6c09523521714dbc1b05a5efb347caedc314ef5ad80d818cc1bd02c14b35e", size = 21519046, upload-time = "2026-10-30T22:01:16.934Z" },
+    { url = "https://files.pythonhosted.org/packages/40/21/d6221551f7b234e5e38d8765166ae164a9d91ca0bcbebe2e6b0c31cc46bf/polars_ds-0.14.0-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:5b072f33c9a271e4ce6cb589a67692d9c3b953ebffd2bca83401d10a89b97e7d", size = 19104362, upload-time = "2026-10-30T22:01:19.37Z" },
+    { url = "https://files.pythonhosted.org/packages/cc/a0/04b663924651d6b8d11d89709a6b88d8b85b7dd3a86283750bebcdf1ba8d/polars_ds-0.14.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:53e9eb1c6debb238f4ca136895c40f972f4e67cce737b6ac9325ad0396a069b8", size = 22308568, upload-time = "2026-10-30T22:01:21.728Z" },
+    { url = "https://files.pythonhosted.org/packages/3e/69/75ab04e123a3c799fc36424020bdbb27c63399d8227461b9f3c5d566e33c/polars_ds-0.14.0-cp39-abi3-manylinux_2_24_aarch64.whl", hash = "sha256:d4d8781e40d0ebeb3c25c9af581528f1c48912aedf11928fe5a895f2bf73d875", size = 19730961, upload-time = "2026-10-30T22:01:24.11Z" },
+    { url = "https://files.pythonhosted.org/packages/22/46/f852e92feb4990e4e5aa258872e333f29b912a14887ad6af4cee4be527ec/polars_ds-0.14.0-cp39-abi3-win_amd64.whl", hash = "sha256:59d9abc76f8a9dcd73733ad048d62178d820c0f4808e4e0d8b6797164faceba5", size = 23689530, upload-time = "2026-10-30T22:01:26.593Z" },
+]
+
+[[package]]
 name = "polars-runtime-32"
 version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1288,6 +1304,7 @@ source = { editable = "." }
 dependencies = [
     { name = "numpy" },
     { name = "polars" },
+    { name = "polars-ds" },
     { name = "verifiers" },
 ]
 
@@ -1301,6 +1318,7 @@ dev = [
 requires-dist = [
     { name = "numpy", specifier = ">=2.0" },
     { name = "polars", specifier = ">=2.1.0" },
+    { name = "polars-ds", specifier = ">=0.14.0" },
     { name = "verifiers", specifier = ">=0.4.1,<0.5" },
 ]
 
