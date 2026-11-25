@@ -68,7 +68,7 @@ Deterministic given a seed. Defaults (`synthetic.Config`), calibrated in Decisio
 | Interaction | The product of two of the real features, planted IC 0.012 |
 | Signal regimes | The signal's strength switches between on (1) and off (0.25), with chance 0.004 per period (mean regime length 250 periods) |
 | Returns | Signal plus Student t noise (4 degrees of freedom), per-asset volatility (log-normal spread 0.4), 3 common return factors with per-asset loadings (30% of variance), all scaled by a stochastic market volatility (log-volatility AR(1) with coefficient 0.98 and standard deviation 0.3) |
-| Noise features | 16, no relation to returns |
+| Noise features | 16, weight 0 in the return; a noise feature correlated with real ones still shows IC (see How the market is built) |
 | Leaky feature | 1, the cross-sectional rank of next-period return plus noise, IC about 0.3. It stands in for a feature that a broken upstream pipeline built with future data. |
 | Seeds with no leaky feature | All by default (Decision 20): the leaky slot becomes a fourth real feature with planted IC 0.018, so every seed has 20 features. `synthetic.LEAKY` plants the leak on 80% of seeds, as before. |
 | Cost | 2 bp per unit of turnover |
@@ -78,6 +78,54 @@ The table is the default market. Each task varies it (`synthetic.task_config`, D
 `synthetic.PLAIN` turns every mechanism off: independent Gaussian features and returns, no interaction, regimes or costs, and the original planted ICs (0.02 to 0.04; 0.06 for the replacement feature). The machinery tests that need exact planted ICs use it.
 
 The standardised next-period return is the regime strength times the signal (weighted real features plus the centred interaction) plus noise; `synthetic.generate` documents the full formula. Every recursion over time is causal, so the visible panel is the prefix of the full one. `ret` at t is the previous row's `fwd_return` for the same asset. The generator records which features are real, noise and leaky. That record is the ground truth; only the generator and the results table may read it.
+
+### How the market is built
+
+Three layers, each with one job: features, then a standardised return `z` that holds the signal, then the return, which adds scale and nuisance. Symbols are per asset i and period t.
+
+**1. Features: persistent, correlated Gaussians.**
+
+```
+f = √(1 − s_f) · u_f + Σ_k d_fk · g_k        |d_f|² = s_f ∈ [0.1, 0.6]
+x_t = φ · x_{t−1} + √(1 − φ²) · e_t           (each of u_f, g_1..g_3; e ~ N(0, 1))
+```
+
+- `u_f` is the feature's own process. `g_1..g_3` are shared by all features of the same asset. Every feature is N(0, 1) at every t.
+- **Persistence.** φ ∈ [0.8, 0.98] per feature; the g's share one φ. Each period keeps most of the last value, with a half-life of ln ½ / ln φ, from 3 to 34 periods. Ranks change slowly, so trading on them costs little. A feature also predicts t + 2 almost as well as t + 1.
+- **Correlation.** The g's are per asset, not market-wide. They make one asset's features move together, with corr(f, f′) = d_f · d_f′, the way two accounting ratios share a cause.
+
+**2. Standardised return `z`: where the signal is planted.**
+
+```
+z = s_t · S + w_r · R + √(1 − s_t² · Var S − w_r²) · ε
+S = Σ_real w_f · f + w_× · (f_a · f_b − ρ_ab)        w = 2 sin(π · IC / 6)
+```
+
+- **The weights.** `w` converts a planted Spearman IC into a Pearson correlation; that conversion holds exactly for bivariate normals, and here w ≈ 1.05 · IC.
+- **Regime.** `s_t` is 1 when the signal is on and 0.25 when it is off.
+- **Noise.** `ε` is Student t with 4 degrees of freedom, scaled to unit variance.
+- **Past-return term.** `R` is used on momentum and reversal tasks only. It is the sum of the asset's last h shocks ε, divided by √h. Those shocks are in `ret`, but `ret` also carries everything in layer 3, so past `ret` is only a proxy for R.
+- **Unit variance.** The noise is sized so that Var z = 1 in every regime. The signal explains about 0.1% of it (Var S ≈ 0.001). Intuition: one asset on one day is almost pure noise; the edge appears only when averaged over 200 assets and many periods.
+- **A feature's observed IC is not its planted IC.** A feature's correlation with z is s_t · Σ_j w_j · corr(f, f_j), summed over the real features j, not w_f. The two are equal only for independent features (`PLAIN`). As a result:
+  - A real feature's IC also carries the signal of the real features correlated with it, which can cancel its own. On seeds 0 and 1, over 6,000 periods, real features measured −0.005 to 0.017. Seed 1's `f10` has a positive planted IC but a negative observed one.
+  - A noise feature that shares g's with real features has real, persistent IC, although its weight is 0. On the same seeds, noise features measured up to ±0.010.
+  - A joint fit recovers the weights. Weighting each feature by its own IC double-counts the shared part, one reason the template trails the oracle (Decision 13).
+- **The interaction.** It is invisible to single-feature ICs. For Gaussians, the centred product f_a · f_b is uncorrelated with f_a and with f_b, so it is found only by testing products.
+
+**3. Return: scale and nuisance.**
+
+```
+fwd_return = 2% · v_t · ( √0.7 · σ_i · z + √(0.3 / 3) · β_i · F_t )
+```
+
+| Term | What it is | Cross-sectional IC | Sharpe |
+| --- | --- | --- | --- |
+| 2% (`return_vol`) | Typical daily single-stock volatility, about 32% a year | No effect | Gross Sharpe: no effect. Net: costs are in return units, so halving it doubles the effective cost |
+| `v_t` | Market volatility. log v is AR(1) with φ = 0.98 and standard deviation 0.3; mean of v is 1 | No effect: one positive number for all assets at t, so ranks are kept | Gross P&L scales with v_t and costs do not, so calm years lose more of the edge to costs. Clustering widens the spread of yearly Sharpe |
+| `σ_i` | Per-asset volatility, log-normal with spread 0.4 and mean square 1 | Small loss: a jumpy asset's rank is mostly its noise | Small |
+| `β_i · F_t` | 3 common factors with Student t(4) draws. Market loadings are N(1, 0.3), the other two N(0, 1) | Loss: loadings differ by asset, so factors add spread across assets that no feature explains | The dollar-neutral book hedges most of the market factor, not the other two |
+
+For features whose correlation with z is above 0.005, the measured IC against `fwd_return` is about 0.55 to 0.8 times that correlation (seeds 0 and 1). The loss comes from the √0.7 share above, the off regime and the fat tails.
 
 ## Scoring
 
@@ -283,7 +331,7 @@ One plot: claim gap against backtests used. In practice the model uses its whole
    - The leak is built from the target's standardised cross-sectional rank rather than its value, so its rank IC stays at about 0.3 (0.306 measured) despite fat tails.
    - The oracle uses the ground truth and is a baseline only. The reward never sees it (Decision 12).
 14. **The task image holds the package; grading runs in a fresh container.** Decided 15 November 2026.
-   - The reward used to find a Python with this package through verifiers' private `mcp.launch._install_in_sandbox`, because the task image was a bare `python:3.12-slim`. Now the repository's `Dockerfile` installs the project into Python 3.12, `QuantResearchTaskConfig.image` (default `quant-research:0.1.0`) names it, and `grade()` runs `python -m quant_research.grade` with the image's interpreter. The grader returns only the raw score; the reward rule is applied on the host (Decision 16). Build it with `docker build -t quant-research:0.1.0 .`, and rebuild after changing the code, since the grader runs the image's copy. For Prime's hosted runtime, push the image to a registry and set `--env.taskset.task.image` to that reference. No registry was available here, so only local Docker is verified.
+   - The reward used to find a Python with this package through verifiers' private `mcp.launch._install_in_sandbox`, because the task image was a bare `python:3.12-slim`. Now the repository's `Dockerfile` installs the project into Python 3.12, `QuantResearchTaskConfig.image` (default `quant-research:0.1.0`) names it, and `grade()` runs `python -m quant_research.grade` with the image's interpreter. The grader returns only the raw score; the reward rule is applied on the host (Decision 16). Build it with `docker build -t quant-research:0.1.0 .`, and rebuild after changing the code, since the grader runs the image's copy. For Prime's hosted runtime, push the image to a registry and set `--env.taskset.task.image` to that reference. Verified on Prime's runtime on 23 November 2026 (Decision 28).
    - Scoring is `ScoringConfig(mode="isolated")`: verifiers grades in a fresh container of the same image, which agent code never touched. Its inputs (code, claim, seed) come from the trace's state, so `Task.stage_verifier` has nothing to stage. `Task.setup` re-derives the seed in the verifier container.
    - verifiers is pinned to `>=0.4.1,<0.5`.
    - Verified 15 November 2026 with Docker in the build session: `vf-validate quant-research -n 2 --runtime.type docker` (gold and noop valid on both tasks), and `vf-run quant-research -n 1 -r 1` on the Docker runtime. No model key was available, so `vf-run` used a scripted OpenAI-compatible stub that calls `describe`, `backtest` and `submit`. The rollout ran the null harness, the colocated tool server, a sandboxed backtest as `nobody` and isolated grading, and ended `stop=submitted` with reward −0.159, the robust net Sharpe of the stub's 20-day reversal alpha. All metrics were recorded, and the trace published no seed. Re-verified after Decisions 16 and 17 with a rebuilt image: both checks pass again, the grader's output has no reward, and the same rollout scores −0.053 = tanh(−0.159 / 3). The build session's containers have no direct internet, so the image was built on a base carrying a local wheelhouse, and a local layer added the session proxy's CA. Both workarounds are local only; neither is in the repository.
@@ -418,6 +466,7 @@ One plot: claim gap against backtests used. In practice the model uses its whole
    - That project is the repository root, as it already was: its wheel packages `quantenv`, `quant_research` and `quant_research_notools`, and `prime env push` runs from the root. One install serves both taskset ids, since verifiers imports the module a taskset id names (`quant-research-notools` to `quant_research_notools`) and installs nothing itself.
    - Rejected: one Hub environment per taskset (PR #8). The two share `quantenv`, which is on no package index, so each environment had to reach outside its folder for it; that broke the toolset install in Docker and the private Hub install. Prime's own repositories share code between tasksets through a path source outside the folder, which has the same limit: their tasksets install only from a checkout. Publishing `quantenv` would have worked, at the cost of a release step and public code.
    - The cost: the source archive and the toolset's sdist carry the whole repository, about 4 MB with `results/`, `docs/` and `tests/`, and `quant-research-notools` has no Hub listing of its own. `tests/test_packaging.py` builds the wheel from the sdist outside the checkout, and CI runs one scripted episode in Docker, which installs the toolset as a real run does.
+   - Published 23 November 2026: `zuricz/quant-research` 0.1.1 (private), and the task image as `prime/zuricz/quant-research:0.1.0` (private), built remotely by `prime images push quant-research:0.1.0 --context .`. A fresh `prime env install` loaded both tasksets. One stub episode ran on Prime's runtime (`run_models.py --runtime prime --image prime/zuricz/quant-research:0.1.0`): the toolset installed in the sandbox, and the episode was submitted and graded in 1.5 minutes for $0.0004 of sandbox time. `vf-run` and the model stay on the launching machine, which the sandbox reaches through Prime's tunnel (`frpc`, outbound TCP), so a network limited to HTTPS through a proxy cannot launch these runs.
 29. **Training is evaluated on the no-tools eval split, before and after.** Decided 24 November 2026, before the first training run.
    - prime-rl trains on the no-tools taskset's train split, so the comparison that measures training is the no-tools eval split (30 tasks, disjoint from the train split): the base model the run starts from against the trained checkpoint, with the same secret, tasks, rollouts and sampling. The main taskset's eval split, with the trained model, shows whether one-reply training carries over to the agentic task.
    - `run_models.py --taskset quant-research-notools` runs it, named `<model>-notools`; `run_baselines.py --taskset quant-research-notools` scores the baselines as that taskset scores a reply (no claim, no backtest, reward `reward.ic_reward`); `results.py` reads either taskset's reward. The no-tools reward rule moved from the taskset to `quantenv.reward`, so the verifiers-free baseline script shares it.
