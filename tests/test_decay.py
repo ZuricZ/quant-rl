@@ -186,3 +186,32 @@ def test_memory_decay_reports_its_margins(decay_panel):
     result = checks.memory_decay(_delays(decay_panel, "leak"), seed=0)
     assert result.z > checks.CheckConfig().memory_z
     assert result.share >= checks.CheckConfig().decay_share
+
+
+@pytest.mark.parametrize("n", [0, 1, 20, 50, 199])
+def test_too_few_periods_never_flag_nor_crash(decay_panel, n):
+    # With few periods the moving-block bootstrap has too few distinct
+    # blocks to estimate a standard error; the checks say nothing.
+    leak_profile = _profile(decay_panel, "leak").head(n)
+    leak_delays = _delays(decay_panel, "leak").head(n)
+    assert not checks.smooth_decay(leak_profile, seed=0).flagged
+    assert not checks.memory_decay(leak_delays, seed=0).flagged
+
+
+def test_enough_periods_are_judged(decay_panel):
+    n = checks.CheckConfig().decay_min_blocks * checks.CheckConfig().bootstrap_block
+    assert checks.memory_decay(_delays(decay_panel, "leak").head(n + 300), seed=0).flagged
+
+
+def test_null_targets_are_skipped(decay_panel):
+    # A target missing for some assets in some periods, e.g. a delisting.
+    holes = decay_panel.with_frame(
+        decay_panel.frame.with_columns(
+            y=pl.when(pl.col("id") % 11 == pl.col("t") % 11)
+            .then(None)
+            .otherwise(pl.col("y"))
+        )
+    )
+    assert not checks.smooth_decay(_profile(holes, "slow"), seed=0).flagged
+    assert not checks.memory_decay(_delays(holes, "slow"), seed=0).flagged
+    assert checks.memory_decay(_delays(holes, "leak"), seed=0).flagged

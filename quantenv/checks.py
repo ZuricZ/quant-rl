@@ -86,6 +86,10 @@ class CheckConfig:
         bootstrap_block: Consecutive periods per block of the moving-block
             bootstrap that gives the decay checks their standard errors.
         bootstrap_draws: Resamples of that bootstrap.
+        decay_min_blocks: The decay checks judge only runs with at least this
+            many bootstrap blocks of periods; with fewer, the blocks repeat
+            too often to estimate a standard error, and the checks say
+            nothing.
 
     Raises:
         ValueError: If `profile_lags` is below 3.
@@ -104,6 +108,7 @@ class CheckConfig:
     tail_z: float = 2.0
     bootstrap_block: int = 20
     bootstrap_draws: int = 200
+    decay_min_blocks: int = 10
 
     def __post_init__(self) -> None:
         # Leaving one lag out of `smooth_decay` must leave two to fit.
@@ -459,6 +464,15 @@ class DecayResult:
     share: float
 
 
+# The outcome of a decay check that has too few periods to judge.
+_UNJUDGED = DecayResult(False, float("-inf"), float("-inf"))
+
+
+def _too_short(periods: int, config: CheckConfig) -> bool:
+    """Whether a run has too few periods for the decay checks to judge."""
+    return periods < config.decay_min_blocks * config.bootstrap_block
+
+
 def _ratio(num: float, den: float) -> float:
     """num / den, with a zero denominator giving +inf for a positive num, else -inf."""
     if den > 0:
@@ -542,9 +556,12 @@ def smooth_decay(
         seed: Seed for the bootstrap.
 
     Returns:
-        The outcome and its margins.
+        The outcome and its margins; unflagged, with margins -inf, for a run
+        shorter than `config.decay_min_blocks` bootstrap blocks.
     """
     future = profile.select(c for c in profile.columns[1:] if int(c) > 0)
+    if _too_short(future.height, config):
+        return _UNJUDGED
     means = list(future.mean().row(0))
     residuals, predictions = _leave_one_out_decay(means)
     replicates = [
@@ -634,7 +651,8 @@ def memory_decay(
         seed: Seed for the bootstrap.
 
     Returns:
-        The outcome and its margins.
+        The outcome and its margins; unflagged, with margins -inf, for a run
+        shorter than `config.decay_min_blocks` bootstrap blocks.
     """
     # NOTE: Memory counts how all of the signal changes, the IC only the
     # part that predicts. A slow signal with much non-predictive content,
@@ -653,6 +671,8 @@ def memory_decay(
     #   data is available.
     n = max(int(c.removeprefix("rho")) for c in delays.columns if c.startswith("rho"))
     values = delays.drop(delays.columns[0])
+    if _too_short(values.height, config):
+        return _UNJUDGED
     gaps, implied = _memory_gaps(values.mean().row(0, named=True), n)
     replicates = [
         _memory_gaps(row, n)[0]
