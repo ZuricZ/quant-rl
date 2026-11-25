@@ -564,6 +564,111 @@ def smooth_decay(
     return _decide(residuals, se_residual, means, tail, config.decay_z, config.decay_share)
 
 
+def delay_profile(panel: Panel, run: Run, delays: int) -> pl.DataFrame:
+    """Per-period IC of delayed predictions, and the predictions' memory.
+
+    The target stays fixed while the prediction is taken from `d` periods
+    earlier: how well a stale prediction ranks the next return. Next to it,
+    the rank correlation of today's prediction with that stale one: how much
+    the signal itself has changed.
+
+    Args:
+        panel: The data the predictions were made on.
+        run: The walk-forward run.
+        delays: The longest delay.
+
+    Returns:
+        One row per scored period from the `delays`-th on (earlier ones have
+        no prediction that old): the timestamp, "ic0" to "ic`delays`" (rank IC
+        of the prediction `d` periods back against the target) and "rho1" to
+        "rho`delays`" (rank correlation of the prediction with the one `d`
+        periods back).
+    """
+    s = panel.schema
+    frame = (
+        panel.frame.lazy()
+        .select(s.timestamp, s.asset, s.target)
+        .filter(pl.col(s.timestamp) >= run.start)
+        .collect()
+        .with_columns(run.predictions.get_column(PREDICTION))
+        .with_columns(
+            pl.col(PREDICTION).shift(d).over(s.asset).alias(f"_s{d}")
+            for d in range(1, delays + 1)
+        )
+    )
+    pairs = {
+        "ic0": (PREDICTION, s.target),
+        **{f"ic{d}": (f"_s{d}", s.target) for d in range(1, delays + 1)},
+        **{f"rho{d}": (PREDICTION, f"_s{d}") for d in range(1, delays + 1)},
+    }
+    return metrics.period_rank_ics(frame, pairs, s.timestamp).slice(delays)
+
+
+def _memory_gaps(means: dict[str, float], delays: int) -> tuple[list[float], list[float]]:
+    """Per delay: how far the IC fell below what memory keeps, signed by the
+    IC's direction, and what memory keeps (rho(d) times the IC at delay 0)."""
+    ic0 = means["ic0"]
+    sign = -1.0 if ic0 < 0 else 1.0
+    implied = [means[f"rho{d}"] * ic0 for d in range(1, delays + 1)]
+    gaps = [sign * (x - means[f"ic{d}"]) for d, x in enumerate(implied, start=1)]
+    return gaps, implied
+
+
+def memory_decay(
+    delays: pl.DataFrame, config: CheckConfig = CheckConfig(), *, seed: int
+) -> DecayResult:
+    """Whether the IC fades faster than the signal itself changes.
+
+    A prediction from `d` periods ago keeps the share rho(d) of today's
+    prediction, so an honest alpha whose edge lives in what it carries over
+    keeps about rho(d) times today's IC. A leak is new every period: it is
+    in today's prediction and in no earlier one, so the stale prediction's
+    IC collapses while the memory stays high. Flags a delay where the IC
+    falls below rho(d) times today's IC by more than `config.memory_z`
+    standard errors and by at least `config.decay_share` of that. Both ICs
+    are measured against the same return, so most of its noise cancels.
+    Standard errors come from a moving-block bootstrap over periods.
+
+    Args:
+        delays: Output of `delay_profile`.
+        config: Check settings; uses `memory_z`, `decay_share` and the
+            bootstrap settings.
+        seed: Seed for the bootstrap.
+
+    Returns:
+        The outcome and its margins.
+    """
+    # NOTE: Memory counts how all of the signal changes, the IC only the
+    # part that predicts. A slow signal with much non-predictive content,
+    # such as 20-period momentum, keeps more memory than edge, so this check
+    # reads its honest decay as a leak: on the synthetic market it flagged 3
+    # of 120 honest runs at z 4.1 to 4.9 (spec, Decision 29), hence
+    # `memory_z` = 6 while the exploits measured from z 6.6. The margin is
+    # thin and rests on simulated data. Possible improvements:
+    # - Estimate memory from the predictive part only: weight the
+    #   autocorrelation by each asset-period's contribution to the IC, or
+    #   use the autocorrelation of the prediction's projection on the
+    #   target, so slow non-predictive content does not lengthen it.
+    # - Judge only short delays (1 and 2): every measured exploit peaked
+    #   there, and the honest flags came at delays 3 and 7.
+    # - Calibrate `memory_z` and `decay_share` per data source once real
+    #   data is available.
+    n = max(int(c.removeprefix("rho")) for c in delays.columns if c.startswith("rho"))
+    values = delays.drop(delays.columns[0])
+    gaps, implied = _memory_gaps(values.mean().row(0, named=True), n)
+    replicates = [
+        _memory_gaps(row, n)[0]
+        for row in pl.concat(
+            values[rows].mean()
+            for rows in bootstrap_rows(
+                values.height, config.bootstrap_block, config.bootstrap_draws, seed
+            )
+        ).iter_rows(named=True)
+    ]
+    se = pl.DataFrame(replicates, orient="row").std().row(0)
+    return _decide(gaps, se, implied, [True] * n, config.memory_z, config.decay_share)
+
+
 def implausible_ic(
     shifted: dict[int, float], config: CheckConfig = CheckConfig()
 ) -> bool:

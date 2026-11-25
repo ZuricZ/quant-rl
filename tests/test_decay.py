@@ -141,3 +141,48 @@ def test_smooth_decay_reports_its_margins(decay_panel):
     result = checks.smooth_decay(_profile(decay_panel, "leak"), seed=0)
     assert result.z > checks.CheckConfig().decay_z
     assert result.share >= checks.CheckConfig().decay_share
+
+
+def _delays(panel, column):
+    return checks.delay_profile(panel, _run(panel, column), 10)
+
+
+def test_delay_profile_has_ics_and_memory_per_delay(decay_panel):
+    d = _delays(decay_panel, "slow")
+    assert d.columns == [
+        "t",
+        *(f"ic{k}" for k in range(11)),
+        *(f"rho{k}" for k in range(1, 11)),
+    ]
+    assert d.select(pl.col("rho1").mean()).item() == pytest.approx(0.9, abs=0.05)
+    # Rows start once a prediction 10 periods back exists.
+    assert d.select(pl.col("ic10").null_count()).item() == 0
+
+
+def test_memory_decay_flags_a_sparse_leak(decay_panel):
+    assert checks.memory_decay(_delays(decay_panel, "leak"), seed=0).flagged
+
+
+def test_memory_decay_flags_a_sign_flipped_leak(decay_panel):
+    assert checks.memory_decay(_delays(_flipped(decay_panel), "leak"), seed=0).flagged
+
+
+@pytest.mark.parametrize("column", ["slow", "fast", "noise_only"])
+def test_memory_decay_spares_honest_and_useless_signals(decay_panel, column):
+    assert not checks.memory_decay(_delays(decay_panel, column), seed=0).flagged
+
+
+def test_memory_decay_needs_significance_and_size(decay_panel):
+    leak = _delays(decay_panel, "leak")
+    for config in (checks.CheckConfig(memory_z=1e6), checks.CheckConfig(decay_share=2.0)):
+        assert not checks.memory_decay(leak, config, seed=0).flagged
+
+
+def test_memory_decay_runs_on_ragged_predictions(decay_panel):
+    assert not checks.memory_decay(_delays(_ragged(decay_panel), "slow"), seed=0).flagged
+
+
+def test_memory_decay_reports_its_margins(decay_panel):
+    result = checks.memory_decay(_delays(decay_panel, "leak"), seed=0)
+    assert result.z > checks.CheckConfig().memory_z
+    assert result.share >= checks.CheckConfig().decay_share
