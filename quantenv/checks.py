@@ -506,9 +506,8 @@ def _leave_one_out_decay(means: pl.LazyFrame) -> pl.LazyFrame:
     """Fits IC(k) = a * phi**(k - 1) to all lags but one, for each lag.
 
     A log-linear regression, log|IC(k)| = log|a| + (k - 1) * log(phi), per
-    draw and left-out lag. The fit's direction is the sign of the kept
-    lags' summed IC; a lag on the other side of 0 has no log and is left
-    out. Weights IC(k)**2 make it least squares on the IC scale to first
+    draw and left-out lag; the fit's sign is that of the kept lags' summed
+    IC. Weights IC(k)**2 make it least squares on the IC scale to first
     order, so lags near 0, whose logs are pure noise, barely count.
 
     Args:
@@ -516,14 +515,12 @@ def _leave_one_out_decay(means: pl.LazyFrame) -> pl.LazyFrame:
 
     Returns:
         Per `draw` and left-out lag `out`: `m`, the lag's mean IC;
-        `prediction`, the fit of the other lags there (0 if fewer than two
-        lags lie on the fit's side of 0); and `residual`, the mean minus the
+        `prediction`, the fit of the other lags there; and `residual`, the mean minus the
         prediction, signed so that positive is above the fit in the fit's
         direction.
     """
     keys = ["draw", "out"]
     kept = pl.col("lag") != pl.col("out")
-    side = pl.col("m") * pl.col("direction")
     coef = pl.col("coef")
     prediction = (
         (pl.col("direction") * (coef.list.get(1) + coef.list.get(0) * (pl.col("out") - 1)).exp())
@@ -534,13 +531,12 @@ def _leave_one_out_decay(means: pl.LazyFrame) -> pl.LazyFrame:
         means.select(pl.col("lag").unique().alias("out")), how="cross"
     ).with_columns(direction=pl.when(kept).then(pl.col("m")).sum().over(keys).sign())
     fits = (
-        pairs.filter(kept & (side > 0))
-        .filter(pl.len().over(keys) >= 2)
+        pairs.filter(kept & (pl.col("m") != 0))
         .group_by(keys)
         .agg(
             pds.lin_reg(
                 (pl.col("lag") - 1).cast(pl.Float64),
-                target=side.log(),
+                target=pl.col("m").abs().log(),
                 add_bias=True,
                 weights=pl.col("m") ** 2,
             ).alias("coef")

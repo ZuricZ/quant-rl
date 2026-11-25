@@ -469,8 +469,8 @@ def test_score_lookahead_submission_is_penalised():
 def test_score_flags_a_sparse_leak_under_the_ceiling():
     # The oracle, but the target itself in one period in 25. The ceiling is
     # off, so only the decay checks can make the IC implausible. They are
-    # statistical, so the market has the real hidden length.
-    market = synthetic.Config(n_assets=100, n_visible=500, n_hidden=10_000)
+    # statistical, so the market has many assets.
+    market = synthetic.Config(n_assets=500, n_visible=500, n_hidden=2_000)
     truth = synthetic.ground_truth(3, market)
     honest = " + ".join(f"{w!r} * pl.col({n!r})" for n, w in truth.weights.items())
     code = (
