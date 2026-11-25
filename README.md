@@ -158,6 +158,29 @@ work. The grader runs in the task image, so build it from this repository
 new version, bump `version` in `pyproject.toml` and run `prime env push` from
 the repository root.
 
+### On Prime sandboxes
+
+Episodes and grading can run in Prime's sandboxes instead of local Docker.
+Push the task image to your private Prime registry; it is built remotely from
+the Dockerfile, so push again after changing the code:
+
+```bash
+prime images push quant-research:0.1.0 --context .
+```
+
+Then pass the pushed reference, with `PRIME_API_KEY` set:
+
+```bash
+uv run python scripts/stub_model.py &
+uv run python scripts/run_models.py --secret my-secret stub --tasks 1 --rollouts 1 --runtime prime --image prime/zuricz/quant-research:0.1.0
+```
+
+`vf-run` and the model endpoint stay on your machine; the sandbox reaches the
+model through Prime's tunnel, so the machine needs outbound TCP to Prime's
+tunnel server (a network that allows only HTTPS through a proxy is not
+enough). On 23 November 2026 one stub episode took 1.5 minutes and $0.0004 of
+sandbox time; the image build cost about $0.01 and storage about $0.001 a day.
+
 ## Training
 
 - **Train split.** The train split is infinite and never shares a dataset
