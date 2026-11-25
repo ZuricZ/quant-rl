@@ -79,8 +79,9 @@ class Score:
         used_leak: 1 if the column dependence check fired, else 0.
         lookahead: 1 if the truncation check fired, else 0.
         implausible_ic: 1 if the IC profile was implausible: too high
-            against some future return (`checks.implausible_ic`) or peaking
-            after the target (`checks.late_ic_peak`), else 0.
+            against some future return (`checks.implausible_ic`), standing
+            above its own smooth decay (`checks.smooth_decay`) or fading
+            faster than the signal changes (`checks.memory_decay`), else 0.
         invalid: 1 if the code errored, timed out or the claim was not a
             finite number, else 0.
         shifted_ics: Mean rank IC at each lag of the IC profile (see
@@ -171,7 +172,7 @@ def score_submission(
     if not math.isfinite(claimed):
         return invalid_score(f"claimed Sharpe is not finite: {claimed}")
     try:
-        performance, used_leak, lookahead, shifted, late_peak = run_isolated(
+        performance, used_leak, lookahead, shifted, decay = run_isolated(
             _score_worker,
             (_Pipeline(code, user, limit, STARTUP_ALLOWANCE), load, wf, check_config),
             STARTUP_ALLOWANCE,
@@ -185,7 +186,7 @@ def score_submission(
         claimed - performance.sharpe,
         int(used_leak),
         int(lookahead),
-        int(checks.implausible_ic(shifted, check_config) or late_peak),
+        int(checks.implausible_ic(shifted, check_config) or decay),
         0,
         shifted,
     )
@@ -347,10 +348,15 @@ def _score_worker(
         sandbox, panel, wf, start, base, seed=seed, config=config
     )
     profile = checks.ic_profile(panel, base, config.profile_lags)
+    delays = checks.delay_profile(panel, base, config.profile_lags)
+    decay = (
+        checks.smooth_decay(profile, config, seed=seed).flagged
+        or checks.memory_decay(delays, config, seed=seed).flagged
+    )
     return (
         _performance(data, base),
         used_leak,
         lookahead,
         checks.shifted_ics(profile),
-        checks.late_ic_peak(profile, config),
+        decay,
     )

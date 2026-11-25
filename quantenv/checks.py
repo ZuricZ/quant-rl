@@ -11,10 +11,14 @@
   the data, and both statistical flags, not proof. Neither judges the past
   side: an alpha may be built from past returns, so its IC there can reach 1.
   `implausible_ic` flags an IC against any future return too high for honest
-  work. `late_ic_peak` flags a profile that rises after the target: an honest
-  alpha knows later returns only through what persists, so its IC fades with
-  distance, while a leak too far ahead peaks where it leaks. Unlike the
-  ceiling, it does not depend on the IC's scale.
+  work.
+- smooth_decay and memory_decay: the IC decay checks. An honest alpha's IC
+  declines roughly exponentially after the target, and no faster than the
+  signal itself changes. A leak used in a few periods, which truncation
+  rarely sees and which keeps the IC under the ceiling, breaks both: its IC
+  at +1 stands above the decay of later lags, and a prediction one period
+  older has lost it although the signal barely changed. Standard errors
+  come from a moving-block bootstrap over periods (`bootstrap_rows`).
 
 Truncation compares per-period ranks, not raw values, and forgives rank swaps
 of near-ties too small to be anything but floating-point noise. Column
@@ -66,10 +70,6 @@ class CheckConfig:
         profile_lags: Lags of the IC profile on each side of t, so
             `shifted_ics` covers -this to -1 and 1 to this; also the lags of
             `smooth_decay` and the delays of `memory_decay`. At least 3.
-        peak_z: `late_ic_peak` flags a later lag whose mean |IC| exceeds
-            the one at +1 by more than this many standard errors of the
-            paired per-period difference...
-        peak_ratio: ...and is at least this many times the |IC| at +1.
         decay_z: `smooth_decay` flags a lag whose IC stands above the
             exponential decay of the other lags by more than this many
             bootstrap standard errors...
@@ -98,8 +98,6 @@ class CheckConfig:
     dependence_min_drop: float = 0.05
     max_ic: float = 0.05
     profile_lags: int = 10
-    peak_z: float = 4.0
-    peak_ratio: float = 2.0
     decay_z: float = 4.0
     memory_z: float = 6.0
     decay_share: float = 0.5
@@ -686,39 +684,3 @@ def implausible_ic(
         never flag.
     """
     return any(abs(ic) >= config.max_ic for lag, ic in shifted.items() if lag > 0)
-
-
-def late_ic_peak(profile: pl.DataFrame, config: CheckConfig = CheckConfig()) -> bool:
-    """Whether the IC profile peaks after the target.
-
-    Compares the |IC| at each lag after 1 with the |IC| at lag 1, period by
-    period, each signed by its own mean so a sign flip cannot hide a peak.
-    Flags a lag whose excess is larger than `config.peak_z` standard errors
-    of the paired per-period difference and whose |IC| is at least
-    `config.peak_ratio` times the one at lag 1. Past lags are ignored.
-
-    Args:
-        profile: Output of `ic_profile`.
-        config: Check settings; uses the peak thresholds.
-
-    Returns:
-        True if some later lag beats lag 1 on both counts.
-    """
-    first, *later = [c for c in profile.columns[1:] if int(c) > 0]
-    means = profile.select(pl.col(first, *later).mean()).row(0, named=True)
-
-    def oriented(lag: str) -> pl.Expr:
-        return pl.col(lag) * (-1.0 if means[lag] < 0 else 1.0)
-
-    excess = profile.select(
-        pl.struct(
-            mean=(oriented(k) - oriented(first)).mean(),
-            se=(oriented(k) - oriented(first)).std() / pl.len().sqrt(),
-        ).alias(k)
-        for k in later
-    ).row(0, named=True)
-    return any(
-        e["mean"] > config.peak_z * (e["se"] or 0.0)
-        and abs(means[k]) >= config.peak_ratio * abs(means[first])
-        for k, e in excess.items()
-    )

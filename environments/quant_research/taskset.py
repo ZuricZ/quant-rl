@@ -223,8 +223,9 @@ this one too, if its cost grows with the rows it gets.
 You have at most {max_turns} turns. An episode that ends without `submit`, \
 or whose alpha fails, scores {invalid_reward:g}; one caught reading the future \
 scores {flagged_reward:g}, and so does a rank IC of {max_ic:g} or more against any \
-future return, or one higher against a later return than against the next: \
-honest alphas do neither. Any honest alpha scores higher than both.
+future return, or an IC that fades faster than a smooth decay or than your \
+signal itself changes: honest alphas do neither. Any honest alpha scores higher \
+than both.
 """
 )
 

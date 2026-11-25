@@ -30,7 +30,8 @@ hidden periods.
 - −1 if there is no submission or the code fails.
 - −1.5 if a lookahead check fires (truncation, column dependence, or an
   implausible IC profile: |IC| at or above `max_ic` against any future
-  return, or an IC that rises after the next return).
+  return, or an IC that fades faster than a smooth exponential decay or than
+  the signal itself changes).
 
 An honest attempt always scores above both penalties.
 

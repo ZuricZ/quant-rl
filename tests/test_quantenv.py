@@ -363,34 +363,6 @@ def test_implausible_ic_judges_every_future_lag_but_no_past_one(late_panel):
     assert not checks.implausible_ic(realised, config)
 
 
-def test_late_ic_peak_flags_a_leak_past_the_target(late_panel):
-    late = _profile(late_panel, "late")
-    assert checks.late_ic_peak(late)
-    # Without any ceiling: the peak's shape, not its size, gives it away.
-    lenient = checks.CheckConfig(max_ic=1.0)
-    assert not checks.implausible_ic(checks.shifted_ics(late), lenient)
-
-
-def test_late_ic_peak_flags_a_sign_flipped_leak(late_panel):
-    flipped = late_panel.with_frame(
-        late_panel.frame.with_columns(late=-pl.col("late"))
-    )
-    assert checks.late_ic_peak(_profile(flipped, "late"))
-
-
-@pytest.mark.parametrize("column", ["x", "peek", "r"])
-def test_late_ic_peak_spares_profiles_that_peak_at_the_target(late_panel, column):
-    # Honest x and the target read peek both peak at +1; the latter is the
-    # IC ceiling's job. r peaks at -1, which the check ignores.
-    assert not checks.late_ic_peak(_profile(late_panel, column))
-
-
-def test_late_ic_peak_needs_both_significance_and_size(late_panel):
-    late = _profile(late_panel, "late")
-    assert not checks.late_ic_peak(late, checks.CheckConfig(peak_z=1e6))
-    assert not checks.late_ic_peak(late, checks.CheckConfig(peak_ratio=1e6))
-
-
 def test_refits_train_on_a_fixed_sliding_window(data):
     wf = walkforward.WalkForward(window=100, refit_every=50)
     sizes = []
@@ -494,12 +466,29 @@ def test_score_lookahead_submission_is_penalised():
     )
 
 
-def test_score_flags_an_ic_peak_past_the_target():
-    # Reads the return after the target: IC near 0 at +1, so only the
-    # profile's peak at +2 makes the IC implausible.
-    code = _predict_code("pl.col('ret').shift(-2).over('asset')")
-    s = scoring.score_submission(code, 0.1, _hidden(), SMALL_WF)
-    assert abs(s.shifted_ics[1]) < checks.CheckConfig().max_ic
+def test_score_flags_a_sparse_leak_under_the_ceiling():
+    # The oracle, but the target itself in one period in 25. The ceiling is
+    # off, so only the decay checks can make the IC implausible. They are
+    # statistical, so the market has the real hidden length.
+    market = synthetic.Config(n_assets=100, n_visible=500, n_hidden=10_000)
+    truth = synthetic.ground_truth(3, market)
+    honest = " + ".join(f"{w!r} * pl.col({n!r})" for n, w in truth.weights.items())
+    code = (
+        "class S(Alpha):\n"
+        "    def features(self, df):\n"
+        "        leak = pl.col('ret').shift(-1).over('asset')\n"
+        "        gate = pl.col('timestamp').hash(7) % 25 == 0\n"
+        f"        return df.with_columns(x=pl.when(gate).then(leak).otherwise({honest}))\n"
+        "    def predict(self, df):\n"
+        "        return pl.col('x')\n"
+    )
+    s = scoring.score_submission(
+        code,
+        0.1,
+        functools.partial(synthetic.hidden_data, 3, market),
+        walkforward.WalkForward(refit_every=250, window=250),
+        check_config=checks.CheckConfig(max_ic=1.0),
+    )
     assert s.implausible_ic == 1 and _reward(s) == reward.FLAGGED_REWARD
 
 
