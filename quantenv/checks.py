@@ -444,6 +444,126 @@ def bootstrap_rows(n: int, block: int, draws: int, seed: int) -> list[pl.Series]
     ]
 
 
+@dataclasses.dataclass(frozen=True)
+class DecayResult:
+    """Outcome of a decay check, with its margins for calibration.
+
+    Attributes:
+        flagged: Whether some lag or delay met every condition.
+        z: Largest z among the lags that meet every condition but the z one;
+            -inf if none does.
+        share: Largest share among the lags that meet every condition but
+            the share one; -inf if none does.
+    """
+
+    flagged: bool
+    z: float
+    share: float
+
+
+def _ratio(num: float, den: float) -> float:
+    """num / den, with a zero denominator giving +inf for a positive num, else -inf."""
+    if den > 0:
+        return num / den
+    return float("inf") if num > 0 else float("-inf")
+
+
+def _decide(
+    excess: list[float],
+    se: list[float],
+    expected: list[float],
+    gate: list[bool],
+    z_min: float,
+    share_min: float,
+) -> DecayResult:
+    """Flags an index where excess > z_min standard errors and >= share_min
+    of |expected|, among those where `gate` holds; also returns the margins."""
+    z = [_ratio(e, s) for e, s in zip(excess, se)]
+    share = [_ratio(e, abs(x)) for e, x in zip(excess, expected)]
+    z_ok = [v > z_min for v in z]
+    share_ok = [v >= share_min for v in share]
+    return DecayResult(
+        any(g and a and b for g, a, b in zip(gate, z_ok, share_ok)),
+        max((v for v, g, b in zip(z, gate, share_ok) if g and b), default=float("-inf")),
+        max((v for v, g, a in zip(share, gate, z_ok) if g and a), default=float("-inf")),
+    )
+
+
+# Decay rates `smooth_decay` tries: 0 (all IC at +1) to 1 (no decay).
+_PHI = [i / 100 for i in range(101)]
+
+
+def _leave_one_out_decay(means: list[float]) -> tuple[list[float], list[float]]:
+    """Fits IC(k) = a * phi**(k - 1) to all lags but one, for each lag.
+
+    Least squares on the means over a grid of phi; for each phi the best a
+    is closed-form, and the best phi maximises (w . m)**2 / (w . w).
+
+    Args:
+        means: Mean IC at lags 1, 2, ...
+
+    Returns:
+        Per lag: the residual of its mean from the fit of the others,
+        signed so that positive is above the fit in the fit's direction,
+        and the fit's prediction there.
+    """
+    residuals, predictions = [], []
+    for k, m_k in enumerate(means):
+        best = (float("-inf"), 0.0, 0.0)
+        for phi in _PHI:
+            w = [phi**j for j in range(len(means))]
+            ww = sum(w[j] ** 2 for j in range(len(means)) if j != k)
+            if ww == 0:
+                continue
+            wm = sum(w[j] * means[j] for j in range(len(means)) if j != k)
+            if wm * wm / ww > best[0]:
+                best = (wm * wm / ww, wm / ww, w[k])
+        _, a, w_k = best
+        predictions.append(a * w_k)
+        residuals.append((1.0 if a >= 0 else -1.0) * (m_k - a * w_k))
+    return residuals, predictions
+
+
+def smooth_decay(
+    profile: pl.DataFrame, config: CheckConfig = CheckConfig(), *, seed: int
+) -> DecayResult:
+    """Whether a future lag stands far above the smooth decay of the others.
+
+    An honest alpha's IC declines roughly exponentially after the target,
+    blends included. Each lag is left out in turn, an exponential is fitted
+    to the others, and the lag is flagged if its IC stands above the fit by
+    more than `config.decay_z` standard errors and by at least
+    `config.decay_share` of its IC. A lag is judged only where the fit is
+    `config.tail_z` standard errors from 0: a fast or useless signal has no
+    tail to stand above, so this check says nothing about it. Standard
+    errors come from a moving-block bootstrap over periods.
+
+    Args:
+        profile: Output of `ic_profile`; only the future lags are used.
+        config: Check settings; uses the decay and bootstrap settings.
+        seed: Seed for the bootstrap.
+
+    Returns:
+        The outcome and its margins.
+    """
+    future = profile.select(c for c in profile.columns[1:] if int(c) > 0)
+    means = list(future.mean().row(0))
+    residuals, predictions = _leave_one_out_decay(means)
+    replicates = [
+        _leave_one_out_decay(list(row))
+        for row in pl.concat(
+            future[rows].mean()
+            for rows in bootstrap_rows(
+                future.height, config.bootstrap_block, config.bootstrap_draws, seed
+            )
+        ).iter_rows()
+    ]
+    se_residual = pl.DataFrame([r for r, _ in replicates], orient="row").std().row(0)
+    se_prediction = pl.DataFrame([p for _, p in replicates], orient="row").std().row(0)
+    tail = [abs(f) > config.tail_z * se for f, se in zip(predictions, se_prediction)]
+    return _decide(residuals, se_residual, means, tail, config.decay_z, config.decay_share)
+
+
 def implausible_ic(
     shifted: dict[int, float], config: CheckConfig = CheckConfig()
 ) -> bool:
