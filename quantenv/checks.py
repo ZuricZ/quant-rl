@@ -64,11 +64,31 @@ class CheckConfig:
             Decision 24); peeking at the target gives close to 1. Set it
             per data source: real daily equity alphas rarely reach 0.1.
         profile_lags: Lags of the IC profile on each side of t, so
-            `shifted_ics` covers -this to -1 and 1 to this.
+            `shifted_ics` covers -this to -1 and 1 to this; also the lags of
+            `smooth_decay` and the delays of `memory_decay`. At least 3.
         peak_z: `late_ic_peak` flags a later lag whose mean |IC| exceeds
             the one at +1 by more than this many standard errors of the
             paired per-period difference...
         peak_ratio: ...and is at least this many times the |IC| at +1.
+        decay_z: `smooth_decay` flags a lag whose IC stands above the
+            exponential decay of the other lags by more than this many
+            bootstrap standard errors...
+        memory_z: `memory_decay` flags a delay whose IC falls below what the
+            signal's own autocorrelation keeps by more than this many
+            bootstrap standard errors. Stricter than `decay_z`: slow honest
+            signals, such as momentum, keep more memory than edge (spec,
+            Decision 29)...
+        decay_share: ...and, for both, by more than this share of the IC
+            expected there.
+        tail_z: `smooth_decay` judges a lag only where the decay predicted
+            from the other lags is this many standard errors from 0: a fast
+            or useless signal has no tail to stand above.
+        bootstrap_block: Consecutive periods per block of the moving-block
+            bootstrap that gives the decay checks their standard errors.
+        bootstrap_draws: Resamples of that bootstrap.
+
+    Raises:
+        ValueError: If `profile_lags` is below 3.
     """
 
     n_cuts: int = 8
@@ -80,6 +100,17 @@ class CheckConfig:
     profile_lags: int = 10
     peak_z: float = 4.0
     peak_ratio: float = 2.0
+    decay_z: float = 4.0
+    memory_z: float = 6.0
+    decay_share: float = 0.5
+    tail_z: float = 2.0
+    bootstrap_block: int = 20
+    bootstrap_draws: int = 200
+
+    def __post_init__(self) -> None:
+        # Leaving one lag out of `smooth_decay` must leave two to fit.
+        if self.profile_lags < 3:
+            raise ValueError(f"profile_lags must be at least 3, got {self.profile_lags}")
 
 
 def cut_points(timestamps: pl.Series, n: int, seed: int) -> list[Any]:
@@ -374,6 +405,43 @@ def shifted_ics(profile: pl.DataFrame) -> dict[int, float]:
     """
     means = profile.drop(profile.columns[0]).mean().row(0, named=True)
     return {int(lag): ic for lag, ic in means.items()}
+
+
+def bootstrap_rows(n: int, block: int, draws: int, seed: int) -> list[pl.Series]:
+    """Row indices of a moving-block bootstrap over `n` consecutive periods.
+
+    Each draw concatenates blocks of `block` consecutive rows, each starting
+    at a row drawn uniformly at random, and keeps the first `n`. Blocks keep
+    the serial correlation that a persistent signal gives its per-period ICs,
+    which resampling single periods would destroy.
+
+    Args:
+        n: Rows to resample, one per period.
+        block: Rows per block; at most `n` are used.
+        draws: Number of resamples.
+        seed: Seed for the block starts.
+
+    Returns:
+        `draws` Series of `n` UInt32 row indices.
+    """
+    block = max(1, min(block, n))
+    per_draw = -(-n // block)
+    starts = pl.int_range(n - block + 1, eager=True).sample(
+        per_draw * draws, with_replacement=True, seed=seed % 2**64
+    )
+    return [
+        part.get_column("row")
+        for part in pl.DataFrame({"start": starts})
+        .lazy()
+        .select(
+            (pl.int_range(pl.len()) // per_draw).alias("draw"),
+            pl.int_ranges("start", pl.col("start") + block, dtype=pl.UInt32).alias("row"),
+        )
+        .explode("row")
+        .filter(pl.int_range(pl.len()).over("draw") < n)
+        .collect()
+        .partition_by("draw", maintain_order=True, include_key=False)
+    ]
 
 
 def implausible_ic(
