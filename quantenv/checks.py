@@ -581,6 +581,15 @@ def smooth_decay(
         The outcome and its margins; unflagged, with margins -inf, for a run
         shorter than `config.decay_min_blocks` bootstrap blocks.
     """
+    # NOTE: A blend of a slow signal and a memoryless one is honest but not
+    # one exponential: the slow part fits lags +2.. and the memoryless part
+    # lifts only +1, the shape of a sparse leak. Eval task 57 (secret
+    # profile-measure, a horizon-1 reversal task): oracle + 1-period reversal
+    # is flagged at z 5.6, share 0.57; the oracle and the reversal alone are
+    # not. Left as is while agents submit feature-engineered alphas, not
+    # blends of them. Possible fixes: judge only lags +2.., leaving +1 to
+    # `memory_decay`, which spares the blend and catches sparse_next and
+    # block_tail alone (thin margin on block_tail); or a two-exponential fit.
     future = profile.select(c for c in profile.columns[1:] if int(c) > 0)
     if _too_short(future.height, config):
         return _UNJUDGED
