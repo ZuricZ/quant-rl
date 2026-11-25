@@ -126,6 +126,9 @@ uv run pytest -q
 # Scripted baselines on 5 eval tasks; no model or container needed.
 uv run python scripts/run_baselines.py --secret my-secret --tasks 5
 
+# Calibration of the IC decay checks: honest alphas and known exploits.
+uv run python scripts/measure_decay_checks.py --tasks 10
+
 # The task image, then validate both tasksets in Docker.
 docker build -t quant-research:0.1.0 .
 export QUANT_RESEARCH_SECRET=my-secret
@@ -226,7 +229,7 @@ quantenv/                  core package, generic over any panel
   sources/synthetic.py     the simulator (the only simulator-specific code)
   walkforward.py           features once, then fit/predict per block
   sandbox.py, scoring.py   isolated, time-limited pipeline runs
-  checks.py                truncation, column dependence, shifted IC
+  checks.py                truncation, column dependence, IC profile
   metrics.py, reward.py    portfolio performance and the reward rule
 environments/
   quant_research/          verifiers taskset, research toolset, grader

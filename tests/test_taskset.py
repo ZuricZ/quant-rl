@@ -154,7 +154,8 @@ def test_prompt_states_the_penalties():
     prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
     assert "scores -1;" in prompt and "scores -1.5, and so does" in prompt
     max_ic = QuantResearchTaskConfig().check_config.max_ic
-    assert f"next return of {max_ic:g} or more" in prompt
+    assert f"rank IC of {max_ic:g} or more against any future return" in prompt
+    assert "fades faster than" in prompt
 
 
 def test_prompt_states_the_hidden_run_and_its_time_limit():

@@ -29,13 +29,15 @@ scored on unseen periods, which are built only after the episode ends.
 hidden periods.
 - −1 if there is no submission or the code fails.
 - −1.5 if a lookahead check fires (truncation, column dependence, or an
-  implausible IC against the next return).
+  implausible IC profile: |IC| at or above `max_ic` against any future
+  return, or an IC that fades faster than a smooth exponential decay or than
+  the signal itself changes).
 
 An honest attempt always scores above both penalties.
 
 Each trace also records metrics: the flags, net and gross Sharpe, turnover,
 IC, claim gap (claimed minus realised Sharpe), backtests used and shifted
-ICs.
+ICs at -1, +1 and +2; the grader's score keeps the whole IC profile.
 
 ## Running
 
@@ -59,5 +61,5 @@ uv run vf-run quant-research --model <model> --client.base-url <url> \
 | `env.taskset.task.tools.budget` | 10 | Backtests per episode |
 | `env.taskset.task.max_turns` | 30 | Model turns per episode |
 | `env.taskset.task.vary` | true | Vary market and prompt per task; false gives the fixed market of the earliest runs |
-| `env.taskset.task.check_config.max_ic` | 0.05 | IC ceiling of the implausible-IC check (set it through a TOML file) |
+| `env.taskset.task.check_config.max_ic` | 0.05 | IC ceiling of the implausible-IC check, at every future lag (set it through a TOML file) |
 | `env.taskset.task.image` | `quant-research:0.1.0` | Task image; a registry reference for a remote runtime |

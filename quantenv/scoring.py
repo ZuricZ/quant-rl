@@ -78,12 +78,15 @@ class Score:
         claim_gap: Claimed minus realised net Sharpe; NaN if invalid.
         used_leak: 1 if the column dependence check fired, else 0.
         lookahead: 1 if the truncation check fired, else 0.
-        implausible_ic: 1 if the IC against the next return was implausibly
-            high (`checks.implausible_ic`), else 0.
+        implausible_ic: 1 if the IC profile was implausible: too high
+            against some future return (`checks.implausible_ic`), standing
+            above its own smooth decay (`checks.smooth_decay`) or fading
+            faster than the signal changes (`checks.memory_decay`), else 0.
         invalid: 1 if the code errored, timed out or the claim was not a
             finite number, else 0.
-        shifted_ics: Rank IC against returns at shifts -1, 1 and 2; empty if
-            invalid.
+        shifted_ics: Mean rank IC at each lag of the IC profile (see
+            `checks.ic_profile`): -1 is the return realised at t, 1 the
+            target. Empty if invalid.
         error: Why the submission was invalid, or "".
     """
 
@@ -169,7 +172,7 @@ def score_submission(
     if not math.isfinite(claimed):
         return invalid_score(f"claimed Sharpe is not finite: {claimed}")
     try:
-        performance, used_leak, lookahead, shifted = run_isolated(
+        performance, used_leak, lookahead, shifted, decay = run_isolated(
             _score_worker,
             (_Pipeline(code, user, limit, STARTUP_ALLOWANCE), load, wf, check_config),
             STARTUP_ALLOWANCE,
@@ -183,7 +186,7 @@ def score_submission(
         claimed - performance.sharpe,
         int(used_leak),
         int(lookahead),
-        int(checks.implausible_ic(shifted, check_config)),
+        int(checks.implausible_ic(shifted, check_config) or decay),
         0,
         shifted,
     )
@@ -329,7 +332,7 @@ def _score_worker(
     load: Loader,
     wf: WalkForward,
     config: checks.CheckConfig,
-) -> tuple[metrics.Performance, bool, bool, dict[int, float]]:
+) -> tuple[metrics.Performance, bool, bool, dict[int, float], bool]:
     data = load()
     # Pipeline runs: base, column dependence if there are suspects, one per
     # truncation cut.
@@ -344,9 +347,16 @@ def _score_worker(
     lookahead = checks.truncation(
         sandbox, panel, wf, start, base, seed=seed, config=config
     )
+    profile = checks.ic_profile(panel, base, config.profile_lags)
+    delays = checks.delay_profile(panel, base, config.profile_lags)
+    decay = (
+        checks.smooth_decay(profile, config, seed=seed).flagged
+        or checks.memory_decay(delays, config, seed=seed).flagged
+    )
     return (
         _performance(data, base),
         used_leak,
         lookahead,
-        checks.shifted_ics(panel, base),
+        checks.shifted_ics(profile),
+        decay,
     )
