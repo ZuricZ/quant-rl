@@ -98,3 +98,30 @@ Its prompt named the libraries and gave one polars-ds call as an example
   time, the rest 59%: 5 used `pds` without importing it, and most of the
   others failed on polars mistakes in more complicated code. The final
   prompt drops the example and predefines `pds` like `pl`.
+
+## Final prompt at 16,384 tokens: the before-training baseline
+
+The same eval with the prompt as merged: libraries named with their versions
+and no example, `pds` predefined like `pl`, scipy named
+(`traces/qwen3_5-9b-notools-16k-final.jsonl.gz`, `rows-16k-final.csv`). Graded
+in the 0.1.1 image before its file permissions were restricted; no answer
+referred to the project's modules, so the restriction would not change a
+grade. All 120 episodes `ok` (one chunk was rerun after the Docker daemon
+stopped mid-run).
+
+| Agent              | Episodes | Honest | Lookahead rate | Implausible IC rate | Invalid rate | Reward | Net Sharpe | IC    |
+|--------------------|----------|--------|----------------|---------------------|--------------|--------|------------|-------|
+| naive              | 30       | 30     | 0.000          | 0.000               | 0.000        | 0.250  | 1.088      | 0.012 |
+| template           | 30       | 30     | 0.000          | 0.000               | 0.000        | 0.303  | 1.575      | 0.015 |
+| oracle             | 30       | 30     | 0.000          | 0.000               | 0.000        | 0.433  | 2.364      | 0.022 |
+| qwen3_5-9b-notools | 120      | 42     | 0.025          | 0.017               | 0.608        | -0.610 | 0.780      | 0.009 |
+
+- Invalid: 40 runtime errors, 22 cut off while thinking, 11 with no `Alpha`
+  subclass. Finished replies thought for a median of about 1,600 tokens.
+- Without the example no answer used polars-ds; 14 used scikit-learn (7 of
+  them ran).
+- Against the run with the example: runtime errors 54 to 40, cut-offs 10 to
+  22, honest alphas' net Sharpe 0.49 to 0.78; reward about the same (-0.59,
+  -0.61).
+
+This is the number the trained checkpoint is compared with (Decision 29).

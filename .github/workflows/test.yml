@@ -35,7 +35,7 @@ jobs:
       # cannot enter /home/runner to start uv's Python.
       - name: Sandbox tests as root, in the task image
         run: >-
-          docker run --rm
+          docker run --rm -e QUANT_RESEARCH_IMAGE=1
           -v "$PWD/tests/test_sandbox.py:/tests/test_sandbox.py:ro"
           quant-research:0.1.1
           sh -c "pip install -q --root-user-action=ignore pytest &&

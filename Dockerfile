@@ -14,4 +14,17 @@ COPY pyproject.toml README.md ./
 COPY quantenv ./quantenv
 COPY environments ./environments
 RUN pip install --no-cache-dir . && rm -rf /opt/quant-research
+# Agent code runs as the sandbox user (`nobody`), which must not read the
+# checks, the generator or the grader: from them it could learn the check
+# thresholds and tune a lookahead to pass them. Only root, which runs the
+# grader and the tools, reads this project's files; the sandbox user reads
+# the modules its own process imports (`python -m quantenv.sandbox`) and,
+# since Python's importer lists a package directory to find modules in it,
+# the names of the other files in `quantenv`, not their contents.
+RUN cd "$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
+    && chmod -R o-rwx quantenv quant_research quant_research_notools \
+    && chmod o+rx quantenv && chmod o+x quantenv/__pycache__ \
+    && for m in __init__ alpha panel sandbox walkforward; do \
+        chmod o+r quantenv/$m.py quantenv/__pycache__/$m.*.pyc; \
+    done
 WORKDIR /
