@@ -80,6 +80,10 @@ scores {invalid_reward:g}; an alpha caught reading the future scores \
 future return, or an IC that fades faster than a smooth decay or than your \
 signal itself changes: honest alphas do neither. Any honest alpha scores higher \
 than both.
+
+Your reply, thinking included, is cut off after {reply_tokens:,} tokens, and a \
+reply cut off before its Python block scores {invalid_reward:g}. Think \
+briefly: an answer needs far fewer.
 """
 )
 
@@ -111,6 +115,7 @@ def feature_table(data: EvalData) -> str:
 def prompt(
     description: str,
     table: str,
+    reply_tokens: int,
     check_config: checks.CheckConfig = checks.CheckConfig(),
     config: synthetic.Config = synthetic.DEFAULT_CONFIG,
     variation: int | None = None,
@@ -120,6 +125,7 @@ def prompt(
     Args:
         description: Output of `describe_panel` on the visible data.
         table: Output of `feature_table` on the visible data.
+        reply_tokens: The reply's token limit, stated in the prompt.
         check_config: Settings of the checks run when grading; gives the IC
             ceiling, which also scales the reward.
         config: The task's generator parameters.
@@ -134,6 +140,7 @@ def prompt(
     return PROMPT.format(
         description=description,
         feature_table=table,
+        reply_tokens=reply_tokens,
         request=choices["request"],
         example=choices["example"],
         **prompt_values(check_config, config),
@@ -165,6 +172,9 @@ class NoToolsTaskConfig(vf.TaskConfig):
     Attributes:
         secret: The taskset's secret; the taskset sets it on every task.
         image: Task image; the main taskset's, which installs this package.
+        reply_tokens: The reply's token limit, thinking included, stated in
+            the prompt. Not enforced here: keep it equal to the sampling
+            `max_tokens` of the run.
         check_config: Settings of the lookahead checks run when grading.
         sandbox_user: User that runs the alpha when grading; see
             `quant_research.servers.research.ResearchConfig`.
@@ -173,6 +183,7 @@ class NoToolsTaskConfig(vf.TaskConfig):
 
     secret: SecretStr | None = None
     image: str = IMAGE
+    reply_tokens: int = 16384
     check_config: checks.CheckConfig = checks.CheckConfig()
     sandbox_user: str | None = SANDBOX_USER
     vary: bool = True
@@ -331,6 +342,7 @@ class NoToolsTaskset(vf.Taskset[NoToolsTask, NoToolsConfig]):
                     prompt=prompt(
                         describe_panel(visible.panel),
                         feature_table(visible),
+                        task_config.reply_tokens,
                         task_config.check_config,
                         market,
                         task.variation,

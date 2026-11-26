@@ -96,6 +96,7 @@ def test_prompt_states_the_answer_format_and_penalties(task):
     assert "fades faster than" in prompt
     assert f"scores {reward.INVALID_REWARD:g}" in prompt
     assert f"future scores {reward.FLAGGED_REWARD:g}" in prompt
+    assert f"cut off after {task.config.reply_tokens:,} tokens" in prompt
 
 
 def test_extract_code_takes_the_last_python_block():
