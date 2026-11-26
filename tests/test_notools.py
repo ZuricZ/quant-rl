@@ -31,6 +31,9 @@ from quantenv import baselines, checks, metrics, reward, scoring  # noqa: E402
 from quantenv.sources import synthetic  # noqa: E402
 
 COLUMN = baselines.column_code("f00")
+
+# Every task here gets a small market (see conftest.py).
+pytestmark = pytest.mark.usefixtures("small_market")
 REPLY = f"I will use f00.\n\n```python\n{COLUMN}```\n"
 
 
@@ -46,7 +49,7 @@ def _trace(task: NoToolsTask, reply: str) -> vf.Trace:
 
 
 @pytest.fixture(scope="module")
-def task() -> NoToolsTask:
+def task(small_market) -> NoToolsTask:
     return next(iter(NoToolsTaskset(NoToolsConfig(secret=SECRET))))
 
 
@@ -127,7 +130,7 @@ def test_reward_is_the_hidden_ic_over_the_ceiling(tmp_path):
     task = _local_task()
     trace = _trace(task, REPLY)
     value = asyncio.run(task.hidden_ic(trace, _LocalRuntime(tmp_path)))
-    hidden = functools.partial(synthetic.hidden_data, task.seed)
+    hidden = functools.partial(synthetic.hidden_data, task.seed, task.market)
     expected = scoring.score_submission(COLUMN, 0.0, hidden)
     assert expected.invalid == 0 and expected.lookahead == 0
     max_ic = checks.CheckConfig().max_ic

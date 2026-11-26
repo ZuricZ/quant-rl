@@ -6,6 +6,7 @@ import datetime as dt
 
 import polars as pl
 import pytest
+from conftest import SMALL_MARKET
 
 from quantenv import metrics
 from quantenv.sources import synthetic
@@ -67,8 +68,10 @@ def test_signal_has_an_interaction_of_two_real_features():
     assert truth.interaction_weight > 0
 
 
-def test_visible_panel_is_a_prefix_of_the_full_one(frame):
-    full = synthetic.generate(SEED, hidden=True).panel.frame.head(frame.height)
+def test_visible_panel_is_a_prefix_of_the_full_one():
+    frame = synthetic.generate(SEED, SMALL_MARKET).panel.frame
+    full = synthetic.generate(SEED, SMALL_MARKET, hidden=True).panel.frame
+    full = full.head(frame.height)
     # Equal up to float summation order in per-period standardisation.
     numeric = [c for c in frame.columns if c not in ("timestamp", "asset")]
     assert full.select("timestamp", "asset").equals(frame.select("timestamp", "asset"))
@@ -162,6 +165,12 @@ def test_past_return_signal_is_planted_in_ret(style):
 
 def test_past_return_signal_keeps_the_visible_panel_a_prefix():
     market = next(m for m in _eval_markets() if m.style == "momentum")
+    market = dataclasses.replace(
+        market,
+        n_assets=SMALL_MARKET.n_assets,
+        n_visible=SMALL_MARKET.n_visible,
+        n_hidden=SMALL_MARKET.n_hidden,
+    )
     visible = synthetic.generate(SEED, market).panel.frame
     full = synthetic.generate(SEED, market, hidden=True).panel.frame.head(visible.height)
     numeric = [c for c in visible.columns if c not in ("timestamp", "asset")]
