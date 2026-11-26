@@ -224,6 +224,32 @@ def test_fresh_instance_per_block(data):
     walkforward.run(_local(code), data.panel, WF)
 
 
+@pytest.mark.parametrize(
+    "fit",
+    [
+        # scikit-learn on numpy arrays.
+        "from sklearn.linear_model import Ridge\n"
+        "        x = train.select('f00', 'f01').fill_null(0.0).to_numpy()\n"
+        "        y = train.get_column('fwd_return').fill_null(0.0).to_numpy()\n"
+        "        self.w = Ridge(alpha=1.0).fit(x, y).coef_.tolist()\n",
+        # polars-ds as a polars expression.
+        "import polars_ds as pds\n"
+        "        fit = pds.lin_reg('f00', 'f01', target='fwd_return', l2_reg=1.0)\n"
+        "        self.w = train.select(fit).item().to_list()\n",
+    ],
+)
+def test_alpha_can_fit_with_the_installed_libraries(data, fit):
+    code = (
+        "class Fitted(Alpha):\n"
+        "    def fit(self, train):\n"
+        f"        {fit}"
+        "    def predict(self, df):\n"
+        "        return self.w[0] * pl.col('f00') + self.w[1] * pl.col('f01')\n"
+    )
+    run = walkforward.run(_local(code), data.panel, SMALL_WF)
+    assert run.predictions.get_column(walkforward.PREDICTION).null_count() == 0
+
+
 @pytest.mark.parametrize("start", [None, "hidden"])
 def test_run_rows_counts_the_rows_handed_to_agent_code(start):
     data = synthetic.hidden_data(1, SMALL)

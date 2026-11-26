@@ -3,6 +3,7 @@
 import asyncio
 import dataclasses
 import functools
+import importlib.metadata
 import json
 import math
 import os
@@ -10,7 +11,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import polars as pl
 import pytest
 from pydantic import ValidationError
 
@@ -151,9 +151,11 @@ def test_prompt_offers_the_seeded_generator():
     assert "self.rng" in prompt
 
 
-def test_prompt_names_the_pinned_polars_version():
+def test_prompt_names_the_pinned_libraries():
     prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
-    assert f"`pl` (polars {pl.__version__})" in prompt
+    for name in ("polars", "polars-ds", "scikit-learn", "numpy"):
+        assert f"{name} {importlib.metadata.version(name)}" in prompt
+    assert "nothing else" in prompt
 
 
 def test_prompt_states_no_checks_or_reward():

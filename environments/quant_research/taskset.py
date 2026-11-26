@@ -16,6 +16,7 @@ setup puts the seed in the episode's shared state, read by the toolset.
 
 import dataclasses
 import hashlib
+import importlib.metadata
 import itertools
 import json
 import os
@@ -67,8 +68,12 @@ ALPHA_SECTION = """\
 ## Alpha
 
 Write Python that defines exactly one subclass of the predefined class \
-`Alpha`. `pl` (polars {polars_version}) and `Alpha` are available without \
-imports.
+`Alpha`. `Alpha` and `pl` (polars, as after `import polars as pl`) are \
+already defined. Installed: polars {polars_version}, polars-ds \
+{polars_ds_version} (`import polars_ds as pds`; for example \
+`train.select(pds.lin_reg("x1", "x2", target="fwd_return", l2_reg=1.0))\
+.item()` is the Series of ridge coefficients), scikit-learn \
+{sklearn_version} and numpy {numpy_version}; nothing else.
 
 ```python
 class Alpha:
@@ -322,6 +327,9 @@ def prompt_values(
     score_rows = run_rows(hidden=True, config=config)
     return dict(
         polars_version=pl.__version__,
+        polars_ds_version=importlib.metadata.version("polars-ds"),
+        sklearn_version=importlib.metadata.version("scikit-learn"),
+        numpy_version=importlib.metadata.version("numpy"),
         refit_every=wf.refit_every,
         window=wf.window,
         startup=limit.startup,
