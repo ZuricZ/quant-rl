@@ -1336,6 +1336,7 @@ dependencies = [
     { name = "polars" },
     { name = "polars-ds" },
     { name = "scikit-learn" },
+    { name = "scipy" },
     { name = "verifiers" },
 ]
 
@@ -1351,6 +1352,7 @@ requires-dist = [
     { name = "polars", specifier = "==2.1.0" },
     { name = "polars-ds", specifier = "==0.14.0" },
     { name = "scikit-learn", specifier = "==1.9.1" },
+    { name = "scipy", specifier = "==1.18.1" },
     { name = "verifiers", specifier = ">=0.4.1,<0.5" },
 ]
 

@@ -4,12 +4,13 @@
 #
 # - Qwen3.5-9B, the model of the Day 6 and 7 results; Hosted Training does not
 #   offer Qwen3-4B-Instruct-2507.
-# - 8192 completion tokens, as in the qwen3_5-9b registry entry, so training
+# - 16384 completion tokens, as in the qwen3_5-9b registry entry, so training
 #   and the before/after eval (spec, Decision 29) sample alike; Qwen3.5-9B
-#   thinks first and runs out of 2048 tokens before writing code. seq_len
-#   leaves room for the prompt (about 2,000 tokens).
+#   thinks first, and at 8192 it ran out while thinking in 73 of 120 no-tools
+#   replies (results/day9). seq_len leaves room for the prompt (about 1,800
+#   tokens).
 # - Rollouts are graded in Prime sandboxes with the pushed task image
-#   (`prime images push quant-research:0.1.0 --context .`), not local Docker.
+#   (`prime images push quant-research:0.1.1 --context .`), not local Docker.
 # - 10 steps: a smoke run that shows the pipeline trains, checkpoints and
 #   scores, not a result.
 #
@@ -24,7 +25,7 @@
 # zuricz/quant-research.
 mode = "rl"
 max_steps = 10
-seq_len = 12288
+seq_len = 18432
 
 [deployment]
 num_train_gpus = 1
@@ -58,7 +59,7 @@ batch_size = 32
 group_size = 8
 
 [orchestrator.train.sampling]
-max_completion_tokens = 8192
+max_completion_tokens = 16384
 
 [[orchestrator.train.source]]
 name = "quant-research-notools"
@@ -66,13 +67,13 @@ env.taskset.id = "quant-research-notools"
 env.taskset.split = "train"
 env.agent.harness.id = "null"
 env.agent.runtime.type = "prime"
-env.taskset.task.image = "prime/zuricz/quant-research:0.1.0"
+env.taskset.task.image = "prime/zuricz/quant-research:0.1.1"
 
 [orchestrator.eval]
 interval = 50
 
 [orchestrator.eval.sampling]
-max_completion_tokens = 8192
+max_completion_tokens = 16384
 
 [[orchestrator.eval.source]]
 name = "quant-research-notools-eval"
@@ -80,7 +81,7 @@ env.taskset.id = "quant-research-notools"
 env.taskset.split = "eval"
 env.agent.harness.id = "null"
 env.agent.runtime.type = "prime"
-env.taskset.task.image = "prime/zuricz/quant-research:0.1.0"
+env.taskset.task.image = "prime/zuricz/quant-research:0.1.1"
 
 [ckpt] # Checkpoint at the end of training
 

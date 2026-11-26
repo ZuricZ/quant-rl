@@ -11,7 +11,7 @@ import pytest
 pytest.importorskip("fcntl")
 
 import verifiers.v1 as vf  # noqa: E402
-from test_taskset import SECRET, _LocalRuntime  # noqa: E402
+from test_taskset import LEAK_WORDS, SECRET, _LocalRuntime  # noqa: E402
 
 from quant_research.servers.research import ResearchData  # noqa: E402
 from quant_research.taskset import (  # noqa: E402
@@ -95,8 +95,10 @@ def test_prompt_states_the_answer_format_not_the_checks_or_reward(task):
     assert "rather than redefining `Alpha`" in prompt
     assert "judged by its mean rank IC" in prompt
     max_ic = checks.CheckConfig().max_ic
-    for text in (f"IC of {max_ic:g}", f"by {max_ic:g}", "fades", "decay", "scores -"):
-        assert text not in prompt
+    assert f"IC of {max_ic:g}" not in prompt and f"by {max_ic:g}" not in prompt
+    for word in LEAK_WORDS:
+        assert word not in prompt.lower()
+
 
 def test_extract_code_takes_the_last_python_block():
     reply = "```python\nfirst\n```\ntext\n```python\nsecond\n```"

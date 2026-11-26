@@ -3,12 +3,12 @@
 import asyncio
 import dataclasses
 import functools
-import importlib.metadata
 import json
 import math
 import os
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -151,19 +151,39 @@ def test_prompt_offers_the_seeded_generator():
     assert "self.rng" in prompt
 
 
-def test_prompt_names_the_pinned_libraries():
+# Words that would describe a check or the reward; neither belongs in a prompt.
+LEAK_WORDS = (
+    "ceiling",
+    "flag",
+    "caught",
+    "penal",
+    "reward",
+    "lookahead",
+    "implausible",
+    "decay",
+    "fades",
+    "scores -",
+)
+
+
+def test_prompt_names_the_libraries_pinned_in_pyproject():
     prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
-    for name in ("polars", "polars-ds", "scikit-learn", "numpy"):
-        assert f"{name} {importlib.metadata.version(name)}" in prompt
+    project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    deps = project["project"]["dependencies"]
+    pins = dict(dep.split("==") for dep in deps if "==" in dep)
+    for name in ("polars", "polars-ds", "scikit-learn", "scipy", "numpy"):
+        assert f"{name} {pins[name]}" in prompt
     assert "nothing else" in prompt
 
 
 def test_prompt_states_no_checks_or_reward():
     prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
     max_ic = QuantResearchTaskConfig().check_config.max_ic
-    for text in (f"rank IC of {max_ic:g}", "fades", "decay", "scores -"):
-        assert text not in prompt
+    assert f"IC of {max_ic:g}" not in prompt
+    for word in LEAK_WORDS:
+        assert word not in prompt.lower()
     assert "only a submitted alpha counts" in prompt
+
 
 def test_prompt_states_the_hidden_run_and_its_time_limit():
     task = next(iter(QuantResearchTaskset(_config())))

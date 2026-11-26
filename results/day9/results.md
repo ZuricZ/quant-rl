@@ -31,9 +31,11 @@ Why the 100 invalid episodes failed:
   a median of 1,972 completion tokens (p90 5,011, max 7,927): the model either
   answers in a few thousand tokens or keeps thinking past the limit.
 - 11 had no `Alpha` subclass.
-- 16 raised errors in polars: a column used in the same `with_columns` call
-  that creates it (`f00_z`, `momentum`), removed arguments
+- 16 raised errors, 13 of them in polars: a column used in the same
+  `with_columns` call that creates it (`f00_z`, `momentum`), removed arguments
   (`rolling_mean(min_periods=)`), `Expr.corr`, the truth value of an `Expr`.
+  The other 3: a syntax error, a numpy shape mismatch, and a process that
+  died.
 
 Of the 20 alphas that ran, 1 was flagged by lookahead and 3 by the IC profile.
 The 16 honest ones reach a mean IC of 0.008, below the naive baseline.
@@ -42,7 +44,7 @@ The 16 honest ones reach a mean IC of 0.008, below the naive baseline.
 
 All 73 were cut inside the thinking: none had started the answer. Across 120
 replies at temperature 0.6, the same prompt finished in some rollouts and ran
-out in others (only 5 of 30 tasks ran out in all 4), so a reply either
+out in others (only 4 of 30 tasks ran out in all 4), so a reply either
 answers or falls into a mode it does not leave.
 
 - **Re-verifying rules, not designing.** 42 of the 73 had already drafted the

@@ -73,7 +73,8 @@ already defined. Installed: polars {polars_version}, polars-ds \
 {polars_ds_version} (`import polars_ds as pds`; for example \
 `train.select(pds.lin_reg("x1", "x2", target="fwd_return", l2_reg=1.0))\
 .item()` is the Series of ridge coefficients), scikit-learn \
-{sklearn_version} and numpy {numpy_version}; nothing else.
+{sklearn_version}, scipy {scipy_version} and numpy {numpy_version}; nothing \
+else.
 
 ```python
 class Alpha:
@@ -329,6 +330,7 @@ def prompt_values(
         polars_version=pl.__version__,
         polars_ds_version=importlib.metadata.version("polars-ds"),
         sklearn_version=importlib.metadata.version("scikit-learn"),
+        scipy_version=importlib.metadata.version("scipy"),
         numpy_version=importlib.metadata.version("numpy"),
         refit_every=wf.refit_every,
         window=wf.window,
