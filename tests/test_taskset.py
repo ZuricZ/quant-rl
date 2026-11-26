@@ -22,6 +22,7 @@ from conftest import SMALL_MARKET  # noqa: E402
 
 from quant_research import grade, taskset  # noqa: E402
 from quant_research.servers.research import (  # noqa: E402
+    DOC_LIMIT,
     ResearchConfig,
     backtest_report,
     backtest_scope,
@@ -189,6 +190,11 @@ def test_prompt_states_no_checks_or_reward():
     assert "only a submitted alpha counts" in prompt
 
 
+def test_prompt_offers_docs_without_a_backtest():
+    prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
+    assert "`docs(name)`" in prompt and "does not use a backtest" in prompt
+
+
 def test_prompt_states_the_hidden_run_and_its_time_limit():
     task = next(iter(QuantResearchTaskset(_config())))
     prompt = task.data.prompt
@@ -270,6 +276,24 @@ def test_grading_timeout_covers_every_scored_run():
     config = checks.CheckConfig()
     seconds = scoring.TimeLimit().seconds(taskset.run_rows(hidden=True))
     assert taskset.scoring_timeout(config) > (2 + config.n_cuts) * seconds
+
+
+@pytest.mark.parametrize(
+    "name", ["pl.Expr.rolling_mean", "pds.lin_reg", "sklearn.linear_model.Ridge"]
+)
+def test_docs_looks_up_the_alpha_libraries_for_free(name):
+    tools = _toolset()
+    text = asyncio.run(tools.docs(name))
+    assert name.split(".")[-1] in text and len(text) <= DOC_LIMIT
+    assert tools._episode.backtests_used == 0
+
+
+@pytest.mark.parametrize(
+    "name", ["quantenv.checks", "quant_research.grade", "os", "pl.os.path"]
+)
+def test_docs_refuses_anything_but_the_alpha_libraries(name):
+    with pytest.raises(ValueError):
+        asyncio.run(_toolset().docs(name))
 
 
 def test_describe_lists_visible_data_only():
@@ -472,7 +496,7 @@ def test_grade_runs_the_images_python(tmp_path):
 
 def test_tasks_use_the_configured_image():
     task = next(iter(QuantResearchTaskset(_config())))
-    assert task.data.image == taskset.IMAGE == "quant-research:0.1.1"
+    assert task.data.image == taskset.IMAGE == "quant-research:0.1.2"
     other = QuantResearchConfig(
         secret=SECRET, task=QuantResearchTaskConfig(image="registry.example/qr:1")
     )

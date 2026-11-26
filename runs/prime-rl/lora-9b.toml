@@ -10,7 +10,7 @@
 #   replies (results/day9). seq_len leaves room for the prompt (about 1,800
 #   tokens).
 # - Rollouts are graded in Prime sandboxes with the pushed task image
-#   (`prime images push quant-research:0.1.1 --context .`), not local Docker.
+#   (`prime images push quant-research:0.1.2 --context .`), not local Docker.
 # - 10 steps: a smoke run that shows the pipeline trains, checkpoints and
 #   scores, not a result.
 #
@@ -67,7 +67,7 @@ env.taskset.id = "quant-research-notools"
 env.taskset.split = "train"
 env.agent.harness.id = "null"
 env.agent.runtime.type = "prime"
-env.taskset.task.image = "prime/zuricz/quant-research:0.1.1"
+env.taskset.task.image = "prime/zuricz/quant-research:0.1.2"
 
 [orchestrator.eval]
 interval = 50
@@ -81,7 +81,7 @@ env.taskset.id = "quant-research-notools"
 env.taskset.split = "eval"
 env.agent.harness.id = "null"
 env.agent.runtime.type = "prime"
-env.taskset.task.image = "prime/zuricz/quant-research:0.1.1"
+env.taskset.task.image = "prime/zuricz/quant-research:0.1.2"
 
 [ckpt] # Checkpoint at the end of training
 

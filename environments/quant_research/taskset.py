@@ -44,7 +44,7 @@ EVAL_TASKS = 30
 # What pydantic writes in place of a SecretStr when dumping.
 _MASK = "**********"
 # Built from the repository's Dockerfile; holds this package.
-IMAGE = "quant-research:0.1.1"
+IMAGE = "quant-research:0.1.2"
 _SCORE = "score"
 # Environment variable a taskset reads its secret from when none is set.
 SECRET_VAR = "QUANT_RESEARCH_SECRET"
@@ -213,6 +213,9 @@ PROMPT = (
     + """## Tools
 
 - `describe()`: column names, timestamp range and number of assets.
+- `docs(name)`: the signature and documentation of a polars, polars-ds, \
+scikit-learn, scipy or numpy object, such as `polars.Expr.rolling_mean`. It \
+does not use a backtest.
 - `backtest(code)`: the alpha walk-forward on the visible periods: net \
 Sharpe with its standard error, gross Sharpe, turnover, mean rank IC with \
 its standard error, and the range of net Sharpe across calendar years. You \

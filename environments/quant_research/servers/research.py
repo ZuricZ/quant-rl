@@ -1,4 +1,4 @@
-"""The research toolset: describe, backtest and submit, served over MCP.
+"""The research toolset: describe, docs, backtest and submit, served over MCP.
 
 The server runs colocated with the harness, inside the rollout's container,
 and only ever builds the visible periods of the task's dataset. Each backtest
@@ -15,6 +15,7 @@ from typing import Literal
 import verifiers.v1 as vf
 from pydantic import Field
 
+from quantenv import docs as libdocs
 from quantenv import metrics, scoring, walkforward
 from quantenv.alpha import AlphaError
 from quantenv.panel import EvalData, Panel
@@ -23,6 +24,20 @@ from quantenv.walkforward import WalkForward
 
 BUDGET = 10
 SANDBOX_USER = "nobody"
+# The libraries the alpha may use, by the names a `docs` lookup may start
+# with: the prompt's aliases and the import names.
+DOC_PACKAGES = {
+    "pl": "polars",
+    "polars": "polars",
+    "pds": "polars_ds",
+    "polars_ds": "polars_ds",
+    "sklearn": "sklearn",
+    "scipy": "scipy",
+    "np": "numpy",
+    "numpy": "numpy",
+}
+# The most characters a `docs` lookup returns, as for a backtest's error.
+DOC_LIMIT = 2000
 
 
 class ResearchData(vf.TaskData):
@@ -168,7 +183,7 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
     a time, since each one ends by killing every process of the sandbox user.
     """
 
-    TOOL_PREFIX = None  # Advertise the tools as describe, backtest and submit.
+    TOOL_PREFIX = None  # Advertise the tools as describe, docs, backtest, submit.
 
     def __init__(self, config: ResearchConfig) -> None:
         super().__init__(config)
@@ -209,6 +224,29 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
         """
         description, _ = await self._summarise()
         return description
+
+    @vf.tool
+    async def docs(self, name: str) -> str:
+        """Looks up the documentation of a polars, polars-ds, scikit-learn,
+        scipy or numpy object. Does not use a backtest.
+
+        Args:
+            name: Dotted name, such as "polars.Expr.rolling_mean",
+                "pds.lin_reg" or "sklearn.linear_model.Ridge".
+
+        Returns:
+            The signature and docstring of a function; for a class or module,
+            its summary and public members. Cut at a fixed length.
+
+        Raises:
+            ValueError: If the name is refused or does not exist.
+        """
+        try:
+            return await asyncio.to_thread(
+                libdocs.lookup, name, DOC_PACKAGES, DOC_LIMIT
+            )
+        except LookupError as e:
+            raise ValueError(str(e)) from None
 
     @vf.tool
     async def backtest(self, code: str) -> str:
