@@ -19,6 +19,7 @@ dependencies = [
 dev = [
     "matplotlib>=3.9",
     "pytest>=8.0",
+    "pytest-xdist>=3.8.0",
 ]
 
 [build-system]
@@ -30,3 +31,5 @@ packages = ["quantenv", "environments/quant_research", "environments/quant_resea
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# One worker per core. The sandbox tests share their user through a lock.
+addopts = "-n auto"

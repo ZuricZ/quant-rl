@@ -118,12 +118,12 @@ def test_main_refuses_a_budget_for_the_notools_taskset(monkeypatch, tmp_path):
         _main(monkeypatch, tmp_path, "--taskset", NOTOOLS, "--budget", "3")
 
 
-def test_vf_run_accepts_every_registry_entry(tmp_path):
+@pytest.mark.parametrize("name", list(run_models.load_models()))
+def test_vf_run_accepts_every_registry_entry(name, tmp_path):
     pytest.importorskip("fcntl")
-    names = list(run_models.load_models())
     done = subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "run_models.py"), *names]
-        + ["--secret", "x", "--dry-run", "--out", str(tmp_path), "--tasks", "2"],
+        [sys.executable, str(ROOT / "scripts" / "run_models.py"), name]
+        + ["--secret", "x", "--dry-run", "--out", str(tmp_path), "--tasks", "1"],
         capture_output=True,
         text=True,
         check=False,

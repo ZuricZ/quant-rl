@@ -18,6 +18,7 @@ from pydantic import ValidationError
 pytest.importorskip("fcntl")
 
 import verifiers.v1 as vf  # noqa: E402
+from conftest import SMALL_MARKET  # noqa: E402
 
 from quant_research import grade, taskset  # noqa: E402
 from quant_research.servers.research import (  # noqa: E402
@@ -40,6 +41,9 @@ from quantenv.sources import synthetic  # noqa: E402
 
 COLUMN = baselines.column_code("f00")
 SECRET = "a-test-secret-value"
+
+# Every task here gets a small market (see conftest.py).
+pytestmark = pytest.mark.usefixtures("small_market")
 DATA = ResearchData(split="eval", index=0)
 
 
@@ -73,7 +77,7 @@ def _trace(task: QuantResearchTask, state: ResearchState) -> vf.Trace:
 
 
 @pytest.fixture(scope="module")
-def task() -> QuantResearchTask:
+def task(small_market) -> QuantResearchTask:
     return next(iter(QuantResearchTaskset(_config())))
 
 
@@ -196,10 +200,11 @@ def test_prompt_states_the_hidden_run_and_its_time_limit():
     assert f"so it may take {seconds:.1f} seconds." in prompt
 
 
-def test_default_market_prompt_states_the_fixed_limits():
+def test_prompt_states_the_markets_limits():
     prompt = next(iter(QuantResearchTaskset(_config(vary=False)))).data.prompt
-    assert "10,000 unseen periods" in prompt
-    assert "so it may take 10.6 seconds." in prompt
+    assert f"{SMALL_MARKET.n_hidden:,} unseen periods" in prompt
+    seconds = scoring.TimeLimit().seconds(taskset.run_rows(False, SMALL_MARKET))
+    assert f"so it may take {seconds:.1f} seconds." in prompt
 
 
 @pytest.mark.parametrize("hidden", [False, True])
@@ -217,7 +222,7 @@ def test_prompt_rows_match_the_data(hidden, variation):
 def test_unvaried_prompt_keeps_the_fixed_opening_and_example():
     task = next(iter(QuantResearchTaskset(_config(vary=False))))
     prompt = task.data.prompt
-    assert task.variation is None and task.market == synthetic.DEFAULT_CONFIG
+    assert task.variation is None and task.market == SMALL_MARKET
     assert prompt.startswith(taskset.FIXED_OPENING)
     assert taskset.EXAMPLE in prompt and "## Request" not in prompt
 
@@ -241,7 +246,7 @@ def test_varied_prompts_state_the_requested_style():
 
 def test_pattern_example_runs_once_its_placeholder_is_a_column():
     code = taskset.PATTERN_EXAMPLE.split("```python\n")[1].split("```")[0]
-    load = functools.partial(synthetic.visible_data, 0)
+    load = functools.partial(synthetic.visible_data, 0, SMALL_MARKET)
     # As it stands it cannot be submitted: "COLUMN" is not a column.
     assert "COLUMN" not in load().panel.frame.columns
     with pytest.raises(AlphaError, match="COLUMN"):
@@ -270,8 +275,8 @@ def test_grading_timeout_covers_every_scored_run():
 def test_describe_lists_visible_data_only():
     text = asyncio.run(_toolset().describe())
     assert "fwd_return" not in text
-    assert "timestamps: 2000" in text
-    assert "assets: 200" in text
+    assert f"timestamps: {SMALL_MARKET.n_visible}" in text
+    assert f"assets: {SMALL_MARKET.n_assets}" in text
 
 
 def test_backtest_matches_scoring_and_counts():
@@ -280,11 +285,13 @@ def test_backtest_matches_scoring_and_counts():
     performance = scoring.backtest(
         COLUMN,
         functools.partial(
-            synthetic.visible_data, synthetic.dataset_seed(0, SECRET, "eval")
+            synthetic.visible_data, synthetic.dataset_seed(0, SECRET, "eval"), SMALL_MARKET
         ),
     )
     assert out == backtest_report(
-        backtest_scope(synthetic.visible_data(synthetic.dataset_seed(0, SECRET, "eval"))),
+        backtest_scope(
+            synthetic.visible_data(synthetic.dataset_seed(0, SECRET, "eval"), SMALL_MARKET)
+        ),
         performance,
         left=1,
     )
@@ -307,8 +314,10 @@ def test_backtest_report_explains_its_numbers():
         year_sharpe_max=2.1,
         max_drawdown=0.1,
     )
-    scope = backtest_scope(synthetic.visible_data(0))
-    assert "last 1000 of 2000 visible timestamps" in scope
+    scope = backtest_scope(synthetic.visible_data(0, SMALL_MARKET))
+    n = SMALL_MARKET.n_visible
+    window = walkforward.WalkForward().window
+    assert f"last {n - window} of {n} visible timestamps" in scope
     assert "252 periods per year" in scope and "2 bp" in scope
     out = backtest_report(scope, performance, left=4)
     for text in (
@@ -383,7 +392,7 @@ def test_no_submission_is_invalid(task):
 
 
 def test_grader_scores_on_hidden_periods(tmp_path):
-    truth = synthetic.ground_truth(0)
+    truth = synthetic.ground_truth(0, SMALL_MARKET)
     code = baselines.weighted_code(truth.weights)
     request, result = tmp_path / "request.json", tmp_path / "result.json"
     request.write_text(
@@ -400,7 +409,7 @@ def test_grader_scores_on_hidden_periods(tmp_path):
     )
     grade.main([str(request), str(result)])
     assert not request.exists()
-    hidden = functools.partial(synthetic.hidden_data, 0)
+    hidden = functools.partial(synthetic.hidden_data, 0, SMALL_MARKET)
     expected = scoring.score_submission(code, 1.0, hidden)
     score = json.loads(result.read_text())
     assert "reward" not in score  # The host applies the rule, not the image.
@@ -420,8 +429,10 @@ def test_trace_of_a_real_task_serialises(task, tmp_path):
 
 
 class _LocalRuntime:
-    """The parts of vf.Runtime that grade() uses, run on this machine, as the
-    task image would: `python` is an interpreter with this package."""
+    """The parts of vf.Runtime that the tasks use, run on this machine, as the
+    task image would: `python` is an interpreter with this package. The
+    grader runs in this process, so a market patched by a fixture
+    (`small_market`) reaches it."""
 
     def __init__(self, tmp_path):
         self.argv: list[str] = []
@@ -436,6 +447,9 @@ class _LocalRuntime:
 
     async def run(self, argv: list[str], env: dict[str, str]):
         self.argv = argv
+        if argv[:3] == ["python", "-m", "quant_research.grade"]:
+            grade.main(argv[3:])
+            return vf.ProgramResult(exit_code=0, stdout="", stderr="")
         path = f"{self._bin}:{os.environ['PATH']}"
         done = subprocess.run(
             argv, env={**os.environ, "PATH": path}, capture_output=True, text=True
