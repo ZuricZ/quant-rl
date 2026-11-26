@@ -11,9 +11,7 @@
 #
 # Qwen3 sampling follows Qwen's recommendation for thinking mode. The two
 # training candidates get 16,384 tokens per response: at 8,192, Qwen3.5-9B
-# ran out while thinking in 73 of 120 no-tools episodes (results/day9). The
-# no-tools taskset states the limit in its prompt (`reply_tokens`); keep the
-# two equal.
+# ran out while thinking in 73 of 120 no-tools episodes (results/day9).
 
 # Hosted: OpenRouter serves Qwen behind an OpenAI-compatible API.
 #

@@ -38,7 +38,42 @@ Why the 100 invalid episodes failed:
 Of the 20 alphas that ran, 1 was flagged by lookahead and 3 by the IC profile.
 The 16 honest ones reach a mean IC of 0.008, below the naive baseline.
 
-Because of the token cutoffs, the training candidates now sample 16,384
-tokens per reply, and the no-tools prompt states the limit
-(`reply_tokens`). This table is the 8,192-token baseline; the
-before/after comparison uses the rerun at 16,384.
+## What the cut-off replies were thinking
+
+All 73 were cut inside the thinking: none had started the answer. Across 120
+replies at temperature 0.6, the same prompt finished in some rollouts and ran
+out in others (only 5 of 30 tasks ran out in all 4), so a reply either
+answers or falls into a mode it does not leave.
+
+- **Re-verifying rules, not designing.** 42 of the 73 had already drafted the
+  full alpha in their thinking (median at 56% of it); the rest was spent
+  re-reading the prompt. 22% of their thinking quotes the prompt back,
+  against 3% in replies that finished. Typical: a trivial `-ret` reversal
+  decided early, then "Wait, one more constraint:" over "features is called
+  once", "a fresh instance is fit", "predict gets the block", each confirmed
+  ("This is consistent.") and checked again. A median 40 "Wait" per cut
+  reply, 0 per finished one.
+- **The most re-checked rules** (episodes of 73 with a "Wait" on them):
+  `features` once versus per block and state on `self` (69), the run's row
+  count and seconds (69; median 10 mentions per cut reply, 0 per finished
+  one), whether `predict` sees `fwd_return` (69), feature choice and signs
+  (67), whether the IC can reach the 0.05 ceiling (45: the ceiling read as a
+  target).
+- **Not the style request.** Cut rate by request: none 75%, momentum 75%,
+  reversal 67%, low turnover 50%, combine several features 38%.
+- **Longer thinking did not pay.** The best rewards came at 500 to 2,300
+  reasoning tokens; finished replies over 4,000 tokens were valid 2 times in
+  8. Very short ones failed on the interface: 11 replies redefined
+  `class Alpha:` instead of subclassing it.
+
+## Changes for the rerun
+
+Replies get 16,384 tokens (`runs/models.toml`). The no-tools prompt does not
+ask for short thinking, which could cost quality, and states no token count
+(the taskset does not know the sampling limit and the model cannot count
+tokens). It now says that the reply, thinking included, has a length limit
+and a cut-off reply scores -1, that the rules are complete so the code is
+checked against them once; gives the honest IC range (0.01 to 0.03) so the
+ceiling is not read as a target; replaces the scored run's rows and seconds
+with "vectorised polars expressions finish well inside this"; and says to
+subclass `Alpha`, not redefine it.

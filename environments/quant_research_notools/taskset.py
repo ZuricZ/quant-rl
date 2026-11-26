@@ -62,8 +62,8 @@ the portfolio described below.
 
 """
     + ALPHA_SECTION
-    + "A scored run hands over {score_rows:.1f}M rows, so it may take "
-    "{score_limit:.1f} seconds.\n\n"
+    + "Vectorised polars expressions finish well inside this; Python loops "
+    "over rows do not.\n\n"
     "## Portfolio\n\n"
     + PORTFOLIO
     + "\n\n"
@@ -79,11 +79,15 @@ scores {invalid_reward:g}; an alpha caught reading the future scores \
 {flagged_reward:g}, and so does a rank IC of {max_ic:g} or more against any \
 future return, or an IC that fades faster than a smooth decay or than your \
 signal itself changes: honest alphas do neither. Any honest alpha scores higher \
-than both.
+than both. Honest alphas here reach a rank IC of about 0.01 to 0.03.
 
-Your reply, thinking included, is cut off after {reply_tokens:,} tokens, and a \
-reply cut off before its Python block scores {invalid_reward:g}. Think \
-briefly: an answer needs far fewer.
+Define your own class that subclasses `Alpha`, as the example does; a reply \
+that redefines `Alpha` itself has no alpha.
+
+Your reply, thinking included, has a length limit, and a reply cut off before \
+its Python block scores {invalid_reward:g}, however good the alpha. The rules \
+above are complete: settle on an idea, write the code, check it against them \
+once, then answer.
 """
 )
 
@@ -115,7 +119,6 @@ def feature_table(data: EvalData) -> str:
 def prompt(
     description: str,
     table: str,
-    reply_tokens: int,
     check_config: checks.CheckConfig = checks.CheckConfig(),
     config: synthetic.Config = synthetic.DEFAULT_CONFIG,
     variation: int | None = None,
@@ -125,7 +128,6 @@ def prompt(
     Args:
         description: Output of `describe_panel` on the visible data.
         table: Output of `feature_table` on the visible data.
-        reply_tokens: The reply's token limit, stated in the prompt.
         check_config: Settings of the checks run when grading; gives the IC
             ceiling, which also scales the reward.
         config: The task's generator parameters.
@@ -140,7 +142,6 @@ def prompt(
     return PROMPT.format(
         description=description,
         feature_table=table,
-        reply_tokens=reply_tokens,
         request=choices["request"],
         example=choices["example"],
         **prompt_values(check_config, config),
@@ -172,9 +173,6 @@ class NoToolsTaskConfig(vf.TaskConfig):
     Attributes:
         secret: The taskset's secret; the taskset sets it on every task.
         image: Task image; the main taskset's, which installs this package.
-        reply_tokens: The reply's token limit, thinking included, stated in
-            the prompt. Not enforced here: keep it equal to the sampling
-            `max_tokens` of the run.
         check_config: Settings of the lookahead checks run when grading.
         sandbox_user: User that runs the alpha when grading; see
             `quant_research.servers.research.ResearchConfig`.
@@ -183,7 +181,6 @@ class NoToolsTaskConfig(vf.TaskConfig):
 
     secret: SecretStr | None = None
     image: str = IMAGE
-    reply_tokens: int = 16384
     check_config: checks.CheckConfig = checks.CheckConfig()
     sandbox_user: str | None = SANDBOX_USER
     vary: bool = True
@@ -342,7 +339,6 @@ class NoToolsTaskset(vf.Taskset[NoToolsTask, NoToolsConfig]):
                     prompt=prompt(
                         describe_panel(visible.panel),
                         feature_table(visible),
-                        task_config.reply_tokens,
                         task_config.check_config,
                         market,
                         task.variation,
