@@ -89,16 +89,14 @@ def test_prompt_scores_every_feature_and_ret_on_visible_data(task):
         assert text not in prompt
 
 
-def test_prompt_states_the_answer_format_and_penalties(task):
+def test_prompt_states_the_answer_format_not_the_checks_or_reward(task):
     prompt = task.data.prompt
     assert "```python block" in prompt and "backtest" not in prompt
-    assert f"divided by {checks.CheckConfig().max_ic:g}" in prompt
-    assert "fades faster than" in prompt
-    assert f"scores {reward.INVALID_REWARD:g}" in prompt
-    assert f"future scores {reward.FLAGGED_REWARD:g}" in prompt
-    assert "redefines `Alpha` itself" in prompt
-    assert "has a length limit" in prompt
-
+    assert "rather than redefining `Alpha`" in prompt
+    assert "judged by its mean rank IC" in prompt
+    max_ic = checks.CheckConfig().max_ic
+    for text in (f"IC of {max_ic:g}", f"by {max_ic:g}", "fades", "decay", "scores -"):
+        assert text not in prompt
 
 def test_extract_code_takes_the_last_python_block():
     reply = "```python\nfirst\n```\ntext\n```python\nsecond\n```"

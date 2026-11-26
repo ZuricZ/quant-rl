@@ -71,23 +71,11 @@ the portfolio described below.
     + """## Answer
 
 Reply with your alpha in one ```python block; if there are several, the last \
-one is used. It is scored on the {n_hidden:,} unseen periods that directly \
-follow the visible ones, walk-forward with the same {window}-timestamp \
-training window. The score is its mean rank IC against `fwd_return` there, \
-divided by {max_ic:g}. A reply without a Python block, or whose alpha fails, \
-scores {invalid_reward:g}; an alpha caught reading the future scores \
-{flagged_reward:g}, and so does a rank IC of {max_ic:g} or more against any \
-future return, or an IC that fades faster than a smooth decay or than your \
-signal itself changes: honest alphas do neither. Any honest alpha scores higher \
-than both. Honest alphas here reach a rank IC of about 0.01 to 0.03.
-
-Define your own class that subclasses `Alpha`, as the example does; a reply \
-that redefines `Alpha` itself has no alpha.
-
-Your reply, thinking included, has a length limit, and a reply cut off before \
-its Python block scores {invalid_reward:g}, however good the alpha. The rules \
-above are complete: settle on an idea, write the code, check it against them \
-once, then answer.
+one is used. Define your own class that subclasses `Alpha`, as the example \
+does, rather than redefining `Alpha`. The alpha is run on the {n_hidden:,} \
+unseen periods that directly follow the visible ones, walk-forward with the \
+same {window}-timestamp training window, and judged by its mean rank IC \
+against `fwd_return` there.
 """
 )
 
@@ -119,7 +107,6 @@ def feature_table(data: EvalData) -> str:
 def prompt(
     description: str,
     table: str,
-    check_config: checks.CheckConfig = checks.CheckConfig(),
     config: synthetic.Config = synthetic.DEFAULT_CONFIG,
     variation: int | None = None,
 ) -> str:
@@ -128,8 +115,6 @@ def prompt(
     Args:
         description: Output of `describe_panel` on the visible data.
         table: Output of `feature_table` on the visible data.
-        check_config: Settings of the checks run when grading; gives the IC
-            ceiling, which also scales the reward.
         config: The task's generator parameters.
         variation: The task's variation seed, or None for a task without
             variation. Varies the style request and the example, not the
@@ -144,7 +129,7 @@ def prompt(
         feature_table=table,
         request=choices["request"],
         example=choices["example"],
-        **prompt_values(check_config, config),
+        **prompt_values(config),
     )
 
 
@@ -339,7 +324,6 @@ class NoToolsTaskset(vf.Taskset[NoToolsTask, NoToolsConfig]):
                     prompt=prompt(
                         describe_panel(visible.panel),
                         feature_table(visible),
-                        task_config.check_config,
                         market,
                         task.variation,
                     ),

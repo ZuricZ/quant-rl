@@ -68,12 +68,10 @@ answers or falls into a mode it does not leave.
 
 ## Changes for the rerun
 
-Replies get 16,384 tokens (`runs/models.toml`). The no-tools prompt does not
-ask for short thinking, which could cost quality, and states no token count
-(the taskset does not know the sampling limit and the model cannot count
-tokens). It now says that the reply, thinking included, has a length limit
-and a cut-off reply scores -1, that the rules are complete so the code is
-checked against them once; gives the honest IC range (0.01 to 0.03) so the
-ceiling is not read as a target; replaces the scored run's rows and seconds
-with "vectorised polars expressions finish well inside this"; and says to
-subclass `Alpha`, not redefine it.
+Replies get 16,384 tokens (`runs/models.toml`); the prompt does not mention
+a limit. Neither taskset's prompt states the checks (the IC ceiling, the
+decay rules) or the reward and penalties any more: the ceiling told a leaking
+alpha how far it could go, and the reward belongs to the trainer. The no-tools
+prompt also drops the scored run's rows and seconds (vectorised polars
+expressions finish well inside the limit) and says to subclass `Alpha`
+rather than redefine it.

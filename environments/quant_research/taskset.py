@@ -220,12 +220,7 @@ training window. A scored run hands over {score_rows:.1f}M rows, so it may \
 take {score_limit:.1f} seconds: an alpha that fits its backtest limit fits \
 this one too, if its cost grows with the rows it gets.
 
-You have at most {max_turns} turns. An episode that ends without `submit`, \
-or whose alpha fails, scores {invalid_reward:g}; one caught reading the future \
-scores {flagged_reward:g}, and so does a rank IC of {max_ic:g} or more against any \
-future return, or an IC that fades faster than a smooth decay or than your \
-signal itself changes: honest alphas do neither. Any honest alpha scores higher \
-than both.
+You have at most {max_turns} turns, and only a submitted alpha counts.
 """
 )
 
@@ -308,15 +303,12 @@ def scoring_timeout(
 
 
 def prompt_values(
-    check_config: checks.CheckConfig = checks.CheckConfig(),
     config: synthetic.Config = synthetic.DEFAULT_CONFIG,
 ) -> dict[str, Any]:
     """The values the prompt sections refer to, apart from the description,
     the episode limits and the varied parts.
 
     Args:
-        check_config: Settings of the checks run when grading; gives the IC
-            ceiling.
         config: The task's generator parameters.
 
     Returns:
@@ -329,15 +321,12 @@ def prompt_values(
     return dict(
         refit_every=wf.refit_every,
         window=wf.window,
-        max_ic=check_config.max_ic,
         startup=limit.startup,
         per_million_rows=limit.per_million_rows,
         backtest_rows=backtest_rows / 1e6,
         backtest_limit=limit.seconds(backtest_rows),
         score_rows=score_rows / 1e6,
         n_hidden=config.n_hidden,
-        invalid_reward=reward.INVALID_REWARD,
-        flagged_reward=reward.FLAGGED_REWARD,
         score_limit=limit.seconds(score_rows),
         cost_bp=config.cost * 1e4,
         max_null=walkforward.MAX_NULL_SHARE,
@@ -348,7 +337,6 @@ def prompt(
     description: str,
     budget: int,
     max_turns: int,
-    check_config: checks.CheckConfig = checks.CheckConfig(),
     config: synthetic.Config = synthetic.DEFAULT_CONFIG,
     variation: int | None = None,
 ) -> str:
@@ -358,8 +346,6 @@ def prompt(
         description: Output of `describe_panel` on the visible data.
         budget: Backtest calls allowed.
         max_turns: Model turns allowed.
-        check_config: Settings of the checks run when grading; the prompt
-            states the IC ceiling.
         config: The task's generator parameters.
         variation: The task's variation seed, or None for a task without
             variation; see `prompt_choices`.
@@ -371,7 +357,7 @@ def prompt(
         description=description,
         budget=budget,
         max_turns=max_turns,
-        **prompt_values(check_config, config),
+        **prompt_values(config),
         **prompt_choices(variation, config.style),
     )
 
@@ -695,7 +681,6 @@ class QuantResearchTaskset(vf.Taskset[QuantResearchTask, QuantResearchConfig]):
                         describe_panel(visible.panel),
                         task_config.tools.budget,
                         task_config.max_turns,
-                        task_config.check_config,
                         market,
                         task.variation,
                     ),
