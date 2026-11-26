@@ -9,7 +9,9 @@
 #                without auth; the runner then sends a dummy key.
 #   sampling     Optional: temperature, top_p, max_tokens (per response).
 #
-# Qwen3 sampling follows Qwen's recommendation for thinking mode.
+# Qwen3 sampling follows Qwen's recommendation for thinking mode. The two
+# training candidates get 16,384 tokens per response: at 8,192, Qwen3.5-9B
+# ran out while thinking in 73 of 120 no-tools episodes (results/day9).
 
 # Hosted: OpenRouter serves Qwen behind an OpenAI-compatible API.
 #
@@ -21,13 +23,13 @@
 model = "qwen/qwen3.6-35b-a3b"
 base_url = "https://openrouter.ai/api/v1"
 api_key_var = "OPENROUTER_API_KEY"
-sampling = { temperature = 0.6, top_p = 0.95, max_tokens = 8192 }
+sampling = { temperature = 0.6, top_p = 0.95, max_tokens = 16384 }
 
 [models.qwen3_5-9b]
 model = "qwen/qwen3.5-9b"
 base_url = "https://openrouter.ai/api/v1"
 api_key_var = "OPENROUTER_API_KEY"
-sampling = { temperature = 0.6, top_p = 0.95, max_tokens = 8192 }
+sampling = { temperature = 0.6, top_p = 0.95, max_tokens = 16384 }
 
 # Qwen3-14B's context on OpenRouter is 40,960 tokens, short for 30 turns with
 # thinking. (OpenRouter dropped qwen/qwen3-8b in November 2026.)

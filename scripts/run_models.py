@@ -23,7 +23,7 @@ The secret picks the datasets: pass the same one to every model and to
 `scripts/run_baselines.py` so they score the same tasks.
 
 The task image must exist where the runtime looks for it: build it with
-`docker build -t quant-research:0.1.0 .` for `--runtime docker`, or push it
+`docker build -t quant-research:0.1.1 .` for `--runtime docker`, or push it
 and pass `--image` for `--runtime prime`.
 
 Usage:

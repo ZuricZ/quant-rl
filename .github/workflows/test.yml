@@ -27,7 +27,7 @@ jobs:
         run: uv run pytest -q -p no:cacheprovider
 
       - name: Build the task image
-        run: docker build -t quant-research:0.1.0 .
+        run: docker build -t quant-research:0.1.1 .
 
       # The sandbox tests need root, to run alpha code as `nobody`, so they
       # skip in the step above. They run here inside the task image, where
@@ -35,9 +35,9 @@ jobs:
       # cannot enter /home/runner to start uv's Python.
       - name: Sandbox tests as root, in the task image
         run: >-
-          docker run --rm
+          docker run --rm -e QUANT_RESEARCH_IMAGE=1
           -v "$PWD/tests/test_sandbox.py:/tests/test_sandbox.py:ro"
-          quant-research:0.1.0
+          quant-research:0.1.1
           sh -c "pip install -q --root-user-action=ignore pytest &&
           python -m pytest -q -p no:cacheprovider /tests/test_sandbox.py"
 

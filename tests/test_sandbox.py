@@ -30,6 +30,13 @@ needs_root = pytest.mark.skipif(
     reason="running as another user needs root on POSIX",
 )
 
+# The task image restricts the project's files (see the Dockerfile); CI's
+# sandbox step runs these tests there and sets this variable.
+in_image = pytest.mark.skipif(
+    os.environ.get("QUANT_RESEARCH_IMAGE") != "1",
+    reason="checks the task image's file permissions",
+)
+
 
 def _backtest(body: str, user: str | None = None) -> metrics.Performance:
     code = f"class S(Alpha):\n    def predict(self, df):\n{body}"
@@ -234,3 +241,35 @@ def test_concurrent_sessions_of_one_user_do_not_kill_each_other():
         fast = pool.submit(_backtest, short, "nobody")
         results = [slow.result(), fast.result()]
     assert all(math.isfinite(r.sharpe) for r in results)
+
+
+@needs_root
+@in_image
+@pytest.mark.parametrize(
+    "body",
+    [
+        "        from quantenv import checks\n",
+        "        from quantenv.sources import synthetic\n",
+        "        import quant_research.grade\n",
+        "        import os, quantenv\n"
+        "        open(os.path.join(os.path.dirname(quantenv.__file__), 'checks.py'))\n",
+    ],
+)
+def test_sandbox_user_cannot_read_the_checks_or_the_generator(body):
+    _backtest(body + "        return pl.col('f00')\n")  # As root it can.
+    # A locked file reads as a PermissionError, a locked package as not found.
+    with pytest.raises(AlphaError, match="PermissionError|ImportError|No module"):
+        _backtest(body + "        return pl.col('f00')\n", user="nobody")
+
+
+@needs_root
+@in_image
+def test_sandbox_user_can_use_the_alpha_libraries():
+    body = (
+        "        from sklearn.linear_model import Ridge\n"
+        "        x = df.select('f00', 'f01').fill_null(0.0).to_numpy()\n"
+        "        Ridge().fit(x, x[:, 0])\n"
+        "        df.select(pds.lin_reg('f00', target='f01'))\n"
+        "        return pl.col('f00')\n"
+    )
+    _backtest(body, user="nobody")

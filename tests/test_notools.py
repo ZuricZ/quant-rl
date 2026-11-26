@@ -11,7 +11,7 @@ import pytest
 pytest.importorskip("fcntl")
 
 import verifiers.v1 as vf  # noqa: E402
-from test_taskset import SECRET, _LocalRuntime  # noqa: E402
+from test_taskset import LEAK_WORDS, SECRET, _LocalRuntime  # noqa: E402
 
 from quant_research.servers.research import ResearchData  # noqa: E402
 from quant_research.taskset import (  # noqa: E402
@@ -89,13 +89,15 @@ def test_prompt_scores_every_feature_and_ret_on_visible_data(task):
         assert text not in prompt
 
 
-def test_prompt_states_the_answer_format_and_penalties(task):
+def test_prompt_states_the_answer_format_not_the_checks_or_reward(task):
     prompt = task.data.prompt
     assert "```python block" in prompt and "backtest" not in prompt
-    assert f"divided by {checks.CheckConfig().max_ic:g}" in prompt
-    assert "fades faster than" in prompt
-    assert f"scores {reward.INVALID_REWARD:g}" in prompt
-    assert f"future scores {reward.FLAGGED_REWARD:g}" in prompt
+    assert "rather than redefining `Alpha`" in prompt
+    assert "judged by its mean rank IC" in prompt
+    max_ic = checks.CheckConfig().max_ic
+    assert f"IC of {max_ic:g}" not in prompt and f"by {max_ic:g}" not in prompt
+    for word in LEAK_WORDS:
+        assert word not in prompt.lower()
 
 
 def test_extract_code_takes_the_last_python_block():
@@ -148,4 +150,4 @@ def test_episode_ends_after_one_reply(task):
 def test_tasks_grade_in_a_fresh_container_of_the_image(task):
     assert task.NEEDS_CONTAINER
     assert task.scoring.mode == "isolated"
-    assert task.data.image == "quant-research:0.1.0"
+    assert task.data.image == "quant-research:0.1.1"
