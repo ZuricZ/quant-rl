@@ -10,6 +10,7 @@ continues through it to the class its getter returns, so namespaces such
 as polars' `Expr.str` can be browsed.
 """
 
+import functools
 import importlib
 import inspect
 import types
@@ -21,21 +22,29 @@ from typing import Any
 _TEST_PARTS = frozenset({"tests", "testing", "conftest"})
 
 
+def _getter(obj: Any) -> Any:
+    """A property's getter, or None if `obj` is not a property."""
+    if isinstance(obj, property):
+        return obj.fget
+    if isinstance(obj, functools.cached_property):
+        return obj.func
+    return None
+
+
 def _package(obj: Any) -> str | None:
     """The top-level package an object belongs to, or None if it does not
     say (plain values, such as a float constant). A property belongs to its
     getter's package."""
-    if isinstance(obj, property):
-        obj = obj.fget
+    obj = _getter(obj) or obj
     name = obj.__name__ if isinstance(obj, types.ModuleType) else None
     name = name or getattr(obj, "__module__", None)
     return name.split(".")[0] if isinstance(name, str) else None
 
 
-def _returned_class(prop: property) -> type | None:
+def _returned_class(prop: Any) -> type | None:
     """The class a property's getter is annotated to return, if any."""
     try:
-        returned = typing.get_type_hints(prop.fget).get("return")
+        returned = typing.get_type_hints(_getter(prop)).get("return")
     # Annotations that do not resolve, for any reason: nothing to follow.
     except Exception:  # noqa: BLE001
         return None
@@ -66,7 +75,7 @@ def _step(obj: Any, path: list[str]) -> Any:
     Raises:
         LookupError: If there is neither.
     """
-    holder = _returned_class(obj) if isinstance(obj, property) else obj
+    holder = _returned_class(obj) if _getter(obj) else obj
     if holder is None:
         raise LookupError(f"no {'.'.join(path)}")
     try:
@@ -91,7 +100,7 @@ def _step(obj: Any, path: list[str]) -> Any:
 def _members(obj: Any, allowed: set[str]) -> list[str]:
     """Public members that a lookup would accept: a module's `__all__` if it
     has one, else what `dir` lists, without leading underscores."""
-    if isinstance(obj, property):
+    if _getter(obj):
         obj = _returned_class(obj)
         if obj is None:
             return []
@@ -172,7 +181,7 @@ def lookup(name: str, packages: Mapping[str, str], limit: int) -> str:
         LookupError: If `resolve` refuses the name.
     """
     full, obj = resolve(name, packages)
-    target = obj.fget if isinstance(obj, property) else obj
+    target = _getter(obj) or obj
     text = f"{full}{_signature(target)}\n\n{inspect.getdoc(target) or '(no docstring)'}"
     if len(text) > limit:
         note = f"\n[cut at {limit} characters]"
@@ -180,7 +189,7 @@ def lookup(name: str, packages: Mapping[str, str], limit: int) -> str:
     browsable = (
         inspect.isclass(obj)
         or isinstance(obj, types.ModuleType)
-        or (isinstance(obj, property) and _returned_class(obj) is not None)
+        or (_getter(obj) is not None and _returned_class(obj) is not None)
     )
     if browsable:
         text += f"\n\nPublic members: {', '.join(_members(obj, set(packages.values())))}"

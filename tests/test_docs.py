@@ -87,6 +87,7 @@ def test_unknown_name_is_a_lookup_error():
         importlib.import_module("quantenv.scoring"),  # A module.
         checks.CheckConfig,  # A class.
         checks.CheckConfig(),  # An instance.
+        {"max_ic": 0.05},  # A plain value, which says no package.
     ],
 )
 def test_nothing_reaches_another_package_through_an_allowed_one(
