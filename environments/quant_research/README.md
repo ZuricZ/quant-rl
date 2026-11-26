@@ -20,6 +20,7 @@ scored on unseen periods, which are built only after the episode ends.
   | Tool | Returns |
   | --- | --- |
   | `describe()` | Columns, timestamp range, number of assets |
+  | `docs(name)` | Signature and docstring of a polars, polars-ds, scikit-learn, scipy or numpy object; a class's or module's members. Free. |
   | `backtest(code)` | Net Sharpe ± s.e., gross Sharpe, turnover, rank IC ± s.e., per-year range. Costs one unit of budget. |
   | `submit(code, claimed_sharpe)` | Ends the episode |
 

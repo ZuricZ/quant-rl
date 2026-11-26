@@ -279,12 +279,18 @@ def test_grading_timeout_covers_every_scored_run():
 
 
 @pytest.mark.parametrize(
-    "name", ["pl.Expr.rolling_mean", "pds.lin_reg", "sklearn.linear_model.Ridge"]
+    ("name", "full"),
+    [
+        ("pl.Expr.rolling_mean", "polars.Expr.rolling_mean(self, window_size"),
+        ("pds.lin_reg", "polars_ds.lin_reg(*x"),
+        ("sklearn.linear_model.Ridge", "sklearn.linear_model.Ridge(alpha"),
+    ],
 )
-def test_docs_looks_up_the_alpha_libraries_for_free(name):
+def test_docs_looks_up_the_alpha_libraries_for_free(name, full):
     tools = _toolset()
     text = asyncio.run(tools.docs(name))
-    assert name.split(".")[-1] in text and len(text) <= DOC_LIMIT
+    assert text.startswith(full)
+    assert len(text.split("\n\nPublic members: ")[0]) <= DOC_LIMIT
     assert tools._episode.backtests_used == 0
 
 
