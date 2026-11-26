@@ -68,11 +68,9 @@ ALPHA_SECTION = """\
 ## Alpha
 
 Write Python that defines exactly one subclass of the predefined class \
-`Alpha`. `Alpha` and `pl` (polars, as after `import polars as pl`) are \
-already defined. Installed: polars {polars_version}, polars-ds \
-{polars_ds_version} (`import polars_ds as pds`; for example \
-`train.select(pds.lin_reg("x1", "x2", target="fwd_return", l2_reg=1.0))\
-.item()` is the Series of ridge coefficients), scikit-learn \
+`Alpha`. `pl` and `pds` are defined too, as after `import polars as pl` \
+and `import polars_ds as pds`. Installed: polars \
+{polars_version}, polars-ds {polars_ds_version}, scikit-learn \
 {sklearn_version}, scipy {scipy_version} and numpy {numpy_version}; nothing \
 else.
 

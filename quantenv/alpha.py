@@ -4,6 +4,7 @@ from typing import Any
 
 import numpy as np
 import polars as pl
+import polars_ds as pds
 
 
 class AlphaError(Exception):
@@ -68,7 +69,7 @@ def compile_alpha(code: str) -> type[Alpha]:
 
     Args:
         code: Python source defining exactly one subclass of `Alpha`.
-            `pl` and `Alpha` are predefined.
+            `pl` (polars), `pds` (polars-ds) and `Alpha` are predefined.
 
     Returns:
         The subclass.
@@ -77,7 +78,12 @@ def compile_alpha(code: str) -> type[Alpha]:
         AlphaError: If the code fails to run or does not define exactly one
             subclass of `Alpha`.
     """
-    namespace: dict[str, Any] = {"pl": pl, "Alpha": Alpha, "__name__": "alpha_code"}
+    namespace: dict[str, Any] = {
+        "pl": pl,
+        "pds": pds,
+        "Alpha": Alpha,
+        "__name__": "alpha_code",
+    }
     try:
         exec(compile(code, "<alpha>", "exec"), namespace)
     except Exception as e:

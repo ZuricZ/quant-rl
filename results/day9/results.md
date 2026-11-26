@@ -77,3 +77,24 @@ alpha how far it could go, and the reward belongs to the trainer. The no-tools
 prompt also drops the scored run's rows and seconds (vectorised polars
 expressions finish well inside the limit) and says to subclass `Alpha`
 rather than redefine it.
+
+## Rerun at 16,384 tokens, with a polars-ds example
+
+The same eval on 26 November 2026, after the changes above, at 16,384 tokens
+(`traces/qwen3_5-9b-notools-16k-example.jsonl.gz`, `rows-16k-example.csv`).
+Its prompt named the libraries and gave one polars-ds call as an example
+(`train.select(pds.lin_reg(...)).item()`); it did not yet name scipy. All
+120 episodes `ok`.
+
+| Agent              | Episodes | Honest | Lookahead rate | Implausible IC rate | Invalid rate | Reward | Net Sharpe | IC    |
+|--------------------|----------|--------|----------------|---------------------|--------------|--------|------------|-------|
+| qwen3_5-9b-notools | 120      | 43     | 0.008          | 0.008               | 0.625        | -0.593 | 0.494      | 0.008 |
+
+- Cut off while thinking: 10 of 120 (73 at 8,192). Finished replies thought
+  for a median of about 1,600 tokens.
+- Invalid: 54 runtime errors, 11 with no `Alpha` subclass, 10 cut off.
+- The example steered the model to polars-ds: 64 of the first 102 answers
+  used it, 4 used scikit-learn. Answers that used polars-ds ran 29% of the
+  time, the rest 59%: 5 used `pds` without importing it, and most of the
+  others failed on polars mistakes in more complicated code. The final
+  prompt drops the example and predefines `pds` like `pl`.
