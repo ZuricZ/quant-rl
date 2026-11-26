@@ -7,7 +7,7 @@
 # rollout). From a prime-rl checkout, with this repository installed into its
 # environment (`uv pip install -e <quant-rl>`):
 #
-#   docker build -t quant-research:0.1.0 <quant-rl>
+#   docker build -t quant-research:0.1.1 <quant-rl>
 #   export QUANT_RESEARCH_SECRET=<a secret of your choosing>
 #   uv run rl @ <quant-rl>/runs/prime-rl/notools-smoke.toml
 #

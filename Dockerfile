@@ -2,7 +2,7 @@
 # project installed, so the reward's grader runs `python -m
 # quant_research.grade` with the image's interpreter.
 #
-#   docker build -t quant-research:0.1.0 .
+#   docker build -t quant-research:0.1.1 .
 #
 # Rebuild after changing quantenv/ or environments/: the grader runs the
 # image's copy. For a remote runtime, push the image to a registry and set

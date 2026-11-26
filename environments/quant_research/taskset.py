@@ -23,6 +23,7 @@ import uuid
 from collections.abc import Iterable, Iterator
 from typing import Any, Literal
 
+import polars as pl
 import verifiers.v1 as vf
 from pydantic import Field, SecretStr, field_validator
 
@@ -42,7 +43,7 @@ EVAL_TASKS = 30
 # What pydantic writes in place of a SecretStr when dumping.
 _MASK = "**********"
 # Built from the repository's Dockerfile; holds this package.
-IMAGE = "quant-research:0.1.0"
+IMAGE = "quant-research:0.1.1"
 _SCORE = "score"
 # Environment variable a taskset reads its secret from when none is set.
 SECRET_VAR = "QUANT_RESEARCH_SECRET"
@@ -66,7 +67,8 @@ ALPHA_SECTION = """\
 ## Alpha
 
 Write Python that defines exactly one subclass of the predefined class \
-`Alpha`. `pl` (polars) and `Alpha` are available without imports.
+`Alpha`. `pl` (polars {polars_version}) and `Alpha` are available without \
+imports.
 
 ```python
 class Alpha:
@@ -319,6 +321,7 @@ def prompt_values(
     backtest_rows = run_rows(hidden=False, config=config)
     score_rows = run_rows(hidden=True, config=config)
     return dict(
+        polars_version=pl.__version__,
         refit_every=wf.refit_every,
         window=wf.window,
         startup=limit.startup,

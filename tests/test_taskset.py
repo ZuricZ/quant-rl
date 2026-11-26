@@ -10,6 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import polars as pl
 import pytest
 from pydantic import ValidationError
 
@@ -148,6 +149,11 @@ def test_prompt_states_columns_budget_and_contract():
 def test_prompt_offers_the_seeded_generator():
     prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
     assert "self.rng" in prompt
+
+
+def test_prompt_names_the_pinned_polars_version():
+    prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
+    assert f"`pl` (polars {pl.__version__})" in prompt
 
 
 def test_prompt_states_no_checks_or_reward():
@@ -430,7 +436,7 @@ def test_grade_runs_the_images_python(tmp_path):
 
 def test_tasks_use_the_configured_image():
     task = next(iter(QuantResearchTaskset(_config())))
-    assert task.data.image == taskset.IMAGE == "quant-research:0.1.0"
+    assert task.data.image == taskset.IMAGE == "quant-research:0.1.1"
     other = QuantResearchConfig(
         secret=SECRET, task=QuantResearchTaskConfig(image="registry.example/qr:1")
     )
