@@ -12,10 +12,9 @@ Run as `python -m quant_research.servers.research`; verifiers launches it.
 
 import asyncio
 import functools
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import verifiers.v1 as vf
-from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
 from quantenv import docs as libdocs
@@ -24,6 +23,9 @@ from quantenv.alpha import AlphaError
 from quantenv.panel import EvalData, Panel
 from quantenv.sources import synthetic
 from quantenv.walkforward import WalkForward
+
+if TYPE_CHECKING:
+    from mcp.server.mcpserver import MCPServer
 
 BUDGET = 10
 SANDBOX_USER = "nobody"
@@ -97,7 +99,9 @@ class ResearchConfig(vf.ToolsetConfig):
         docs: Offer the `docs` tool. Off by default: the untrained model
             did worse with it (results/day10).
         check: Offer the `check` tool. Off by default: untrained models did
-            not gain from it (results/day11).
+            not gain from it (results/day11). It needs a sandbox user: code
+            running as the server's own user can read the unscrambled data
+            from the scoring worker's memory.
     """
 
     colocated: bool = True
@@ -228,7 +232,7 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
             self._summary = (describe_panel(data.panel), backtest_scope(data))
         return self._summary
 
-    def register(self, mcp: MCPServer) -> None:
+    def register(self, mcp: "MCPServer") -> None:
         """Registers the tools, leaving out optional tools that are off.
 
         Args:
@@ -298,6 +302,8 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
             raise ValueError("refused: the alpha is already submitted")
         try:
             async with self._running:
+                if self._episode.submitted:  # Submitted while this call waited.
+                    raise ValueError("refused: the alpha is already submitted")
                 await asyncio.to_thread(
                     scoring.check, code, self._visible(), user=self.config.sandbox_user
                 )

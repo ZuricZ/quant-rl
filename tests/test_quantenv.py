@@ -666,6 +666,7 @@ def test_scrambled_keeps_columns_and_values_but_not_their_order(data):
     for column in others:
         before, after = panel.frame.get_column(column), mixed.frame.get_column(column)
         assert after.sort(nulls_last=True).equals(before.sort(nulls_last=True))
+        assert after.is_null().equals(before.is_null())
         assert not after.equals(before)
     assert not scrambled(panel, 8).frame.equals(mixed.frame)
 
@@ -688,6 +689,23 @@ def test_check_runs_working_code_and_reports_failing_code():
     scoring.check(baselines.column_code("f00"), load, SMALL_WF)
     with pytest.raises(AlphaError, match="ColumnNotFoundError"):
         scoring.check(baselines.column_code("no_such_column"), load, SMALL_WF)
+
+
+def test_check_passes_rolling_features_that_backtest_fine():
+    # Shuffled nulls would spread through the rolling window into predicted
+    # rows and trip the null share; nulls stay put, so they do not.
+    load = functools.partial(synthetic.visible_data, 2, SMALL)
+    code = (
+        "class Roll(Alpha):\n"
+        "    def features(self, df):\n"
+        "        roll = pl.col('ret').rolling_mean(45).over('asset')\n"
+        "        return df.with_columns(roll.alias('roll'))\n"
+        "    def predict(self, df):\n"
+        "        return pl.col('roll')\n"
+    )
+    scoring.backtest(code, load, SMALL_WF)
+    for _ in range(3):
+        scoring.check(code, load, SMALL_WF)
 
 
 def test_check_errors_say_nothing_about_the_data():
