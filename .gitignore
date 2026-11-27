@@ -5,3 +5,5 @@ __pycache__/
 outputs/
 # Written by `prime env push`.
 .prime/
+# Training configs holding the dataset secret.
+runs/**/*.local.toml
