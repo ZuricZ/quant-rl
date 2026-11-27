@@ -37,6 +37,7 @@ from quant_research.taskset import (  # noqa: E402
     QuantResearchTaskset,
 )
 from quantenv import baselines, checks, metrics, reward, scoring, walkforward  # noqa: E402
+from quant_research_notools.taskset import NoToolsConfig  # noqa: E402
 from quantenv.alpha import AlphaError  # noqa: E402
 from quantenv.sources import synthetic  # noqa: E402
 
@@ -102,7 +103,7 @@ def test_eval_split_is_30_named_tasks_and_train_is_infinite():
     assert [t.data.name for t in train.take(2)] == ["train-0", "train-1"]
 
 
-def test_secret_is_required_and_masked(monkeypatch):
+def test_secret_is_required_and_hidden_from_repr(monkeypatch):
     monkeypatch.delenv(taskset.SECRET_VAR, raising=False)
     # verifiers' CLI builds the config with defaults before reading flags, so
     # the field may be unset; the taskset refuses to build without it.
@@ -110,10 +111,21 @@ def test_secret_is_required_and_masked(monkeypatch):
     with pytest.raises(ValueError, match="secret"):
         QuantResearchTaskset(config)
     config = _config()
-    assert SECRET not in config.model_dump_json()
-    # A masked dump read back must fail loudly, not run on the mask.
+    assert SECRET not in repr(config) and SECRET not in str(config)
+    # A masked config read back must fail loudly, not run on the mask.
     with pytest.raises(ValidationError):
-        QuantResearchConfig.model_validate_json(config.model_dump_json())
+        QuantResearchConfig(secret="**********")
+
+
+@pytest.mark.parametrize("mode", ["python", "json"])
+def test_secret_survives_a_dump_read_back(mode):
+    # prime-rl dumps the env config and validates it again in each env worker.
+    config = _config()
+    dumped = config.model_dump(mode=mode)
+    assert QuantResearchConfig.model_validate(dumped).secret == config.secret
+    notools = NoToolsConfig(secret=SECRET)
+    dumped = notools.model_dump(mode=mode)
+    assert NoToolsConfig.model_validate(dumped).secret == notools.secret
 
 
 def test_secret_falls_back_to_the_environment(monkeypatch):
