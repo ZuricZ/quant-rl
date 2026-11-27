@@ -1,9 +1,10 @@
-"""The research toolset: describe, backtest and submit, served over MCP.
+"""The research toolset: describe, check, backtest and submit, served over MCP.
 
 The server runs colocated with the harness, inside the rollout's container,
 and only ever builds the visible periods of the task's dataset. Each backtest
 rebuilds them in a fresh scoring worker, which runs the agent's code in
-`quantenv.sandbox` as the unprivileged sandbox user.
+`quantenv.sandbox` as the unprivileged sandbox user; so does each check, on
+a scrambled copy.
 
 Run as `python -m quant_research.servers.research`; verifiers launches it.
 """
@@ -164,16 +165,17 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
     The toolset keeps its own record of the episode and copies it into the
     shared state at the end of every call. State is pulled before a call and
     pushed after it, so a call that started from an older copy would
-    otherwise overwrite what a concurrent call recorded. Backtests run one at
-    a time, since each one ends by killing every process of the sandbox user.
+    otherwise overwrite what a concurrent call recorded. Backtests and checks
+    run one at a time, since each one ends by killing every process of the
+    sandbox user.
     """
 
-    TOOL_PREFIX = None  # Advertise the tools as describe, backtest and submit.
+    TOOL_PREFIX = None  # Advertise the tools as describe, check, backtest, submit.
 
     def __init__(self, config: ResearchConfig) -> None:
         super().__init__(config)
         self._episode = ResearchState()
-        self._backtesting = asyncio.Lock()
+        self._running = asyncio.Lock()
         # What describe and the backtest scope say about the visible data,
         # built once and off the event loop.
         self._summary: tuple[str, str] | None = None
@@ -211,6 +213,35 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
         return description
 
     @vf.tool
+    async def check(self, code: str) -> str:
+        """Runs alpha code walk-forward, as `backtest` does, on scrambled
+        visible data: every column shuffled across rows on its own, so it
+        has the real columns, values and size but no signal.
+
+        Does not count against the backtest budget and reports no scores.
+        Refused after `submit`.
+
+        Args:
+            code: Python source defining one subclass of `Alpha`.
+
+        Returns:
+            That the code ran, or why it failed.
+
+        Raises:
+            ValueError: If the call is refused.
+        """
+        if self._episode.submitted:
+            raise ValueError("refused: the alpha is already submitted")
+        try:
+            async with self._running:
+                await asyncio.to_thread(
+                    scoring.check, code, self._visible(), user=self.config.sandbox_user
+                )
+        except AlphaError as e:
+            return f"error: {e}"
+        return "ok: the alpha ran on every block"
+
+    @vf.tool
     async def backtest(self, code: str) -> str:
         """Scores alpha code walk-forward on the visible periods.
 
@@ -240,7 +271,7 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
         episode.backtests_used += 1
         left = self.config.budget - episode.backtests_used
         try:
-            async with self._backtesting:
+            async with self._running:
                 performance = await asyncio.to_thread(
                     scoring.backtest,
                     code,

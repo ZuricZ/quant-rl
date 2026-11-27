@@ -153,3 +153,30 @@ class EvalData:
     check_seed: int | None = None
     cost: float = 0.0
     periods_per_year: float = 252.0
+
+
+def scrambled(panel: Panel, seed: int) -> Panel:
+    """The panel with every column but the keys shuffled across rows, each
+    column on its own.
+
+    Each column keeps its name, dtype and values, nulls included, so code
+    that runs on the panel runs on this one, but every relation between
+    columns and over time is gone: nothing computed on it says anything
+    about the original's signal.
+
+    Args:
+        panel: The data.
+        seed: Seed of the shuffles. Whoever must not undo them must not
+            learn it.
+
+    Returns:
+        A panel with the same schema, keys and row order.
+    """
+    s = panel.schema
+    keys = {s.timestamp, s.asset}
+    shuffled = [
+        pl.col(name).shuffle(seed=(seed + i) % 2**64)
+        for i, name in enumerate(panel.frame.columns)
+        if name not in keys
+    ]
+    return panel.with_frame(panel.frame.lazy().with_columns(shuffled).collect())

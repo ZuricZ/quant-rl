@@ -1,6 +1,6 @@
 [project]
 name = "quant-research"
-version = "0.1.2"
+version = "0.1.4"
 description = "Agentic quant research: find an alpha with limited backtests, scored on hidden data with lookahead checks."
 readme = "README.md"
 # Not a standard field: `prime env push` reads it for the Hub listing.

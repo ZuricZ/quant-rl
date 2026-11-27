@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 from quantenv import checks, metrics, walkforward
 from quantenv.alpha import AlphaError, AlphaTimeout
-from quantenv.panel import EvalData, between
+from quantenv.panel import EvalData, between, scrambled
 from quantenv.sandbox import Sandbox, SandboxError
 from quantenv.walkforward import PREDICTION, Run, WalkForward
 
@@ -131,6 +131,41 @@ def backtest(
     """
     return run_isolated(
         _backtest_worker,
+        (_Pipeline(code, user, limit, STARTUP_ALLOWANCE), load, wf),
+        STARTUP_ALLOWANCE,
+        max_allow=limit.maximum + STARTUP_ALLOWANCE,
+    )
+
+
+def check(
+    code: str,
+    load: Loader,
+    wf: WalkForward = WalkForward(),
+    limit: TimeLimit = TimeLimit(),
+    user: str | None = None,
+) -> None:
+    """Runs alpha code walk-forward, as `backtest` does, on scrambled data.
+
+    The data is `load()`'s with every column but the keys shuffled across
+    rows on its own (`panel.scrambled`), with a fresh seed that agent code
+    never sees, so a run tests that the code works on data of this shape,
+    columns and size, within the same time limit, but nothing it computes,
+    nor any error it raises, says anything about the data's signal.
+
+    Args:
+        code: Alpha code.
+        load: Picklable callable returning the data.
+        wf: Walk-forward settings.
+        limit: Time limit of the pipeline run.
+        user: Run the alpha as this dedicated user; see `Sandbox`.
+
+    Raises:
+        AlphaError: If the code fails or runs past the limit.
+        SandboxError: If the run itself fails, e.g. the sandbox user is
+            unusable.
+    """
+    run_isolated(
+        _check_worker,
         (_Pipeline(code, user, limit, STARTUP_ALLOWANCE), load, wf),
         STARTUP_ALLOWANCE,
         max_allow=limit.maximum + STARTUP_ALLOWANCE,
@@ -324,6 +359,15 @@ def _backtest_worker(
     sandbox = pipeline.sandbox(allow, data, wf, runs=1)
     run = walkforward.run(sandbox, data.panel, wf, data.start)
     return _performance(data, run)
+
+
+def _check_worker(
+    allow: Allow, pipeline: _Pipeline, load: Loader, wf: WalkForward
+) -> None:
+    data = load()
+    sandbox = pipeline.sandbox(allow, data, wf, runs=1)
+    panel = scrambled(data.panel, secrets.randbits(64))
+    walkforward.run(sandbox, panel, wf, data.start)
 
 
 def _score_worker(
