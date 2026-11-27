@@ -242,6 +242,7 @@ def test_prompt_shows_the_interface_as_a_subclass_to_copy():
     first_block = prompt.split("```python\n", 1)[1].split("```", 1)[0]
     assert "class Alpha:" not in prompt
     assert first_block.startswith("class MyAlpha(Alpha):")
+    assert "min_periods" not in prompt  # the tools taskset has `docs` instead
 
 
 def test_prompt_offers_the_seeded_generator():
