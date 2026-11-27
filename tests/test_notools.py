@@ -153,4 +153,4 @@ def test_episode_ends_after_one_reply(task):
 def test_tasks_grade_in_a_fresh_container_of_the_image(task):
     assert task.NEEDS_CONTAINER
     assert task.scoring.mode == "isolated"
-    assert task.data.image == "quant-research:0.1.3"
+    assert task.data.image == "quant-research:0.1.4"

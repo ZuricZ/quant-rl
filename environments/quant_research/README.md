@@ -20,6 +20,7 @@ scored on unseen periods, which are built only after the episode ends.
   | Tool | Returns |
   | --- | --- |
   | `describe()` | Columns, timestamp range, number of assets |
+  | `docs(name)` | Optional (`tools.docs = true`), off by default. Signature and docstring of a polars, polars-ds, scikit-learn, scipy or numpy object; a class's or module's members. Free. |
   | `check(code)` | Optional (`tools.check = true`), off by default. Whether the alpha runs walk-forward on the visible data with each column shuffled across rows, or its error. No scores; free. |
   | `backtest(code)` | Net Sharpe ± s.e., gross Sharpe, turnover, rank IC ± s.e., per-year range. Costs one unit of budget. |
   | `submit(code, claimed_sharpe)` | Ends the episode |
@@ -46,7 +47,7 @@ The task runs agent code, so it needs a container runtime. Build the image
 from the repository root, then:
 
 ```bash
-docker build -t quant-research:0.1.3 .
+docker build -t quant-research:0.1.4 .
 export QUANT_RESEARCH_SECRET=<your secret>
 uv run vf-validate quant-research --runtime.type docker -n 2
 uv run vf-run quant-research --model <model> --client.base-url <url> \
@@ -64,4 +65,4 @@ uv run vf-run quant-research --model <model> --client.base-url <url> \
 | `env.taskset.task.max_turns` | 30 | Model turns per episode |
 | `env.taskset.task.vary` | true | Vary market and prompt per task; false gives the fixed market of the earliest runs |
 | `env.taskset.task.check_config.max_ic` | 0.05 | IC ceiling of the implausible-IC check, at every future lag (set it through a TOML file) |
-| `env.taskset.task.image` | `quant-research:0.1.3` | Task image; a registry reference for a remote runtime |
+| `env.taskset.task.image` | `quant-research:0.1.4` | Task image; a registry reference for a remote runtime |

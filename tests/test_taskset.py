@@ -22,6 +22,7 @@ from conftest import SMALL_MARKET  # noqa: E402
 
 from quant_research import grade, taskset  # noqa: E402
 from quant_research.servers.research import (  # noqa: E402
+    DOC_LIMIT,
     ResearchConfig,
     backtest_report,
     backtest_scope,
@@ -272,6 +273,30 @@ def test_grading_timeout_covers_every_scored_run():
     assert taskset.scoring_timeout(config) > (2 + config.n_cuts) * seconds
 
 
+@pytest.mark.parametrize(
+    ("name", "full"),
+    [
+        ("pl.Expr.rolling_mean", "polars.Expr.rolling_mean(self, window_size"),
+        ("pds.lin_reg", "polars_ds.lin_reg(*x"),
+        ("sklearn.linear_model.Ridge", "sklearn.linear_model.Ridge(alpha"),
+    ],
+)
+def test_docs_looks_up_the_alpha_libraries_for_free(name, full):
+    tools = _toolset()
+    text = asyncio.run(tools.docs(name))
+    assert text.startswith(full)
+    assert len(text.split("\n\nPublic members: ")[0]) <= DOC_LIMIT
+    assert tools._episode.backtests_used == 0
+
+
+@pytest.mark.parametrize(
+    "name", ["quantenv.checks", "quant_research.grade", "os", "pl.os.path"]
+)
+def test_docs_refuses_anything_but_the_alpha_libraries(name):
+    with pytest.raises(ValueError):
+        asyncio.run(_toolset().docs(name))
+
+
 def test_describe_lists_visible_data_only():
     text = asyncio.run(_toolset().describe())
     assert "fwd_return" not in text
@@ -346,14 +371,17 @@ def _registered(config: ResearchConfig) -> set[str]:
 def test_optional_tools_are_off_by_default():
     assert _registered(TOOLS) == {"describe", "backtest", "submit"}
     prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
-    assert "check(code)" not in prompt
+    assert "check(code)" not in prompt and "docs(name)" not in prompt
 
 
-def test_check_is_offered_when_turned_on():
-    tools = ResearchConfig(sandbox_user=None, check=True)
-    assert _registered(tools) == {"describe", "check", "backtest", "submit"}
+@pytest.mark.parametrize("on", [("docs",), ("check",), ("docs", "check")])
+def test_optional_tools_are_offered_when_turned_on(on):
+    tools = ResearchConfig(sandbox_user=None, **{name: True for name in on})
+    assert _registered(tools) == {"describe", "backtest", "submit", *on}
     prompt = next(iter(QuantResearchTaskset(_config(tools=tools)))).data.prompt
-    assert taskset.OPTIONAL_TOOL_LINES["check"] in prompt
+    for name in on:
+        assert taskset.OPTIONAL_TOOL_LINES[name] in prompt
+    assert "does not use a backtest" in prompt
 
 
 def test_check_runs_the_code_without_using_the_budget():
@@ -510,7 +538,7 @@ def test_grade_runs_the_images_python(tmp_path):
 
 def test_tasks_use_the_configured_image():
     task = next(iter(QuantResearchTaskset(_config())))
-    assert task.data.image == taskset.IMAGE == "quant-research:0.1.3"
+    assert task.data.image == taskset.IMAGE == "quant-research:0.1.4"
     other = QuantResearchConfig(
         secret=SECRET, task=QuantResearchTaskConfig(image="registry.example/qr:1")
     )

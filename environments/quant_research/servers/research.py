@@ -1,4 +1,5 @@
-"""The research toolset: describe, check, backtest and submit, served over MCP.
+"""The research toolset: describe, docs, check, backtest and submit, served
+over MCP.
 
 The server runs colocated with the harness, inside the rollout's container,
 and only ever builds the visible periods of the task's dataset. Each backtest
@@ -16,6 +17,7 @@ from typing import TYPE_CHECKING, Literal
 import verifiers.v1 as vf
 from pydantic import Field
 
+from quantenv import docs as libdocs
 from quantenv import metrics, scoring, walkforward
 from quantenv.alpha import AlphaError
 from quantenv.panel import EvalData, Panel
@@ -27,8 +29,22 @@ if TYPE_CHECKING:
 
 BUDGET = 10
 SANDBOX_USER = "nobody"
+# The libraries the alpha may use, by the names a `docs` lookup may start
+# with: the prompt's aliases and the import names.
+DOC_PACKAGES = {
+    "pl": "polars",
+    "polars": "polars",
+    "pds": "polars_ds",
+    "polars_ds": "polars_ds",
+    "sklearn": "sklearn",
+    "scipy": "scipy",
+    "np": "numpy",
+    "numpy": "numpy",
+}
+# The most characters a `docs` lookup returns, as for a backtest's error.
+DOC_LIMIT = 2000
 # Tools offered only when their `ResearchConfig` flag is on.
-OPTIONAL_TOOLS = ("check",)
+OPTIONAL_TOOLS = ("docs", "check")
 
 
 class ResearchData(vf.TaskData):
@@ -80,6 +96,8 @@ class ResearchConfig(vf.ToolsetConfig):
             the final score. Every process of this user is killed after each
             pipeline run, so it must not be used for anything else. None runs
             the code as the server's own user, without that isolation.
+        docs: Offer the `docs` tool. Off by default: the untrained model
+            did worse with it (results/day10).
         check: Offer the `check` tool. Off by default: untrained models did
             not gain from it (results/day11). It needs a sandbox user: code
             running as the server's own user can read the unscrambled data
@@ -89,6 +107,7 @@ class ResearchConfig(vf.ToolsetConfig):
     colocated: bool = True
     budget: int = Field(BUDGET, ge=0)
     sandbox_user: str | None = SANDBOX_USER
+    docs: bool = False
     check: bool = False
 
     @property
@@ -237,6 +256,29 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
         """
         description, _ = await self._summarise()
         return description
+
+    @vf.tool
+    async def docs(self, name: str) -> str:
+        """Looks up the documentation of a polars, polars-ds, scikit-learn,
+        scipy or numpy object. Does not use a backtest.
+
+        Args:
+            name: Dotted name, such as "polars.Expr.rolling_mean",
+                "pds.lin_reg" or "sklearn.linear_model.Ridge".
+
+        Returns:
+            The signature and docstring of a function; for a class or module,
+            its summary and public members. Cut at a fixed length.
+
+        Raises:
+            ValueError: If the name is refused or does not exist.
+        """
+        try:
+            return await asyncio.to_thread(
+                libdocs.lookup, name, DOC_PACKAGES, DOC_LIMIT
+            )
+        except LookupError as e:
+            raise ValueError(str(e)) from None
 
     @vf.tool
     async def check(self, code: str) -> str:
