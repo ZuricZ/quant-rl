@@ -12,7 +12,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 # verifiers imports fcntl, which Windows lacks.
 pytest.importorskip("fcntl")
@@ -37,7 +37,10 @@ from quant_research.taskset import (  # noqa: E402
     QuantResearchTaskset,
 )
 from quantenv import baselines, checks, metrics, reward, scoring, walkforward  # noqa: E402
-from quant_research_notools.taskset import NoToolsConfig  # noqa: E402
+from quant_research_notools.taskset import (  # noqa: E402
+    NoToolsConfig,
+    NoToolsTaskset,
+)
 from quantenv.alpha import AlphaError  # noqa: E402
 from quantenv.sources import synthetic  # noqa: E402
 
@@ -126,6 +129,59 @@ def test_secret_survives_a_dump_read_back(mode):
     notools = NoToolsConfig(secret=SECRET)
     dumped = notools.model_dump(mode=mode)
     assert NoToolsConfig.model_validate(dumped).secret == notools.secret
+
+
+def _worker_task(taskset_cls, config):
+    """A task as prime-rl's env worker builds it (prime_rl/env/worker.py at
+    4cec527): the env config dumped and validated again, then the task's
+    dumped data wrapped in the declared Task with `taskset.task`."""
+    rebuilt = type(config).model_validate(config.model_dump(mode="json"))
+    task = next(iter(taskset_cls(config)))
+    data = type(task.data).model_validate(task.data.model_dump(mode="json"))
+    return type(task)(data, rebuilt.task), task
+
+
+@pytest.mark.parametrize(
+    "taskset_cls, config",
+    [
+        (QuantResearchTaskset, QuantResearchConfig(secret=SECRET, split="train")),
+        (NoToolsTaskset, NoToolsConfig(secret=SECRET, split="train")),
+    ],
+)
+def test_a_task_rebuilt_by_prime_rls_env_worker_keeps_the_secret(taskset_cls, config):
+    rebuilt, task = _worker_task(taskset_cls, config)
+    assert rebuilt.seed == task.seed == synthetic.dataset_seed(0, SECRET, "train")
+
+
+def test_a_task_secret_that_disagrees_with_the_taskset_is_refused(monkeypatch):
+    monkeypatch.delenv(taskset.SECRET_VAR, raising=False)
+    other = QuantResearchTaskConfig(secret="other")
+    with pytest.raises(ValidationError, match="task.secret"):
+        QuantResearchConfig(secret=SECRET, task=other)
+    # Set on the task alone, it would be overwritten with no secret at all.
+    with pytest.raises(ValidationError, match="task.secret"):
+        QuantResearchConfig(task=other)
+
+
+def test_a_config_copied_with_a_new_secret_is_refused():
+    # model_copy skips validation, so the task's copy keeps the old secret.
+    config = QuantResearchConfig(secret=SECRET)
+    stale = config.model_copy(update={"secret": SecretStr("other")})
+    with pytest.raises(ValueError, match="task.secret"):
+        QuantResearchTaskset(stale)
+    with pytest.raises(ValueError, match="task.secret"):
+        notools = NoToolsConfig(secret=SECRET)
+        NoToolsTaskset(notools.model_copy(update={"secret": SecretStr("other")}))
+
+
+def test_copying_the_secret_does_not_mark_the_task_settings_as_set():
+    assert "task" not in QuantResearchConfig(secret=SECRET).model_fields_set
+
+
+def test_the_task_config_takes_the_secret_from_the_environment(monkeypatch):
+    monkeypatch.setenv(taskset.SECRET_VAR, SECRET)
+    assert NoToolsConfig().task.secret.get_secret_value() == SECRET
+    assert SECRET not in repr(NoToolsConfig())
 
 
 def test_secret_falls_back_to_the_environment(monkeypatch):

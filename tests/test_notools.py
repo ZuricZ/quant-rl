@@ -141,6 +141,30 @@ def test_reward_is_the_hidden_ic_over_the_ceiling(tmp_path):
     assert outcome["no_code"] == 0
 
 
+def _mkdir(path):
+    path.mkdir()
+    return path
+
+
+def test_a_task_rebuilt_by_prime_rls_env_worker_grades(tmp_path):
+    # As prime_rl/env/worker.py (4cec527) builds it: the dumped env config read
+    # back, and the task's dumped data wrapped with `taskset.task`. Hosted run
+    # ks09oje8 failed here: "task config has no secret".
+    config = NoToolsConfig(
+        secret=SECRET, task=NoToolsTaskConfig(sandbox_user=None, vary=False)
+    )
+    rebuilt = NoToolsConfig.model_validate_json(config.model_dump_json())
+    data = next(iter(NoToolsTaskset(config))).data
+    data = ResearchData.model_validate_json(data.model_dump_json())
+    task = NoToolsTask(data, rebuilt.task)
+    runtime = _LocalRuntime(_mkdir(tmp_path / "a"))
+    value = asyncio.run(task.hidden_ic(_trace(task, REPLY), runtime))
+    local = _local_task()
+    runtime = _LocalRuntime(_mkdir(tmp_path / "b"))
+    expected = asyncio.run(local.hidden_ic(_trace(local, REPLY), runtime))
+    assert value == expected > reward.INVALID_REWARD
+
+
 def test_episode_ends_after_one_reply(task):
     trace = _trace(task, REPLY)
     assert not task.answered(trace)

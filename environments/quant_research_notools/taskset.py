@@ -17,7 +17,6 @@ from typing import Any
 
 import polars as pl
 import verifiers.v1 as vf
-from pydantic import Field, SecretStr
 
 from quant_research.servers.research import SANDBOX_USER, ResearchData, describe_panel
 from quant_research.taskset import (
@@ -26,9 +25,10 @@ from quant_research.taskset import (
     EVAL_TASKS,
     IMAGE,
     PORTFOLIO,
-    SECRET_VAR,
+    Secret,
     SplitConfig,
     check_sandbox_user,
+    check_secret,
     grade,
     prompt_choices,
     prompt_values,
@@ -164,7 +164,7 @@ class NoToolsTaskConfig(vf.TaskConfig):
         vary: Vary the market and the prompt per task (spec, Decision 26).
     """
 
-    secret: SecretStr | None = None
+    secret: Secret = None
     image: str = IMAGE
     check_config: checks.CheckConfig = checks.CheckConfig()
     sandbox_user: str | None = SANDBOX_USER
@@ -296,11 +296,7 @@ class NoToolsTaskset(vf.Taskset[NoToolsTask, NoToolsConfig]):
     same dataset as task i of the main taskset with the same secret."""
 
     def __init__(self, config: NoToolsConfig) -> None:
-        if config.secret is None:
-            raise ValueError(
-                "the taskset needs a secret: set --env.taskset.secret "
-                f"(--taskset.secret for vf-validate) or {SECRET_VAR}"
-            )
+        check_secret(config)
         super().__init__(config)
 
     @property
@@ -308,7 +304,7 @@ class NoToolsTaskset(vf.Taskset[NoToolsTask, NoToolsConfig]):
         return self.config.split == "train"
 
     def load(self) -> Iterator[NoToolsTask]:
-        task_config = self.config.task.model_copy(update={"secret": self.config.secret})
+        task_config = self.config.task
         indices: Iterable[int] = (
             itertools.count() if self.INFINITE else range(EVAL_TASKS)
         )
