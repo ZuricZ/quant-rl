@@ -63,6 +63,12 @@ target_modules = [
 [orchestrator]
 batch_size = 32
 
+# Without a max length, vLLM sizes each episode for Qwen3.5's native 262,144
+# tokens and the orchestrator ran 7 episodes at a time (run l9lgcetk); an
+# episode needs at most seq_len, so the KV cache holds about 100.
+[orchestrator.concurrency]
+initial_inflight = 64
+
 [orchestrator.train]
 group_size = 8
 
@@ -98,4 +104,5 @@ env.taskset.task.image = "prime/zuricz/quant-research:0.1.4"
 
 [ckpt] # Checkpoint at the end of training
 
-[inference]
+[inference.vllm]
+max_model_len = 18432
