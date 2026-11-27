@@ -44,7 +44,7 @@ EVAL_TASKS = 30
 # What pydantic writes in place of a SecretStr when dumping.
 _MASK = "**********"
 # Built from the repository's Dockerfile; holds this package.
-IMAGE = "quant-research:0.1.2"
+IMAGE = "quant-research:0.1.4"
 _SCORE = "score"
 # Environment variable a taskset reads its secret from when none is set.
 SECRET_VAR = "QUANT_RESEARCH_SECRET"
@@ -198,6 +198,17 @@ STYLE_REQUESTS = {
     "rather than relying on one.",
 }
 
+# The prompt line of each optional tool (`ResearchConfig.optional_tools`).
+OPTIONAL_TOOL_LINES = {
+    "docs": "- `docs(name)`: the signature and documentation of a polars, "
+    "polars-ds, scikit-learn, scipy or numpy object, such as "
+    "`polars.Expr.rolling_mean`. It does not use a backtest.\n",
+    "check": "- `check(code)`: runs the alpha walk-forward as a backtest does, on "
+    "the visible data with every column shuffled across rows on its own, and "
+    "says whether it ran or why it failed. It reports no scores and does not "
+    "use a backtest.\n",
+}
+
 PROMPT = (
     "{opening}\n\n"
     + DATA_SECTION
@@ -213,10 +224,7 @@ PROMPT = (
     + """## Tools
 
 - `describe()`: column names, timestamp range and number of assets.
-- `docs(name)`: the signature and documentation of a polars, polars-ds, \
-scikit-learn, scipy or numpy object, such as `polars.Expr.rolling_mean`. It \
-does not use a backtest.
-- `backtest(code)`: the alpha walk-forward on the visible periods: net \
+{optional_tools}- `backtest(code)`: the alpha walk-forward on the visible periods: net \
 Sharpe with its standard error, gross Sharpe, turnover, mean rank IC with \
 its standard error, and the range of net Sharpe across calendar years. You \
 have {budget} backtests; further calls are refused.
@@ -353,6 +361,7 @@ def prompt(
     max_turns: int,
     config: synthetic.Config = synthetic.DEFAULT_CONFIG,
     variation: int | None = None,
+    optional_tools: tuple[str, ...] = (),
 ) -> str:
     """The task prompt.
 
@@ -363,6 +372,8 @@ def prompt(
         config: The task's generator parameters.
         variation: The task's variation seed, or None for a task without
             variation; see `prompt_choices`.
+        optional_tools: The optional tools the toolset offers, by name; see
+            `OPTIONAL_TOOL_LINES`.
 
     Returns:
         The prompt text.
@@ -371,6 +382,7 @@ def prompt(
         description=description,
         budget=budget,
         max_turns=max_turns,
+        optional_tools="".join(OPTIONAL_TOOL_LINES[name] for name in optional_tools),
         **prompt_values(config),
         **prompt_choices(variation, config.style),
     )
@@ -697,6 +709,7 @@ class QuantResearchTaskset(vf.Taskset[QuantResearchTask, QuantResearchConfig]):
                         task_config.max_turns,
                         market,
                         task.variation,
+                        task_config.tools.optional_tools,
                     ),
                     image=task_config.image,
                     # Grade in a fresh container of the image, which agent

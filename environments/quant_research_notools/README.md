@@ -32,7 +32,7 @@ Grading runs agent code, so it needs the task image built from the
 repository root:
 
 ```bash
-docker build -t quant-research:0.1.2 .
+docker build -t quant-research:0.1.4 .
 export QUANT_RESEARCH_SECRET=<your secret>
 uv run vf-validate quant-research-notools --runtime.type docker -n 2
 ```

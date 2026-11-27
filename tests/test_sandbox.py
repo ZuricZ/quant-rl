@@ -273,3 +273,17 @@ def test_sandbox_user_can_use_the_alpha_libraries():
         "        return pl.col('f00')\n"
     )
     _backtest(body, user="nobody")
+
+
+@needs_root
+def test_check_runs_as_the_sandbox_user():
+    code = (
+        "import os\n"
+        "class S(Alpha):\n"
+        "    def predict(self, df):\n"
+        "        if os.geteuid() != 65534:\n"
+        "            raise RuntimeError('not the sandbox user')\n"
+        "        return pl.col('ret')\n"
+    )
+    limit = scoring.TimeLimit(startup=60.0)
+    scoring.check(code, VISIBLE, SMALL_WF, limit, user="nobody")

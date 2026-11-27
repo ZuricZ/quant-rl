@@ -190,11 +190,6 @@ def test_prompt_states_no_checks_or_reward():
     assert "only a submitted alpha counts" in prompt
 
 
-def test_prompt_offers_docs_without_a_backtest():
-    prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
-    assert "`docs(name)`" in prompt and "does not use a backtest" in prompt
-
-
 def test_prompt_states_the_hidden_run_and_its_time_limit():
     task = next(iter(QuantResearchTaskset(_config())))
     prompt = task.data.prompt
@@ -365,6 +360,47 @@ def test_backtest_report_explains_its_numbers():
         assert word not in out.lower()
 
 
+def _registered(config: ResearchConfig) -> set[str]:
+    from mcp.server.mcpserver import MCPServer
+
+    mcp = MCPServer("test")
+    ResearchToolset(config).register(mcp)
+    return {tool.name for tool in asyncio.run(mcp.list_tools())}
+
+
+def test_optional_tools_are_off_by_default():
+    assert _registered(TOOLS) == {"describe", "backtest", "submit"}
+    prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
+    assert "check(code)" not in prompt and "docs(name)" not in prompt
+
+
+@pytest.mark.parametrize("on", [("docs",), ("check",), ("docs", "check")])
+def test_optional_tools_are_offered_when_turned_on(on):
+    tools = ResearchConfig(sandbox_user=None, **{name: True for name in on})
+    assert _registered(tools) == {"describe", "backtest", "submit", *on}
+    prompt = next(iter(QuantResearchTaskset(_config(tools=tools)))).data.prompt
+    for name in on:
+        assert taskset.OPTIONAL_TOOL_LINES[name] in prompt
+    assert "does not use a backtest" in prompt
+
+
+def test_check_runs_the_code_without_using_the_budget():
+    tools = _toolset(budget=1)
+    assert asyncio.run(tools.check(COLUMN)).startswith("ok")
+    out = asyncio.run(tools.check(baselines.column_code("no_such_column")))
+    assert out.startswith("error:") and "ColumnNotFoundError" in out
+    assert tools.state.backtests_used == 0
+    # Numbers only come from backtests.
+    assert not any(ch.isdigit() for ch in asyncio.run(tools.check(COLUMN)))
+
+
+def test_check_refused_after_submit():
+    tools = _toolset()
+    tools.submit(COLUMN, 0.05)
+    with pytest.raises(ValueError, match="refused"):
+        asyncio.run(tools.check(COLUMN))
+
+
 def test_failing_backtest_counts_against_budget():
     tools = _toolset()
     out = asyncio.run(tools.backtest("not python"))
@@ -502,7 +538,7 @@ def test_grade_runs_the_images_python(tmp_path):
 
 def test_tasks_use_the_configured_image():
     task = next(iter(QuantResearchTaskset(_config())))
-    assert task.data.image == taskset.IMAGE == "quant-research:0.1.2"
+    assert task.data.image == taskset.IMAGE == "quant-research:0.1.4"
     other = QuantResearchConfig(
         secret=SECRET, task=QuantResearchTaskConfig(image="registry.example/qr:1")
     )

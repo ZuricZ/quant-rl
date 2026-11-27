@@ -12,7 +12,7 @@ import polars as pl
 import pytest
 
 from quantenv import baselines, checks, metrics, reward, scoring, walkforward
-from quantenv.panel import Panel, Schema, between
+from quantenv.panel import Panel, Schema, between, scrambled
 from quantenv.alpha import Alpha, AlphaError, AlphaTimeout, compile_alpha
 from quantenv.sandbox import SandboxError
 from quantenv.sources import synthetic
@@ -655,6 +655,49 @@ def test_backtest_matches_in_process_score():
     assert math.isfinite(performance.sharpe)
 
 
+def test_scrambled_keeps_columns_and_values_but_not_their_order(data):
+    panel = data.panel
+    s = panel.schema
+    mixed = scrambled(panel, 7)
+    assert mixed.frame.schema == panel.frame.schema
+    keys = [s.timestamp, s.asset]
+    assert mixed.frame.select(keys).equals(panel.frame.select(keys))
+    others = [c for c in panel.frame.columns if c not in keys]
+    for column in others:
+        before, after = panel.frame.get_column(column), mixed.frame.get_column(column)
+        assert after.sort(nulls_last=True).equals(before.sort(nulls_last=True))
+        assert not after.equals(before)
+    assert not scrambled(panel, 8).frame.equals(mixed.frame)
+
+
+# Reports, in its error, how well `ret` one period later matches the target:
+# exactly, on the real data.
+_TARGET_PROBE = (
+    "class Probe(Alpha):\n"
+    "    def fit(self, train):\n"
+    "        nxt = pl.col('ret').shift(-1).over('asset')\n"
+    "        c = train.select(pl.corr(nxt, 'fwd_return')).item()\n"
+    "        raise RuntimeError(f'corr={c:.3f}')\n"
+    "    def predict(self, df):\n"
+    "        return pl.col('ret')\n"
+)
+
+
+def test_check_runs_working_code_and_reports_failing_code():
+    load = functools.partial(synthetic.visible_data, 2, SMALL)
+    scoring.check(baselines.column_code("f00"), load, SMALL_WF)
+    with pytest.raises(AlphaError, match="ColumnNotFoundError"):
+        scoring.check(baselines.column_code("no_such_column"), load, SMALL_WF)
+
+
+def test_check_errors_say_nothing_about_the_data():
+    load = functools.partial(synthetic.visible_data, 2, SMALL)
+    with pytest.raises(AlphaError, match="corr=1.000"):
+        scoring.backtest(_TARGET_PROBE, load, SMALL_WF)
+    with pytest.raises(AlphaError, match=r"corr=-?0\.[01]"):
+        scoring.check(_TARGET_PROBE, load, SMALL_WF)
+
+
 def _peek_except(dates: list[str]) -> str:
     """Alpha code that reads the next period's return on every date but `dates`."""
     return (
@@ -687,7 +730,7 @@ def test_lookahead_except_on_any_fixed_dates_is_caught():
 
 
 def test_project_is_named_quant_research():
-    assert importlib.metadata.distribution("quant-research").version == "0.1.3"
+    assert importlib.metadata.distribution("quant-research").version == "0.1.5"
 
 
 def test_check_thresholds_are_configurable(data):
