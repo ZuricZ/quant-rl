@@ -15,11 +15,11 @@
 #   scores, not a result.
 #
 #   prime train validate runs/prime-rl/lora-9b.toml
-#   prime train runs/prime-rl/lora-9b.local.toml
+#   prime train runs/prime-rl/lora-9b.secret.toml
 #
 # Dedicated runs forward only HF_TOKEN and WANDB_API_KEY, so the secret, which
 # picks the datasets, cannot come from QUANT_RESEARCH_SECRET. It goes in an
-# untracked copy, lora-9b.local.toml (gitignored), with
+# untracked copy, lora-9b.secret.toml (gitignored), with
 # `env.taskset.secret = "..."` under both sources; an empty one fails the
 # taskset. Prime keeps it in the run's config. Validated on 27
 # November 2026 against the hosted runtime's prime-rl 4cec527 (v0.11.0); not
