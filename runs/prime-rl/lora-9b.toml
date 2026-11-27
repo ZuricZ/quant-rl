@@ -12,10 +12,11 @@
 #   shortens the slowest replies, which set the step time. The before/after
 #   comparison is the run's own eval (step 0 against the last step), not
 #   results/day9's 16384 baseline.
-# - Sampling at Qwen's settings for thinking mode, temperature 0.6 and top_p
-#   0.95, as in every results/ run. prime-rl's defaults (1.0 and 1.0) made the
-#   base model's code much worse: run o8y6fkud's step-0 eval had 8 valid of 66
-#   replies with code (day 9: about half), and 48% cut off at 8192.
+# - Sampling at Qwen's settings for coding in thinking mode: temperature 0.6,
+#   top_p 0.95, top_k 20 (results/ runs used the first two). prime-rl's
+#   defaults (1.0 and 1.0) made the base model's code much worse: run
+#   o8y6fkud's step-0 eval had 8 valid of 66 replies with code (day 9: about
+#   half), and 48% cut off at 8192.
 # - Rollouts are graded in Prime sandboxes with the pushed task image
 #   (`prime images push quant-research:0.1.4 --context .`), not local Docker.
 # - 10 steps of 32 rollouts (4 tasks x 8). Groups whose replies all score the
@@ -86,6 +87,7 @@ group_size = 8
 max_completion_tokens = 12288
 temperature = 0.6
 top_p = 0.95
+top_k = 20
 
 [[orchestrator.train.source]]
 name = "quant-research-notools"
@@ -104,6 +106,7 @@ interval = 10
 max_completion_tokens = 12288
 temperature = 0.6
 top_p = 0.95
+top_k = 20
 
 [[orchestrator.eval.source]]
 name = "quant-research-notools-eval"
