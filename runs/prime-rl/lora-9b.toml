@@ -1,18 +1,22 @@
 # Hosted Training on Prime: LoRA RL of Qwen3.5-9B on the no-tools taskset
-# (quant-research-notools). Same run as notools-smoke.toml, adapted for a
-# dedicated hosted run instead of a local prime-rl checkout:
+# (quant-research-notools). A cheap preliminary run: does one-reply training
+# move the reward at all? The run that matters will train the multi-turn tools
+# taskset.
 #
 # - Qwen3.5-9B, the model of the Day 6 and 7 results; Hosted Training does not
 #   offer Qwen3-4B-Instruct-2507.
-# - 16384 completion tokens, as in the qwen3_5-9b registry entry, so training
-#   and the before/after eval (spec, Decision 29) sample alike; Qwen3.5-9B
-#   thinks first, and at 8192 it ran out while thinking in 73 of 120 no-tools
-#   replies (results/day9). seq_len leaves room for the prompt (about 1,800
-#   tokens).
+# - 8192 completion tokens. Qwen3.5-9B thinks first, and its replies split in
+#   two: with the final prompt at 16384 (results/day9, 120 replies) the median
+#   was 2,911 tokens, while 31% ran past 8192 and 18% hit 16384, mostly
+#   re-checking. Halving the limit cuts 13% more replies off and about halves
+#   the step time, since the slowest replies set it, and teaches shorter
+#   thinking. The before/after comparison is the run's own eval at 8192 (step
+#   0 against the last step), not results/day9's 16384 baseline.
 # - Rollouts are graded in Prime sandboxes with the pushed task image
 #   (`prime images push quant-research:0.1.4 --context .`), not local Docker.
-# - 10 steps: a smoke run that shows the pipeline trains, checkpoints and
-#   scores, not a result.
+# - 10 steps of 32 rollouts (4 tasks x 8). Groups whose replies all score the
+#   same carry no signal and are resampled (83% at 4096 tokens in the smoke
+#   run, about 2% expected here from day 9's 61% invalid rate).
 #
 #   prime train validate runs/prime-rl/lora-9b.toml
 #   prime train runs/prime-rl/lora-9b.secret.toml
@@ -25,15 +29,12 @@
 # picks the datasets, cannot come from QUANT_RESEARCH_SECRET. It goes in an
 # untracked copy, lora-9b.secret.toml (gitignored), with
 # `env.taskset.secret = "..."` under both sources; an empty one fails the
-# taskset. Prime keeps it in the run's config. Validated on 27
-# November 2026 against the hosted runtime's prime-rl 4cec527 (v0.11.0); not
-# yet submitted. Unchecked until submission: whether a dedicated run accepts
-# LoRA, whether the runner finds the quant-research-notools taskset, which
-# ships inside the Hub environment zuricz/quant-research, and whether the
-# grading sandboxes can pull the private image.
+# taskset. Prime keeps it in the run's config. The pipeline was proven by the
+# smoke run lora-9b-smoke.toml (run o4jzyxsc, 27 November 2026): install,
+# generation, sandbox grading, LoRA steps, eval and final checkpoint.
 mode = "rl"
 max_steps = 10
-seq_len = 18432
+seq_len = 10240
 
 [deployment]
 num_train_gpus = 1
@@ -59,21 +60,22 @@ target_modules = [
     "down_proj"
 ]
 
-# Small batches: grading, not generation, bounds the step time.
+# batch_size counts rollouts: 4 tasks of group_size 8.
 [orchestrator]
 batch_size = 32
 
 # Without a max length, vLLM sizes each episode for Qwen3.5's native 262,144
-# tokens and the orchestrator ran 7 episodes at a time (run l9lgcetk); an
-# episode needs at most seq_len, so the KV cache holds about 100.
+# tokens and the orchestrator ran 7 episodes at a time (run l9lgcetk). The cap
+# bounds resampling: the smoke run had 195 episodes in flight when it ended.
 [orchestrator.concurrency]
 initial_inflight = 64
+max_inflight = 96
 
 [orchestrator.train]
 group_size = 8
 
 [orchestrator.train.sampling]
-max_completion_tokens = 16384
+max_completion_tokens = 8192
 
 [[orchestrator.train.source]]
 name = "quant-research-notools"
@@ -83,19 +85,17 @@ env.agent.harness.id = "null"
 env.agent.runtime.type = "prime"
 env.taskset.task.image = "prime/zuricz/quant-research:0.1.4"
 
-# The startup eval scores the base model; then every 10 steps, so a 10-step
-# smoke run also scores a trained model and a 100-step run gives 11 points.
-# 30 tasks x 4 rollouts = 120 episodes, as in results/day9, under half a
-# train step's 256 gradings.
+# Two evals: the base model at startup and the trained one after the last
+# step. 30 tasks x 2 rollouts = 60 episodes each, about two train steps.
 [orchestrator.eval]
 interval = 10
 
 [orchestrator.eval.sampling]
-max_completion_tokens = 16384
+max_completion_tokens = 8192
 
 [[orchestrator.eval.source]]
 name = "quant-research-notools-eval"
-group_size = 4
+group_size = 2
 env.taskset.id = "zuricz/quant-research-notools"
 env.taskset.split = "eval"
 env.agent.harness.id = "null"
@@ -105,4 +105,4 @@ env.taskset.task.image = "prime/zuricz/quant-research:0.1.4"
 [ckpt] # Checkpoint at the end of training
 
 [inference.vllm]
-max_model_len = 18432
+max_model_len = 10240
