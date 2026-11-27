@@ -26,7 +26,7 @@ from typing import Any, Literal
 
 import polars as pl
 import verifiers.v1 as vf
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_serializer, field_validator
 
 from quant_research.servers.research import (
     ResearchConfig,
@@ -499,8 +499,9 @@ class SplitConfig(vf.TasksetConfig):
             must share datasets, such as several models and
             `scripts/run_baselines.py --secret`, set the same value. Unset,
             it is read from the environment variable `SECRET_VAR`, which
-            keeps it out of config files, e.g. a prime-rl config. Dumps show
-            it masked; never show it to the agent.
+            keeps it out of config files. Its repr is masked, but dumps hold
+            the real value: prime-rl dumps the env config and validates it
+            again in each env worker. Never show it to the agent.
     """
 
     split: Literal["train", "eval"] = "eval"
@@ -516,6 +517,11 @@ class SplitConfig(vf.TasksetConfig):
         if secret is not None and secret.get_secret_value() in ("", _MASK):
             raise ValueError("secret is empty or masked; pass the real secret")
         return secret
+
+    @field_serializer("secret")
+    def _dump_secret(self, secret: SecretStr | None) -> str | None:
+        # A masked dump read back would fail `_not_masked`.
+        return None if secret is None else secret.get_secret_value()
 
 
 class QuantResearchConfig(SplitConfig):
