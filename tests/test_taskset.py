@@ -184,6 +184,20 @@ def test_the_task_config_takes_the_secret_from_the_environment(monkeypatch):
     assert SECRET not in repr(NoToolsConfig())
 
 
+@pytest.mark.parametrize(
+    "taskset_cls, config",
+    [
+        (QuantResearchTaskset, QuantResearchConfig(secret=SECRET, split="train")),
+        (NoToolsTaskset, NoToolsConfig(secret=SECRET, split="train")),
+    ],
+)
+def test_tasks_ask_for_room_to_grade_the_largest_markets(taskset_cls, config):
+    # Prime sandboxes default to 1 CPU and 2 GB; grading a 250-asset market
+    # peaks near 3 GB, and the worker was killed ("worker process died").
+    resources = next(iter(taskset_cls(config))).data.resources
+    assert resources.memory >= 6 and resources.cpu >= 2
+
+
 def test_secret_falls_back_to_the_environment(monkeypatch):
     monkeypatch.setenv(taskset.SECRET_VAR, SECRET)
     assert QuantResearchConfig().secret.get_secret_value() == SECRET
