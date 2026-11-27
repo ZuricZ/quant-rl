@@ -22,11 +22,11 @@ import json
 import os
 import uuid
 from collections.abc import Iterable, Iterator
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, Self
 
 import polars as pl
 import verifiers.v1 as vf
-from pydantic import Field, SecretStr, field_serializer, field_validator
+from pydantic import Field, PlainSerializer, SecretStr, field_validator, model_validator
 
 from quant_research.servers.research import (
     ResearchConfig,
@@ -464,6 +464,15 @@ def secret_from_env() -> SecretStr | None:
     return SecretStr(value) if value else None
 
 
+def _reveal(secret: SecretStr | None) -> str | None:
+    return None if secret is None else secret.get_secret_value()
+
+
+# A secret whose repr is masked but whose dumps hold the value: prime-rl dumps
+# the env config and validates it again in each env worker.
+Secret = Annotated[SecretStr | None, PlainSerializer(_reveal)]
+
+
 class QuantResearchTaskConfig(vf.TaskConfig):
     """Task settings.
 
@@ -482,7 +491,7 @@ class QuantResearchTaskConfig(vf.TaskConfig):
 
     tools: ResearchConfig = ResearchConfig()
     max_turns: int = Field(MAX_TURNS, gt=0)
-    secret: SecretStr | None = None
+    secret: Secret = None
     image: str = IMAGE
     check_config: checks.CheckConfig = checks.CheckConfig()
     vary: bool = True
@@ -499,15 +508,17 @@ class SplitConfig(vf.TasksetConfig):
             must share datasets, such as several models and
             `scripts/run_baselines.py --secret`, set the same value. Unset,
             it is read from the environment variable `SECRET_VAR`, which
-            keeps it out of config files. Its repr is masked, but dumps hold
-            the real value: prime-rl dumps the env config and validates it
-            again in each env worker. Never show it to the agent.
+            keeps it out of config files. It is copied to the task settings
+            (`task.secret`), which prime-rl's env worker builds tasks from.
+            Its repr is masked, but dumps hold the real value: prime-rl dumps
+            the env config and validates it again in each env worker. Never
+            show it to the agent.
     """
 
     split: Literal["train", "eval"] = "eval"
     # Optional only because verifiers' CLI builds this config with defaults
     # before it reads the flags; the taskset refuses to build without it.
-    secret: SecretStr | None = Field(default_factory=secret_from_env)
+    secret: Secret = Field(default_factory=secret_from_env)
 
     @field_validator("secret")
     @classmethod
@@ -518,10 +529,14 @@ class SplitConfig(vf.TasksetConfig):
             raise ValueError("secret is empty or masked; pass the real secret")
         return secret
 
-    @field_serializer("secret")
-    def _dump_secret(self, secret: SecretStr | None) -> str | None:
-        # A masked dump read back would fail `_not_masked`.
-        return None if secret is None else secret.get_secret_value()
+    @model_validator(mode="after")
+    def _secret_on_task(self) -> Self:
+        # prime-rl's env worker builds each task from its data and
+        # `taskset.task`, not through `load`, so the task settings carry it.
+        task = getattr(self, "task", None)
+        if task is not None and task.secret != self.secret:
+            self.task = task.model_copy(update={"secret": self.secret})
+        return self
 
 
 class QuantResearchConfig(SplitConfig):
@@ -696,7 +711,7 @@ class QuantResearchTaskset(vf.Taskset[QuantResearchTask, QuantResearchConfig]):
         return self.config.split == "train"
 
     def load(self) -> Iterator[QuantResearchTask]:
-        task_config = self.config.task.model_copy(update={"secret": self.config.secret})
+        task_config = self.config.task
         indices: Iterable[int] = (
             itertools.count() if self.INFINITE else range(EVAL_TASKS)
         )

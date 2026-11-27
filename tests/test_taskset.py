@@ -37,7 +37,7 @@ from quant_research.taskset import (  # noqa: E402
     QuantResearchTaskset,
 )
 from quantenv import baselines, checks, metrics, reward, scoring, walkforward  # noqa: E402
-from quant_research_notools.taskset import NoToolsConfig  # noqa: E402
+from quant_research_notools.taskset import NoToolsConfig, NoToolsTask, NoToolsTaskset  # noqa: E402
 from quantenv.alpha import AlphaError  # noqa: E402
 from quantenv.sources import synthetic  # noqa: E402
 
@@ -126,6 +126,34 @@ def test_secret_survives_a_dump_read_back(mode):
     notools = NoToolsConfig(secret=SECRET)
     dumped = notools.model_dump(mode=mode)
     assert NoToolsConfig.model_validate(dumped).secret == notools.secret
+
+
+def _worker_task(taskset_cls, config):
+    """A task as prime-rl's env worker builds it (prime_rl/env/worker.py at
+    4cec527): the env config dumped and validated again, then the task's
+    dumped data wrapped in the declared Task with `taskset.task`."""
+    rebuilt = type(config).model_validate(config.model_dump(mode="json"))
+    task = next(iter(taskset_cls(config)))
+    data = type(task.data).model_validate(task.data.model_dump(mode="json"))
+    return type(task)(data, rebuilt.task), task
+
+
+@pytest.mark.parametrize(
+    "taskset_cls, config",
+    [
+        (QuantResearchTaskset, QuantResearchConfig(secret=SECRET, split="train")),
+        (NoToolsTaskset, NoToolsConfig(secret=SECRET, split="train")),
+    ],
+)
+def test_a_task_rebuilt_by_prime_rls_env_worker_keeps_the_secret(taskset_cls, config):
+    rebuilt, task = _worker_task(taskset_cls, config)
+    assert rebuilt.seed == task.seed == synthetic.dataset_seed(0, SECRET, "train")
+
+
+def test_the_task_config_takes_the_secret_from_the_environment(monkeypatch):
+    monkeypatch.setenv(taskset.SECRET_VAR, SECRET)
+    assert NoToolsConfig().task.secret.get_secret_value() == SECRET
+    assert SECRET not in repr(NoToolsConfig())
 
 
 def test_secret_falls_back_to_the_environment(monkeypatch):
