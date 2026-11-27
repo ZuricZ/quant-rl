@@ -96,6 +96,7 @@ def test_prompt_states_the_answer_format_not_the_checks_or_reward(task):
     prompt = task.data.prompt
     assert "```python block" in prompt and "backtest" not in prompt
     assert "rather than redefining `Alpha`" in prompt
+    assert "class Alpha:" not in prompt
     assert "judged by its mean rank IC" in prompt
     max_ic = checks.CheckConfig().max_ic
     assert f"IC of {max_ic:g}" not in prompt and f"by {max_ic:g}" not in prompt

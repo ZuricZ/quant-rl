@@ -748,7 +748,7 @@ def test_lookahead_except_on_any_fixed_dates_is_caught():
 
 
 def test_project_is_named_quant_research():
-    assert importlib.metadata.distribution("quant-research").version == "0.1.9"
+    assert importlib.metadata.distribution("quant-research").version == "0.1.10"
 
 
 def test_check_thresholds_are_configurable(data):

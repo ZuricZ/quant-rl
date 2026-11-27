@@ -46,6 +46,7 @@ class MyAlpha(Alpha):                              # written by the agent
     ...
 ```
 
+- The prompt shows this interface as the subclass to write (`class MyAlpha(Alpha):` with each method's default), not as `class Alpha:`: with the base class itself shown, 17 of 60 Qwen3.5-9B no-tools replies copied it and redefined `Alpha`, which grades invalid.
 - `features(df)`: feature engineering. Gets the whole split, returns the same rows in the same order with any added columns. A value at timestamp t may only use rows at or before t; the truncation check enforces this.
 - `fit(train)`: modelling. Gets the engineered features plus `fwd_return` for past rows only. State is kept on `self`.
 - `predict(df)`: gets the engineered rows of one block of timestamps and returns one score per row, in row order, as a Series or an expression evaluated on `df`.
