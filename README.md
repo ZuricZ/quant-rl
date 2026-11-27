@@ -158,8 +158,17 @@ prime env install zuricz/quant-research
 After that, `vf-run quant-research` and `vf-run quant-research-notools` both
 work. The grader runs in the task image, so build it from this repository
 (above) or pass another image with `--env.taskset.task.image`. To publish a
-new version, bump `version` in `pyproject.toml` and run `prime env push` from
-the repository root.
+new version, bump `version` in `pyproject.toml` and run, from the repository
+root:
+
+```bash
+prime env push
+prime env push --name quant-research-notools
+```
+
+The second push lists the same package as `zuricz/quant-research-notools`:
+Hosted Training installs the Hub environment a taskset id names, so the no-tools
+taskset needs a listing of its own (spec, Decision 28).
 
 ### On Prime sandboxes
 
