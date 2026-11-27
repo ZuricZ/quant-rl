@@ -15,14 +15,18 @@
 #   scores, not a result.
 #
 #   prime train validate runs/prime-rl/lora-9b.toml
-#   prime train runs/prime-rl/lora-9b.toml -e QUANT_RESEARCH_SECRET
+#   prime train runs/prime-rl/lora-9b.secret.toml
 #
-# The secret picks the datasets and stays out of this file. Validated on 25
-# November 2026 against the hosted runtime's prime-rl 4cec527 (v0.11.0) with
-# 2048 tokens; not yet submitted. Unchecked until submission: whether a
-# dedicated run accepts LoRA, and whether the runner finds the
-# quant-research-notools taskset, which ships inside the Hub environment
-# zuricz/quant-research.
+# Dedicated runs forward only HF_TOKEN and WANDB_API_KEY, so the secret, which
+# picks the datasets, cannot come from QUANT_RESEARCH_SECRET. It goes in an
+# untracked copy, lora-9b.secret.toml (gitignored), with
+# `env.taskset.secret = "..."` under both sources; an empty one fails the
+# taskset. Prime keeps it in the run's config. Validated on 27
+# November 2026 against the hosted runtime's prime-rl 4cec527 (v0.11.0); not
+# yet submitted. Unchecked until submission: whether a dedicated run accepts
+# LoRA, whether the runner finds the quant-research-notools taskset, which
+# ships inside the Hub environment zuricz/quant-research, and whether the
+# grading sandboxes can pull the private image.
 mode = "rl"
 max_steps = 10
 seq_len = 18432
@@ -69,14 +73,19 @@ env.agent.harness.id = "null"
 env.agent.runtime.type = "prime"
 env.taskset.task.image = "prime/zuricz/quant-research:0.1.4"
 
+# The startup eval scores the base model; then every 10 steps, so a 10-step
+# smoke run also scores a trained model and a 100-step run gives 11 points.
+# 30 tasks x 4 rollouts = 120 episodes, as in results/day9, under half a
+# train step's 256 gradings.
 [orchestrator.eval]
-interval = 50
+interval = 10
 
 [orchestrator.eval.sampling]
 max_completion_tokens = 16384
 
 [[orchestrator.eval.source]]
 name = "quant-research-notools-eval"
+group_size = 4
 env.taskset.id = "quant-research-notools"
 env.taskset.split = "eval"
 env.agent.harness.id = "null"
