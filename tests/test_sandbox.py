@@ -287,3 +287,20 @@ def test_check_runs_as_the_sandbox_user():
     )
     limit = scoring.TimeLimit(startup=60.0)
     scoring.check(code, VISIBLE, SMALL_WF, limit, user="nobody")
+
+
+@needs_root
+def test_sandbox_user_leaves_no_system_v_ipc_behind():
+    import pwd  # POSIX only.
+
+    # A shared memory segment outlives its process unless removed.
+    body = (
+        "        import ctypes\n"
+        "        libc = ctypes.CDLL(None, use_errno=True)\n"
+        "        if libc.shmget(0x5157, 4096, 0o1000 | 0o600) < 0:\n"
+        "            raise OSError(ctypes.get_errno(), 'shmget')\n"
+        "        return pl.col('ret')\n"
+    )
+    _backtest(body, user="nobody")
+    uid = pwd.getpwnam("nobody").pw_uid
+    assert sandbox._sysv_ids("shm", uid) == []
