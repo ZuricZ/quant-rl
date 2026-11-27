@@ -465,6 +465,7 @@ def secret_from_env() -> SecretStr | None:
 
 
 def _reveal(secret: SecretStr | None) -> str | None:
+    """The secret's value, for dumps; None stays None."""
     return None if secret is None else secret.get_secret_value()
 
 
@@ -533,10 +534,41 @@ class SplitConfig(vf.TasksetConfig):
     def _secret_on_task(self) -> Self:
         # prime-rl's env worker builds each task from its data and
         # `taskset.task`, not through `load`, so the task settings carry it.
-        task = getattr(self, "task", None)
-        if task is not None and task.secret != self.secret:
-            self.task = task.model_copy(update={"secret": self.secret})
+        # Subclasses declare a `task` whose settings have a `secret`.
+        if self.task.secret is not None and self.task.secret != self.secret:
+            raise ValueError(
+                "task.secret differs from the taskset's secret; set the secret "
+                "on the taskset only"
+            )
+        if self.task.secret is None and self.secret is not None:
+            was_set = "task" in self.model_fields_set
+            self.task = self.task.model_copy(update={"secret": self.secret})
+            if not was_set:
+                self.model_fields_set.discard("task")
         return self
+
+
+def check_secret(config: SplitConfig) -> None:
+    """Refuses a taskset config without a usable secret.
+
+    Args:
+        config: The taskset's settings.
+
+    Raises:
+        ValueError: If the config has no secret, or its task settings hold
+            another one, as after `model_copy` with a new secret, which skips
+            validation; tasks draw their seeds from the task settings' copy.
+    """
+    if config.secret is None:
+        raise ValueError(
+            "the taskset needs a secret: set --env.taskset.secret "
+            f"(--taskset.secret for vf-validate) or {SECRET_VAR}"
+        )
+    if config.task.secret != config.secret:
+        raise ValueError(
+            "task.secret differs from the taskset's secret; build the config "
+            "anew instead of copying it with another secret"
+        )
 
 
 class QuantResearchConfig(SplitConfig):
@@ -699,11 +731,7 @@ class QuantResearchTaskset(vf.Taskset[QuantResearchTask, QuantResearchConfig]):
     eval split is tasks 0 to `EVAL_TASKS` - 1; the train split is infinite."""
 
     def __init__(self, config: QuantResearchConfig) -> None:
-        if config.secret is None:
-            raise ValueError(
-                "the taskset needs a secret: set --env.taskset.secret "
-                f"(--taskset.secret for vf-validate) or {SECRET_VAR}"
-            )
+        check_secret(config)
         super().__init__(config)
 
     @property

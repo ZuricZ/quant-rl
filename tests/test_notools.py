@@ -155,10 +155,13 @@ def test_a_task_rebuilt_by_prime_rls_env_worker_grades(tmp_path):
     )
     rebuilt = NoToolsConfig.model_validate_json(config.model_dump_json())
     data = next(iter(NoToolsTaskset(config))).data
-    task = NoToolsTask(ResearchData.model_validate_json(data.model_dump_json()), rebuilt.task)
-    value = asyncio.run(task.hidden_ic(_trace(task, REPLY), _LocalRuntime(_mkdir(tmp_path / "a"))))
+    data = ResearchData.model_validate_json(data.model_dump_json())
+    task = NoToolsTask(data, rebuilt.task)
+    runtime = _LocalRuntime(_mkdir(tmp_path / "a"))
+    value = asyncio.run(task.hidden_ic(_trace(task, REPLY), runtime))
     local = _local_task()
-    expected = asyncio.run(local.hidden_ic(_trace(local, REPLY), _LocalRuntime(_mkdir(tmp_path / "b"))))
+    runtime = _LocalRuntime(_mkdir(tmp_path / "b"))
+    expected = asyncio.run(local.hidden_ic(_trace(local, REPLY), runtime))
     assert value == expected > reward.INVALID_REWARD
 
 
