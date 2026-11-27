@@ -17,8 +17,9 @@ the trusted parent over its stdin and stdout:
   takes that user's primary group and no supplementary groups, so it cannot
   read the caller's memory, environment or private files, including those
   readable by root's group. After each session every process of that user
-  is killed and every file it owns, in any directory it can write, is
-  removed, so nothing persists between runs.
+  is killed, every file it owns, in any directory it can write, is
+  removed, and so are its System V shared memory segments, semaphores and
+  message queues, so nothing persists between runs.
 - Resource limits on address space, processes and file size, set by the
   child itself before it loads the agent's code (POSIX only).
 - One session at a time per sandbox user, across processes (an exclusive
@@ -29,7 +30,8 @@ Problems with the sandbox itself, such as an unknown user or missing
 privileges, raise `SandboxError`, never `AlphaError`: they are not the
 agent's fault.
 
-Not covered: network access and System V IPC.
+Not covered: network access. Agent code that can reach a host can keep
+state there between runs.
 
 Run as `python -m quantenv.sandbox`; `Sandbox` starts it.
 """
@@ -304,8 +306,32 @@ def _writable_dirs(uid: int, gid: int) -> tuple[str, ...]:
     return tuple(found)
 
 
+# System V IPC objects by their `ipcrm` flag and `/proc/sysvipc` table.
+_SYSV_IPC = {"-m": "shm", "-s": "sem", "-q": "msg"}
+
+
+def _sysv_ids(table: str, uid: int) -> list[str]:
+    """Ids of the System V IPC objects in a `/proc/sysvipc` table that `uid`
+    owns or created; none where the table does not exist."""
+    try:
+        with open(f"/proc/sysvipc/{table}") as f:
+            header, *rows = [line.split() for line in f]
+    except OSError:
+        return []
+    owner, creator = header.index("uid"), header.index("cuid")
+    return [
+        row[1] for row in rows if str(uid) in (row[owner], row[creator])
+    ]
+
+
 def _clean_up(user: str) -> None:
-    """Kills every process of `user` and removes every file it owns."""
+    """Kills every process of `user` and removes every file and System V
+    IPC object it owns.
+
+    Raises:
+        SandboxError: If an IPC object cannot be removed, e.g. `ipcrm` is
+            missing.
+    """
     subprocess.run(
         [sys.executable, "-I", "-c", "import os, signal; os.kill(-1, signal.SIGKILL)"],
         env={},
@@ -330,6 +356,20 @@ def _clean_up(user: str) -> None:
                     os.unlink(entry.path)
             except FileNotFoundError:
                 continue
+    for flag, table in _SYSV_IPC.items():
+        for ipc_id in _sysv_ids(table, uid):
+            try:
+                # As the owner: removing another user's object needs
+                # CAP_SYS_ADMIN, which a container's root usually lacks.
+                subprocess.run(
+                    ["ipcrm", flag, ipc_id],
+                    env={},
+                    user=user,
+                    capture_output=True,
+                    check=True,
+                )
+            except (OSError, subprocess.CalledProcessError) as e:
+                raise SandboxError(f"cannot remove {user}'s {table} {ipc_id}: {e}") from e
 
 
 def _limit(limits: dict[str, int]) -> None:

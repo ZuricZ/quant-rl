@@ -153,3 +153,41 @@ class EvalData:
     check_seed: int | None = None
     cost: float = 0.0
     periods_per_year: float = 252.0
+
+
+def scrambled(panel: Panel, seed: int) -> Panel:
+    """The panel with the values of every column but the keys shuffled
+    across rows, each column on its own; nulls stay where they are.
+
+    Each column keeps its name, dtype, values and null positions (the
+    warm-up gaps of a rolling feature, say), so code that runs on the panel
+    runs on this one with the same share of null predictions, but every
+    relation between columns and over time is gone: nothing computed on it
+    says anything about the original's signal.
+
+    Args:
+        panel: The data.
+        seed: Seed of the shuffles. Whoever must not undo them must not
+            learn it.
+
+    Returns:
+        A panel with the same schema, keys and row order.
+    """
+    s = panel.schema
+    keys = {s.timestamp, s.asset}
+    shuffled = []
+    for i, name in enumerate(panel.frame.columns):
+        if name in keys:
+            continue
+        column = pl.col(name)
+        present = column.is_not_null()
+        # The k-th non-null row gets the k-th shuffled non-null value. The
+        # trailing null keeps the gather valid for an all-null column.
+        values = column.drop_nulls().shuffle(seed=(seed + i) % 2**64)
+        rank = (present.cum_sum().cast(pl.Int64) - 1).clip(lower_bound=0)
+        shuffled.append(
+            pl.when(present)
+            .then(values.extend_constant(None, 1).gather(rank))
+            .alias(name)
+        )
+    return panel.with_frame(panel.frame.lazy().with_columns(shuffled).collect())

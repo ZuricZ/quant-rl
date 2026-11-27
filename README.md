@@ -130,7 +130,7 @@ uv run python scripts/run_baselines.py --secret my-secret --tasks 5
 uv run python scripts/measure_decay_checks.py --tasks 10
 
 # The task image, then validate both tasksets in Docker.
-docker build -t quant-research:0.1.1 .
+docker build -t quant-research:0.1.3 .
 export QUANT_RESEARCH_SECRET=my-secret
 uv run vf-validate quant-research --runtime.type docker -n 2
 uv run vf-validate quant-research-notools --runtime.type docker -n 2
@@ -168,14 +168,14 @@ Push the task image to your private Prime registry; it is built remotely from
 the Dockerfile, so push again after changing the code:
 
 ```bash
-prime images push quant-research:0.1.1 --context .
+prime images push quant-research:0.1.3 --context .
 ```
 
 Then pass the pushed reference, with `PRIME_API_KEY` set:
 
 ```bash
 uv run python scripts/stub_model.py &
-uv run python scripts/run_models.py --secret my-secret stub --tasks 1 --rollouts 1 --runtime prime --image prime/zuricz/quant-research:0.1.1
+uv run python scripts/run_models.py --secret my-secret stub --tasks 1 --rollouts 1 --runtime prime --image prime/zuricz/quant-research:0.1.3
 ```
 
 `vf-run` and the model endpoint stay on your machine; the sandbox reaches the

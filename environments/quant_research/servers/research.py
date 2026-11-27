@@ -1,16 +1,17 @@
-"""The research toolset: describe, backtest and submit, served over MCP.
+"""The research toolset: describe, check, backtest and submit, served over MCP.
 
 The server runs colocated with the harness, inside the rollout's container,
 and only ever builds the visible periods of the task's dataset. Each backtest
 rebuilds them in a fresh scoring worker, which runs the agent's code in
-`quantenv.sandbox` as the unprivileged sandbox user.
+`quantenv.sandbox` as the unprivileged sandbox user; so does each check, on
+a scrambled copy.
 
 Run as `python -m quant_research.servers.research`; verifiers launches it.
 """
 
 import asyncio
 import functools
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import verifiers.v1 as vf
 from pydantic import Field
@@ -21,8 +22,13 @@ from quantenv.panel import EvalData, Panel
 from quantenv.sources import synthetic
 from quantenv.walkforward import WalkForward
 
+if TYPE_CHECKING:
+    from mcp.server.mcpserver import MCPServer
+
 BUDGET = 10
 SANDBOX_USER = "nobody"
+# Tools offered only when their `ResearchConfig` flag is on.
+OPTIONAL_TOOLS = ("check",)
 
 
 class ResearchData(vf.TaskData):
@@ -74,11 +80,21 @@ class ResearchConfig(vf.ToolsetConfig):
             the final score. Every process of this user is killed after each
             pipeline run, so it must not be used for anything else. None runs
             the code as the server's own user, without that isolation.
+        check: Offer the `check` tool. Off by default: untrained models did
+            not gain from it (results/day11). It needs a sandbox user: code
+            running as the server's own user can read the unscrambled data
+            from the scoring worker's memory.
     """
 
     colocated: bool = True
     budget: int = Field(BUDGET, ge=0)
     sandbox_user: str | None = SANDBOX_USER
+    check: bool = False
+
+    @property
+    def optional_tools(self) -> tuple[str, ...]:
+        """The optional tools that are on, by name."""
+        return tuple(name for name in OPTIONAL_TOOLS if getattr(self, name))
 
 
 def describe_panel(panel: Panel) -> str:
@@ -164,16 +180,17 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
     The toolset keeps its own record of the episode and copies it into the
     shared state at the end of every call. State is pulled before a call and
     pushed after it, so a call that started from an older copy would
-    otherwise overwrite what a concurrent call recorded. Backtests run one at
-    a time, since each one ends by killing every process of the sandbox user.
+    otherwise overwrite what a concurrent call recorded. Backtests and checks
+    run one at a time, since each one ends by killing every process of the
+    sandbox user.
     """
 
-    TOOL_PREFIX = None  # Advertise the tools as describe, backtest and submit.
+    TOOL_PREFIX = None  # Advertise the tools by their bare names.
 
     def __init__(self, config: ResearchConfig) -> None:
         super().__init__(config)
         self._episode = ResearchState()
-        self._backtesting = asyncio.Lock()
+        self._running = asyncio.Lock()
         # What describe and the backtest scope say about the visible data,
         # built once and off the event loop.
         self._summary: tuple[str, str] | None = None
@@ -196,6 +213,17 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
             self._summary = (describe_panel(data.panel), backtest_scope(data))
         return self._summary
 
+    def register(self, mcp: "MCPServer") -> None:
+        """Registers the tools, leaving out optional tools that are off.
+
+        Args:
+            mcp: The server to register them on.
+        """
+        super().register(mcp)
+        for name in OPTIONAL_TOOLS:
+            if name not in self.config.optional_tools:
+                mcp.remove_tool(name)
+
     def _publish(self) -> None:
         for name in _EPISODE_FIELDS:
             setattr(self.state, name, getattr(self._episode, name))
@@ -209,6 +237,37 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
         """
         description, _ = await self._summarise()
         return description
+
+    @vf.tool
+    async def check(self, code: str) -> str:
+        """Runs alpha code walk-forward, as `backtest` does, on scrambled
+        visible data: every column shuffled across rows on its own, so it
+        has the real columns, values and size but no signal.
+
+        Does not count against the backtest budget and reports no scores.
+        Refused after `submit`.
+
+        Args:
+            code: Python source defining one subclass of `Alpha`.
+
+        Returns:
+            That the code ran, or why it failed.
+
+        Raises:
+            ValueError: If the call is refused.
+        """
+        if self._episode.submitted:
+            raise ValueError("refused: the alpha is already submitted")
+        try:
+            async with self._running:
+                if self._episode.submitted:  # Submitted while this call waited.
+                    raise ValueError("refused: the alpha is already submitted")
+                await asyncio.to_thread(
+                    scoring.check, code, self._visible(), user=self.config.sandbox_user
+                )
+        except AlphaError as e:
+            return f"error: {e}"
+        return "ok: the alpha ran on every block"
 
     @vf.tool
     async def backtest(self, code: str) -> str:
@@ -240,7 +299,7 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
         episode.backtests_used += 1
         left = self.config.budget - episode.backtests_used
         try:
-            async with self._backtesting:
+            async with self._running:
                 performance = await asyncio.to_thread(
                     scoring.backtest,
                     code,
