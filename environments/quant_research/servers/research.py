@@ -14,6 +14,7 @@ import functools
 from typing import Literal
 
 import verifiers.v1 as vf
+from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
 from quantenv import metrics, scoring, walkforward
@@ -24,6 +25,8 @@ from quantenv.walkforward import WalkForward
 
 BUDGET = 10
 SANDBOX_USER = "nobody"
+# Tools offered only when their `ResearchConfig` flag is on.
+OPTIONAL_TOOLS = ("check",)
 
 
 class ResearchData(vf.TaskData):
@@ -75,11 +78,19 @@ class ResearchConfig(vf.ToolsetConfig):
             the final score. Every process of this user is killed after each
             pipeline run, so it must not be used for anything else. None runs
             the code as the server's own user, without that isolation.
+        check: Offer the `check` tool. Off by default: untrained models did
+            not gain from it (results/day11).
     """
 
     colocated: bool = True
     budget: int = Field(BUDGET, ge=0)
     sandbox_user: str | None = SANDBOX_USER
+    check: bool = False
+
+    @property
+    def optional_tools(self) -> tuple[str, ...]:
+        """The optional tools that are on, by name."""
+        return tuple(name for name in OPTIONAL_TOOLS if getattr(self, name))
 
 
 def describe_panel(panel: Panel) -> str:
@@ -170,7 +181,7 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
     sandbox user.
     """
 
-    TOOL_PREFIX = None  # Advertise the tools as describe, check, backtest, submit.
+    TOOL_PREFIX = None  # Advertise the tools by their bare names.
 
     def __init__(self, config: ResearchConfig) -> None:
         super().__init__(config)
@@ -197,6 +208,17 @@ class ResearchToolset(vf.Toolset[ResearchConfig, ResearchState]):
             data = await asyncio.to_thread(self._visible())
             self._summary = (describe_panel(data.panel), backtest_scope(data))
         return self._summary
+
+    def register(self, mcp: MCPServer) -> None:
+        """Registers the tools, leaving out optional tools that are off.
+
+        Args:
+            mcp: The server to register them on.
+        """
+        super().register(mcp)
+        for name in OPTIONAL_TOOLS:
+            if name not in self.config.optional_tools:
+                mcp.remove_tool(name)
 
     def _publish(self) -> None:
         for name in _EPISODE_FIELDS:

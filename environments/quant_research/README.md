@@ -20,7 +20,7 @@ scored on unseen periods, which are built only after the episode ends.
   | Tool | Returns |
   | --- | --- |
   | `describe()` | Columns, timestamp range, number of assets |
-  | `check(code)` | Whether the alpha runs walk-forward on the visible data with each column shuffled across rows, or its error. No scores; free. |
+  | `check(code)` | Optional (`tools.check = true`), off by default. Whether the alpha runs walk-forward on the visible data with each column shuffled across rows, or its error. No scores; free. |
   | `backtest(code)` | Net Sharpe ± s.e., gross Sharpe, turnover, rank IC ± s.e., per-year range. Costs one unit of budget. |
   | `submit(code, claimed_sharpe)` | Ends the episode |
 
@@ -60,6 +60,7 @@ uv run vf-run quant-research --model <model> --client.base-url <url> \
 | `env.taskset.secret` | `$QUANT_RESEARCH_SECRET` | Required. Dataset seeds are hashed from it, and agent code never sees it. |
 | `env.taskset.split` | `eval` | `eval`: 30 fixed tasks, 6 per style. `train`: infinite, never shares a dataset with eval. |
 | `env.taskset.task.tools.budget` | 10 | Backtests per episode |
+| `env.taskset.task.tools.check` | `false` | Offer the `check(code)` tool and its prompt line |
 | `env.taskset.task.max_turns` | 30 | Model turns per episode |
 | `env.taskset.task.vary` | true | Vary market and prompt per task; false gives the fixed market of the earliest runs |
 | `env.taskset.task.check_config.max_ic` | 0.05 | IC ceiling of the implausible-IC check, at every future lag (set it through a TOML file) |

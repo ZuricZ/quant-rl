@@ -145,7 +145,6 @@ def test_prompt_states_columns_budget_and_contract():
         "features(df)",
         "fit(train)",
         "predict(df)",
-        "check(code)",
         "submit(code, claimed_sharpe)",
     ):
         assert name in prompt
@@ -334,6 +333,27 @@ def test_backtest_report_explains_its_numbers():
     # Numbers only: no advice that would coach the claim.
     for word in ("should", "try", "claim"):
         assert word not in out.lower()
+
+
+def _registered(config: ResearchConfig) -> set[str]:
+    from mcp.server.mcpserver import MCPServer
+
+    mcp = MCPServer("test")
+    ResearchToolset(config).register(mcp)
+    return {tool.name for tool in asyncio.run(mcp.list_tools())}
+
+
+def test_optional_tools_are_off_by_default():
+    assert _registered(TOOLS) == {"describe", "backtest", "submit"}
+    prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
+    assert "check(code)" not in prompt
+
+
+def test_check_is_offered_when_turned_on():
+    tools = ResearchConfig(sandbox_user=None, check=True)
+    assert _registered(tools) == {"describe", "check", "backtest", "submit"}
+    prompt = next(iter(QuantResearchTaskset(_config(tools=tools)))).data.prompt
+    assert taskset.OPTIONAL_TOOL_LINES["check"] in prompt
 
 
 def test_check_runs_the_code_without_using_the_budget():
