@@ -43,8 +43,12 @@ num_infer_gpus = 1
 [model]
 name = "Qwen/Qwen3.5-9B"
 
+# LoRA takes a higher rate than full fine-tuning; 1e-5 would barely move 10
+# steps. No weight decay, prime-rl's RL default. The rate stays constant
+# (prime-rl's default scheduler): its warmup defaults to 10 steps, the whole
+# run, and gradients are clipped at norm 1 (the smoke run's were about 0.08).
 [trainer.optim]
-lr = 1e-5
+lr = 5e-5
 weight_decay = 0.0
 
 [trainer.model.lora]
