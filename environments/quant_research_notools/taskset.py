@@ -25,6 +25,7 @@ from quant_research.taskset import (
     EVAL_TASKS,
     IMAGE,
     PORTFOLIO,
+    RESOURCES,
     Secret,
     SplitConfig,
     check_sandbox_user,
@@ -324,6 +325,7 @@ class NoToolsTaskset(vf.Taskset[NoToolsTask, NoToolsConfig]):
                         task.variation,
                     ),
                     image=task_config.image,
+                    resources=RESOURCES,
                     scoring=vf.ScoringConfig(mode="isolated"),
                     timeout=vf.TaskTimeout(
                         scoring=scoring_timeout(task_config.check_config, market)

@@ -46,6 +46,12 @@ _MASK = "**********"
 # Built from the repository's Dockerfile; holds this package.
 IMAGE = "quant-research:0.1.4"
 _SCORE = "score"
+# What each task's container gets. Prime sandboxes default to 1 CPU and 2 GB;
+# grading peaks near 3 GB on a 250-asset market (about 0.6 GB in the scoring
+# process, 2.5 GB in its worker), and on Prime the kernel killed the worker on
+# 3 of 12 train tasks ("worker process died"), honest alphas included. Agent
+# code may need more than the oracle, hence the headroom.
+RESOURCES = vf.TaskResources(cpu=2, memory=8)
 # Environment variable a taskset reads its secret from when none is set.
 SECRET_VAR = "QUANT_RESEARCH_SECRET"
 
@@ -761,6 +767,7 @@ class QuantResearchTaskset(vf.Taskset[QuantResearchTask, QuantResearchConfig]):
                         task_config.tools.optional_tools,
                     ),
                     image=task_config.image,
+                    resources=RESOURCES,
                     # Grade in a fresh container of the image, which agent
                     # code never touched; the inputs come from the trace.
                     scoring=vf.ScoringConfig(mode="isolated"),
