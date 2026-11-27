@@ -17,6 +17,10 @@
 #   prime train validate runs/prime-rl/lora-9b.toml
 #   prime train runs/prime-rl/lora-9b.secret.toml
 #
+# The taskset id is the Hub id (owner/name): a hosted run installs the Hub
+# environment it names, and verifiers imports `quant_research_notools` from it.
+# The bare id installed nothing (runs xrl45ly3, o8u85xep: taskset not found).
+#
 # Dedicated runs forward only HF_TOKEN and WANDB_API_KEY, so the secret, which
 # picks the datasets, cannot come from QUANT_RESEARCH_SECRET. It goes in an
 # untracked copy, lora-9b.secret.toml (gitignored), with
@@ -59,6 +63,12 @@ target_modules = [
 [orchestrator]
 batch_size = 32
 
+# Without a max length, vLLM sizes each episode for Qwen3.5's native 262,144
+# tokens and the orchestrator ran 7 episodes at a time (run l9lgcetk); an
+# episode needs at most seq_len, so the KV cache holds about 100.
+[orchestrator.concurrency]
+initial_inflight = 64
+
 [orchestrator.train]
 group_size = 8
 
@@ -67,7 +77,7 @@ max_completion_tokens = 16384
 
 [[orchestrator.train.source]]
 name = "quant-research-notools"
-env.taskset.id = "quant-research-notools"
+env.taskset.id = "zuricz/quant-research-notools"
 env.taskset.split = "train"
 env.agent.harness.id = "null"
 env.agent.runtime.type = "prime"
@@ -86,7 +96,7 @@ max_completion_tokens = 16384
 [[orchestrator.eval.source]]
 name = "quant-research-notools-eval"
 group_size = 4
-env.taskset.id = "quant-research-notools"
+env.taskset.id = "zuricz/quant-research-notools"
 env.taskset.split = "eval"
 env.agent.harness.id = "null"
 env.agent.runtime.type = "prime"
@@ -94,4 +104,5 @@ env.taskset.task.image = "prime/zuricz/quant-research:0.1.4"
 
 [ckpt] # Checkpoint at the end of training
 
-[inference]
+[inference.vllm]
+max_model_len = 18432

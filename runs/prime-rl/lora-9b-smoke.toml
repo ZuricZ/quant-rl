@@ -1,0 +1,79 @@
+# Quick hosted smoke run of lora-9b.toml: does the pipeline install the
+# taskset, generate, grade in Prime sandboxes, train a LoRA step, eval and
+# checkpoint? Not a result: 3 steps of 8 rollouts (2 tasks x 4), replies cut at
+# 4,096 tokens (Qwen3.5-9B thinks first, so many are cut off and score as
+# invalid), no startup eval, one eval of 8 tasks after the last step. About 20
+# minutes on 2 GPUs.
+#
+#   prime train runs/prime-rl/lora-9b-smoke.secret.toml
+#
+# The secret goes in an untracked copy, lora-9b-smoke.secret.toml, as for
+# lora-9b.toml.
+mode = "rl"
+max_steps = 3
+seq_len = 6144
+
+[deployment]
+num_train_gpus = 1
+num_infer_gpus = 1
+
+[model]
+name = "Qwen/Qwen3.5-9B"
+
+[trainer.optim]
+lr = 1e-5
+weight_decay = 0.0
+
+[trainer.model.lora]
+rank = 8
+dropout = 0.0
+target_modules = [
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj"
+]
+
+[orchestrator]
+batch_size = 8
+
+[orchestrator.concurrency]
+initial_inflight = 16
+
+[orchestrator.train]
+group_size = 4
+
+[orchestrator.train.sampling]
+max_completion_tokens = 4096
+
+[[orchestrator.train.source]]
+name = "quant-research-notools"
+env.taskset.id = "zuricz/quant-research-notools"
+env.taskset.split = "train"
+env.agent.harness.id = "null"
+env.agent.runtime.type = "prime"
+env.taskset.task.image = "prime/zuricz/quant-research:0.1.4"
+
+[orchestrator.eval]
+interval = 3
+skip_first_step = true
+
+[orchestrator.eval.sampling]
+max_completion_tokens = 4096
+
+[[orchestrator.eval.source]]
+name = "quant-research-notools-eval"
+select.limit = 8
+env.taskset.id = "zuricz/quant-research-notools"
+env.taskset.split = "eval"
+env.agent.harness.id = "null"
+env.agent.runtime.type = "prime"
+env.taskset.task.image = "prime/zuricz/quant-research:0.1.4"
+
+[ckpt] # Checkpoint at the end of training
+
+[inference.vllm]
+max_model_len = 6144
