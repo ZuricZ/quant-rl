@@ -31,6 +31,21 @@ base_url = "https://openrouter.ai/api/v1"
 api_key_var = "OPENROUTER_API_KEY"
 sampling = { temperature = 0.6, top_p = 0.95, max_tokens = 16384 }
 
+# The no-tools base checks of results/day12, before the hosted RL run. Each
+# needs a settings file from runs/openrouter/ (`--vf-config`), for top_k,
+# thinking and providers.
+[models.qwen3_5-9b-12k]
+model = "qwen/qwen3.5-9b"
+base_url = "https://openrouter.ai/api/v1"
+api_key_var = "OPENROUTER_API_KEY"
+sampling = { temperature = 0.6, top_p = 0.95, max_tokens = 12288 }
+
+[models.qwen3_5-35b-a3b]
+model = "qwen/qwen3.5-35b-a3b"
+base_url = "https://openrouter.ai/api/v1"
+api_key_var = "OPENROUTER_API_KEY"
+sampling = { temperature = 0.6, top_p = 0.95, max_tokens = 16384 }
+
 # Qwen3-14B's context on OpenRouter is 40,960 tokens, short for 30 turns with
 # thinking. (OpenRouter dropped qwen/qwen3-8b in November 2026.)
 [models.qwen3-14b]
