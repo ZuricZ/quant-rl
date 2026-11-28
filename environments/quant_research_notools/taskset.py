@@ -45,6 +45,19 @@ _CODE_BLOCK = re.compile(r"```python[^\n]*\n(.*?)```", re.DOTALL)
 # What `grade` is told the agent claimed; this variant asks for no claim.
 _NO_CLAIM = 0.0
 
+# Polars 1 APIs that polars 2 removed and that base models still write (19 of
+# 60 Qwen3.5-9B replies failed on them). Only this taskset lists them: the
+# tools taskset can read the docs instead. Part of a format string: no braces.
+POLARS_2_NOTES = """\
+Polars 2 removed some polars 1 APIs:
+
+- `rolling_*` and `ewm_*` take `min_samples`, not `min_periods`.
+- There is no `Expr.corr` or `pl.spearman_corr`: use \
+`pl.corr(a, b, method="spearman")`, with `.over("timestamp")` for one value \
+per period.
+
+"""
+
 PROMPT = (
     "Write a trading alpha for a simulated panel of asset returns. It is "
     "scored on the periods that directly follow the ones described here. "
@@ -65,7 +78,8 @@ the portfolio described below.
     + ALPHA_SECTION
     + "Vectorised polars expressions finish well inside this; Python loops "
     "over rows do not.\n\n"
-    "## Portfolio\n\n"
+    + POLARS_2_NOTES
+    + "## Portfolio\n\n"
     + PORTFOLIO
     + "\n\n"
     + "{example}"

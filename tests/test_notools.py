@@ -92,10 +92,19 @@ def test_prompt_scores_every_feature_and_ret_on_visible_data(task):
         assert text not in prompt
 
 
+def test_prompt_lists_the_polars_2_changes_models_miss(task):
+    """Without tools to read the docs, 19 of 60 base-model replies used
+    polars 1 APIs that polars 2 removed."""
+    prompt = task.data.prompt
+    assert "min_samples" in prompt and "min_periods" in prompt
+    assert 'pl.corr(a, b, method="spearman")' in prompt
+
+
 def test_prompt_states_the_answer_format_not_the_checks_or_reward(task):
     prompt = task.data.prompt
     assert "```python block" in prompt and "backtest" not in prompt
     assert "rather than redefining `Alpha`" in prompt
+    assert "class Alpha:" not in prompt
     assert "judged by its mean rank IC" in prompt
     max_ic = checks.CheckConfig().max_ic
     assert f"IC of {max_ic:g}" not in prompt and f"by {max_ic:g}" not in prompt

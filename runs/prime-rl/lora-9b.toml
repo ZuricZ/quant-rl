@@ -5,13 +5,13 @@
 #
 # - Qwen3.5-9B, the model of the Day 6 and 7 results; Hosted Training does not
 #   offer Qwen3-4B-Instruct-2507.
-# - 12288 completion tokens. Qwen3.5-9B thinks first, and its replies split in
-#   two: with the final prompt at 16384 (results/day9, 120 replies) the median
-#   was 2,911 tokens, 22% ran past 12288 and 18% hit 16384, mostly
-#   re-checking; 31% ran past 8192. 12288 cuts off few more than 16384 and
-#   shortens the slowest replies, which set the step time. The before/after
-#   comparison is the run's own eval (step 0 against the last step), not
-#   results/day9's 16384 baseline.
+# - 16384 completion tokens, thinking on. In an OpenRouter check of the 30
+#   eval tasks x 2 (bf16 providers, the sampling below, 27 November 2026),
+#   thinking gave 26 valid alphas against 23 without it, at median 2,858
+#   output tokens; 5 of 60 hit 16384, 9 would have hit 12288 and 18 would
+#   have hit 8192. seq_len and max_model_len are 18432: the prompt is about
+#   1,800 tokens. The before/after comparison is the run's own eval (step 0
+#   against the last step).
 # - Sampling at Qwen's settings for coding in thinking mode: temperature 0.6,
 #   top_p 0.95, top_k 20 (results/ runs used the first two). prime-rl's
 #   defaults (1.0 and 1.0) made the base model's code much worse: run
@@ -39,7 +39,7 @@
 # generation, sandbox grading, LoRA steps, eval and final checkpoint.
 mode = "rl"
 max_steps = 10
-seq_len = 14336
+seq_len = 18432
 
 [deployment]
 num_train_gpus = 1
@@ -84,7 +84,7 @@ max_inflight = 96
 group_size = 8
 
 [orchestrator.train.sampling]
-max_completion_tokens = 12288
+max_completion_tokens = 16384
 temperature = 0.6
 top_p = 0.95
 top_k = 20
@@ -103,7 +103,7 @@ env.taskset.task.image = "prime/zuricz/quant-research:0.1.4"
 interval = 10
 
 [orchestrator.eval.sampling]
-max_completion_tokens = 12288
+max_completion_tokens = 16384
 temperature = 0.6
 top_p = 0.95
 top_k = 20
@@ -120,4 +120,4 @@ env.taskset.task.image = "prime/zuricz/quant-research:0.1.4"
 [ckpt] # Checkpoint at the end of training
 
 [inference.vllm]
-max_model_len = 14336
+max_model_len = 18432

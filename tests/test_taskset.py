@@ -233,6 +233,18 @@ def test_prompt_states_columns_budget_and_contract():
         assert name in prompt
 
 
+def test_prompt_shows_the_interface_as_a_subclass_to_copy():
+    """Replies that copy the interface block must still subclass `Alpha`:
+    showing `class Alpha:` itself led 17 of 60 base-model replies to
+    redefine it."""
+    config = _config(tools=ResearchConfig(sandbox_user=None))
+    prompt = next(iter(QuantResearchTaskset(config))).data.prompt
+    first_block = prompt.split("```python\n", 1)[1].split("```", 1)[0]
+    assert "class Alpha:" not in prompt
+    assert first_block.startswith("class MyAlpha(Alpha):")
+    assert "min_periods" not in prompt  # the tools taskset has `docs` instead
+
+
 def test_prompt_offers_the_seeded_generator():
     prompt = next(iter(QuantResearchTaskset(_config()))).data.prompt
     assert "self.rng" in prompt

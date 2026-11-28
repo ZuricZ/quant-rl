@@ -81,13 +81,13 @@ and `import polars_ds as pds`. Installed: polars \
 else.
 
 ```python
-class Alpha:
+class MyAlpha(Alpha):  # `Alpha` is predefined: subclass it, never define it
     def features(self, df: pl.DataFrame) -> pl.DataFrame:
-        return df                    # default: no new features
+        return df                    # optional; by default no new features
     def fit(self, train: pl.DataFrame) -> None:
-        pass                         # default: nothing to fit
+        pass                         # optional; by default nothing to fit
     def predict(self, df: pl.DataFrame) -> pl.Series | pl.Expr:
-        raise NotImplementedError    # must be overridden
+        ...                          # required
 ```
 
 - `features(df)` gets every row and returns the same rows in the same order \
