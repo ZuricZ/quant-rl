@@ -1,0 +1,8 @@
+# vf-run settings for `scripts/run_models.py --vf-config`: Qwen3.5-35B-A3B
+# with thinking on. OpenRouter has no bf16 provider for it (November 2026):
+# fp8 ones and Alibaba (quantisation not stated). Left out: fp4, and Venice,
+# which caps replies at 16,384 tokens.
+[sampling]
+top_k = 20
+reasoning = { enabled = true }
+provider = { only = ["alibaba", "parasail/fp8", "deepinfra/fp8"] }

@@ -1,0 +1,7 @@
+# vf-run settings for `scripts/run_models.py --vf-config`: top_k 20 for
+# OpenRouter. vf-run's flags pass settings it does not know as text, and
+# OpenRouter refuses top_k "20"; a TOML file keeps it a number. With no
+# reasoning or provider setting, OpenRouter routes each call to any provider
+# and most replies came back without thinking (results/day12).
+[sampling]
+top_k = 20

@@ -1,0 +1,8 @@
+# vf-run settings for `scripts/run_models.py --vf-config`: Qwen3.5-9B with
+# thinking on, on bf16 providers only. Pinning one provider
+# (primeintellect/bf16) hit its shared rate limit at once (results/day12).
+# The flex tier is left out: it may queue calls.
+[sampling]
+top_k = 20
+reasoning = { enabled = true }
+provider = { quantizations = ["bf16"], ignore = ["deepinfra/bf16/flex"] }
